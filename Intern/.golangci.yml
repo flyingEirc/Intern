@@ -16,7 +16,7 @@ formatters:
       sections:
         - standard # Go 标准库，例如 fmt、context、net/http
         - default # 第三方依赖，例如 github.com/xxx/xxx
-        - prefix(new-iot) # 当前项目自己的包，以 new-iot 开头的 import
+        - prefix(github.com/flyingEirc/IotProject) # 当前项目模块
 
 linters:
   default: none # 不启用默认 linter 集合，只运行下面显式指定的检查器
@@ -60,6 +60,13 @@ linters:
     - gocognit # 检查函数的认知复杂度，嵌套和分支越多分数越高
     - cyclop # 检查函数的圈复杂度，即独立执行路径数量是否过多
 
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - gosec # 测试代码不执行安全检查
+          - errcheck # 测试代码允许部分 error 被忽略
+
   settings:
     govet:
       enable-all: true # 启用 govet 提供的全部 analyzer
@@ -88,13 +95,3 @@ linters:
 issues:
   max-issues-per-linter: 50 # 每个 linter 最多报告 50 个问题，避免输出刷屏
   max-same-issues: 5 # 相同类型/相同位置模式的问题最多重复报告 5 次
-
-  # 仅检查相对于 HEAD 新增或修改代码产生的问题
-  # 适合老项目渐进式接入 lint，避免历史问题一次全部爆出来
-  new-from-rev: HEAD
-
-  exclude-rules:
-    - path: "_test\\.go" # 匹配所有 *_test.go 测试文件
-      linters:
-        - gosec # 测试代码不执行安全检查
-        - errcheck # 测试代码允许部分 error 被忽略

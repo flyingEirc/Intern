@@ -1,14 +1,23 @@
 #!/bin/sh
 set -eu
 
-repo_root=$(git rev-parse --show-toplevel)
-cd "$repo_root"
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_root=$(git -C "$project_root" rev-parse --show-toplevel)
+project_prefix=$(git -C "$project_root" rev-parse --show-prefix)
 
-# 暂存区没有 Go 相关改动时直接跳过，避免无谓的全量检查
-if ! git diff --cached --name-only | grep -qE '\.go$|^go\.(mod|sum)$|^\.golangci\.yml$|^Makefile$'; then
-	echo "pre-commit: no Go-related changes staged, skipping checks"
-	exit 0
+# Documentation, policy and test-only commits do not trigger business-code checks.
+source_changes=$(git -C "$project_root" diff --cached --name-only -- '*.go' ':!**/*_test.go')
+if [ -z "$source_changes" ]; then
+    echo "pre-commit: no business Go source staged; skipping build/test/lint"
+    exit 0
 fi
 
-make lint
-make test
+# Verify exactly what will be committed, not unrelated unstaged working-tree code.
+snapshot=$(mktemp -d "${TMPDIR:-/tmp}/intern-staged.XXXXXX")
+trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
+git -C "$repo_root" checkout-index --all --prefix="$snapshot/"
+cd "$snapshot/$project_prefix"
+
+go build ./base/... ./cli/...
+go test -race ./base/... ./cli/...
+golangci-lint run ./base/... ./cli/...
