@@ -12,6 +12,12 @@ if [ -z "$source_changes" ]; then
     exit 0
 fi
 
+classification=$(go run "$project_root/.githooks/source-changes.go" "$project_root")
+if [ "$classification" = "unchanged" ]; then
+    echo "pre-commit: only comments or non-business files changed; skipping build/test/lint"
+    exit 0
+fi
+
 # Verify exactly what will be committed, not unrelated unstaged working-tree code.
 snapshot=$(mktemp -d "${TMPDIR:-/tmp}/intern-staged.XXXXXX")
 trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
