@@ -1,0 +1,10 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "catalog/migrations"
+    queries: "catalog/queries.sql"
+    gen:
+      go:
+        package: "catalogsql"
+        out: "catalog/internal/catalogsql"
+        emit_empty_slices: true
