@@ -1,0 +1,31 @@
+# flags > INTERN_ environment > YAML > defaults
+# Example: INTERN_CONNECTION_USERNAME=root; explicit --compress=false wins over YAML.
+connection:
+  host: 127.0.0.1
+  port: 3306
+  username: backup_user
+  password_env: INTERN_MYSQL_PASSWORD
+  # password: "literal-password" # supported only in a chmod 600 configuration file
+  db: app
+  tls_mode: VERIFY_IDENTITY
+  tls_ca: /secure/mysql-ca.pem
+  # socket: /var/run/mysqld/mysqld.sock
+  # For local Unix sockets use tls_mode: DISABLED.
+backup:
+  directory: /srv/intern/backups
+  state_directory: /srv/intern/state
+  project: default
+  compress: true
+  encrypt: true
+  key_file: /secure/intern.key
+  max_restore_bytes: 107374182400
+schedule:
+  full_at: "02:00"
+  incremental_every: 15m
+  timezone: Asia/Shanghai
+# Restore: reuse a config with TARGET host/socket/username/password/db.
+# Default restore is plan-only. --execute writes to the empty isolated target.
+# Keep source DB name for stored objects; simple ROW tables can use a new DB name.
+# Generate KEK first: intern keygen --key-file /secure/intern.key
+# Directories must be private (700), key/config-with-password files private (600).
+# Preserve catalog.sqlite/state and the independent KEK for disaster recovery.
