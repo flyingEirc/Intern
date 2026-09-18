@@ -1,0 +1,100 @@
+version: "2" # golangci-lint 配置文件版本，v2 使用新的配置结构
+
+run:
+  timeout: 5m # 单次 lint 最长执行时间，超过 5 分钟直接终止
+  tests: true # 是否检查 *_test.go 测试代码
+
+formatters:
+  # 启用的代码格式化器
+  enable:
+    - gci # 自动整理、排序 Go import，并按规则进行分组
+
+  # 格式化器参数
+  settings:
+    gci:
+      # import 分组顺序
+      sections:
+        - standard # Go 标准库，例如 fmt、context、net/http
+        - default # 第三方依赖，例如 github.com/xxx/xxx
+        - prefix(new-iot) # 当前项目自己的包，以 new-iot 开头的 import
+
+linters:
+  default: none # 不启用默认 linter 集合，只运行下面显式指定的检查器
+
+  enable:
+    # =========================
+    # 错误处理
+    # =========================
+    - errcheck # 检查函数返回的 error 是否被忽略
+    - errorlint # 检查 Go error 的正确包装、比较和类型判断方式
+
+    # =========================
+    # 代码质量
+    # =========================
+    - govet # Go 官方静态分析工具，检查 printf、复制锁等潜在问题
+    - staticcheck # 综合静态分析器，检查 bug、错误 API 使用、冗余代码等
+    - unused # 检查未使用的变量、函数、类型、常量等
+    - ineffassign # 检查赋值后从未被使用、马上又被覆盖的变量
+    - wastedassign # 检查没有实际意义、结果被浪费的赋值操作
+
+    # =========================
+    # 代码风格
+    # =========================
+    - godot # 检查注释结尾是否有句号等规范问题
+    - misspell # 检查英文单词拼写错误，例如 recieve -> receive
+    - whitespace # 检查多余空行、无意义换行等空白格式问题
+
+    # =========================
+    # 安全
+    # =========================
+    - gosec # 检查潜在安全问题，例如弱随机数、路径注入、权限问题等
+
+    # =========================
+    # 性能
+    # =========================
+    - prealloc # 检查 slice 是否可以提前分配容量，减少扩容和内存分配
+
+    # =========================
+    # 复杂度
+    # =========================
+    - gocognit # 检查函数的认知复杂度，嵌套和分支越多分数越高
+    - cyclop # 检查函数的圈复杂度，即独立执行路径数量是否过多
+
+  settings:
+    govet:
+      enable-all: true # 启用 govet 提供的全部 analyzer
+      disable:
+        - fieldalignment # 不检查 struct 字段排列造成的内存对齐浪费
+
+    errcheck:
+      check-type-assertions: true # 检查类型断言返回值是否被正确处理，例如 v, ok := x.(T)
+      check-blank: true # 即使 error 被赋给 _，也认为是在故意忽略并报告问题
+
+    errorlint:
+      errorf: true # 检查 fmt.Errorf 是否应该使用 %w 包装原始 error
+      asserts: true # 检查 error 类型断言，建议使用 errors.As
+      comparison: true # 检查 error 直接 == 比较，建议使用 errors.Is
+
+    gosec:
+      excludes:
+        - G115 # 忽略整数类型转换可能溢出的检查，该规则实际项目中容易产生较多误报
+
+    gocognit:
+      min-complexity: 15 # 函数认知复杂度达到 15 及以上时报告问题
+
+    cyclop:
+      max-complexity: 10 # 函数圈复杂度最大允许 10，超过就报告
+
+issues:
+  max-issues-per-linter: 50 # 每个 linter 最多报告 50 个问题，避免输出刷屏
+  max-same-issues: 5 # 相同类型/相同位置模式的问题最多重复报告 5 次
+
+  # 仅检查相对于 HEAD 新增或修改代码产生的问题
+  # 适合老项目渐进式接入 lint，避免历史问题一次全部爆出来
+  new-from-rev: HEAD
+
+  exclude-rules:
+    - path: "_test\\.go" # 匹配所有 *_test.go 测试文件
+      linters:
+        - gosec # 测试代码不执行安全检查
+        - errcheck # 测试代码允许部分 error 被忽略
