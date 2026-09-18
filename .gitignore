@@ -1,0 +1,23 @@
+# --- Go ---
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.cache/
+vendor/
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+
+# --- 项目自定义忽略：文档与 AI 工具配置默认不入库 ---
+*.md
+!README.md
+doc/
+.agent/
+.claude/

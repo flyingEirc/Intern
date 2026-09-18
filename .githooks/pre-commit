@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# 暂存区没有 Go 相关改动时直接跳过，避免无谓的全量检查
+if ! git diff --cached --name-only | grep -qE '\.go$|^go\.(mod|sum)$|^\.golangci\.yml$|^Makefile$'; then
+	echo "pre-commit: no Go-related changes staged, skipping checks"
+	exit 0
+fi
+
+make lint
+make test

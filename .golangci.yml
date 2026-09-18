@@ -1,0 +1,79 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+formatters:
+  # 启用的格式化器
+  enable:
+    - gci # 整理 import 分组
+  # 格式化器参数
+  settings:
+    # gci 参数
+    gci:
+      # import 分组顺序
+      sections:
+        - standard # 标准库
+        - default # 第三方库
+        - prefix(new-iot) # 本项目包
+
+linters:
+  default: none
+  enable:
+    # 错误处理
+    - errcheck
+    - errorlint
+    # 代码质量
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - wastedassign
+    # 风格
+    - godot
+    - misspell
+    - whitespace
+    # 安全
+    - gosec
+    # 性能
+    - prealloc
+    # 复杂度
+    - gocognit
+    - cyclop
+
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # 按需开启
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    gosec:
+      excludes:
+        - G115  # 整型转换误报较多
+
+    gocognit:
+      min-complexity: 15
+
+    cyclop:
+      max-complexity: 10
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 5
+  # 仅对相对于 HEAD 新增/修改的代码报告问题，历史既存问题留待后续专项清理
+  new-from-rev: HEAD
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - gosec
+        - errcheck
