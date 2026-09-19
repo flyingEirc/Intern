@@ -1,6 +1,6 @@
 # Intern 产品需求与整体方案（PRD）
 
-本文件是 Intern 产品范围、技术选型、整体设计与验收要求的统一依据；开发协作与 Issue 追踪规范见 [AGENTS.md](AGENTS.md)。第 1–13 节保留整体方案与原调研边界；本次 CLI 逻辑链的实际实现、使用方式及验证证据见第 14 节，不代表整个产品或所有版本已通过生产验收。
+本文件是 Intern 产品范围、技术选型、整体设计与验收要求的统一依据；开发协作与 Issue 追踪规范见 [AGENTS.md](AGENTS.md)。第 1–13 节保留整体方案与原调研边界；第 14 节记录 CLI 逻辑链的实际实现及验证；第 15 节定义新采纳、尚待实施的真实容器质量门禁。设计、原生进程演练和容器 CI 通过是不同状态，不能互相替代。
 
 ## 项目定位与当前范围
 
@@ -439,7 +439,7 @@ CLI/Web 可在独立分支并行实现协议层，但先约定 base 的任务、
 
 ## 14. CLI 逻辑备份交付（2026-09-19）
 
-追踪：[父 Issue #1](https://github.com/flyingEirc/IotProject/issues/1)；[MySQL 引擎 #2](https://github.com/flyingEirc/IotProject/issues/2)、[制品与元数据 #3](https://github.com/flyingEirc/IotProject/issues/3)、[配置与调度 #4](https://github.com/flyingEirc/IotProject/issues/4)。
+追踪：[父 Issue #1](https://github.com/flyingEirc/IotProject/issues/1)；[MySQL 引擎 #2](https://github.com/flyingEirc/IotProject/issues/2)、[CLI 配置与调度 #3](https://github.com/flyingEirc/IotProject/issues/3)、[制品与元数据 #4](https://github.com/flyingEirc/IotProject/issues/4)。历史部分提交后缀及评论曾将 #3/#4 写反，现以实际 Issue 标题及更正后的正文为准，不改写已提交历史。
 
 ### 14.1 当前实现与决策
 
@@ -525,3 +525,126 @@ chmod 700 /secure /srv/intern/backups /srv/intern/state
 - `.githooks/pre-commit` 对暂存区业务源码分类，在独立暂存区快照运行 build、`go test -race` 和 `golangci-lint`，不依赖未暂存代码。纯文档、普通注释/格式及测试文件单独变更跳过业务检查；Go 编译指令、新增、删除和实际 AST 变化不会被当作普通注释跳过。分类器已用独立 Git fixture 验证。
 - 项目命令：`task check` 运行完整业务检查，`task lint` 单独 lint，`task fmt` 整理 import。本仓库已设置 `core.hooksPath=Intern/.githooks`；新 clone 应按实际项目目录设置该相对路径。
 - 重构后的已提交 CLI 再次在两个隔离 MySQL 9.7.1 实例验证：混合 codec 的全量 + 两次增量、轮转和改库名恢复；四种加密/压缩组合；YAML/环境/flags 优先级与错误密钥拒绝；每日触发分钟及间隔调度。数据行完全一致，两个实例均正常退出，临时密码、密钥和数据目录清理，不接触用户现有实例。
+
+## 15. 真实组件测试框架与质量门禁（设计已定，待实施）
+
+追踪：[真实容器门禁 #5](https://github.com/flyingEirc/IotProject/issues/5)，隶属 #1；实施拆为 #6–#10。本节响应用户的真实组件测试要求，当前交付是设计及 trace，**未添加 Testcontainers 依赖、容器测试或 CI workflow，也未声称这些门禁已经运行通过**。
+
+### 15.1 原则与已核实条件
+
+- 质量核心是“真实候选程序 + 真实依赖 + 恢复结果”，不是 mock 调用次数、容器 running、端口可连、文件非空或 exit 0。
+- 保留现有快速行为测试：Tink/zstd、清单与 SQL 范围验证、真实 SQLite/文件系统及状态机；不把“运行在主机”误称为 mock。第 14 节已有真实原生 MySQL 进程演练，缺口是可复现的容器矩阵和持续门禁。
+- 测试编排确定采用 Go `testing` + `testcontainers-go`，优先官方数据库模块，不再并建一套 Compose 生命周期。2026-09-19 核实稳定发布 v0.44.0、MIT、根模块和 MySQL 模块要求 Go 1.25.0；作为实施锁定候选，满足本项目 Go 版本下限并不证明实际兼容已测。[T1][T2]
+- 数据库容器、CLI、官方客户端工具、证书/权限和制品格式均在证据范围内。不能只把 DB 容器化而仍依赖开发机偶然安装的客户端版本。
+- 容器不是生产等价证明：Linux 容器不能替代 macOS 原生程序验收，也不替代托管数据库、特定文件系统、HA 拓扑、生产数据规模或持久性/性能实验。
+
+### 15.2 分层门禁
+
+| 层级 | 实际执行对象 | 判断依据 | 执行位置 |
+| --- | --- | --- | --- |
+| 快速行为层 | 已实现纯逻辑、真实加密库、SQLite/本地文件 | 边界、不变量、状态转移；`-race`；golangci | 现有本地业务提交检查及 CI |
+| 真实组件/CLI 集成层 | 当前提交的 intern + 官方工具 + 独立源/目标 DB 容器 | 全量/增量产物真正恢复，数据与对象行为匹配预定恢复点 | 相关 PR/合并必需 |
+| 候选制品层 | 将要交付的二进制，若发布镜像则为该最终镜像 | SHA/digest 与被测对象一致；配置、信号、路径、权限与运行入口正确 | 发布必需 |
+| 兼容/故障层 | 已声明版本/平台、TLS/权限和受控故障矩阵 | 支持矩阵逐项有证据，失败不错误发布/写目标 | 基线安全场景纳入 PR，扩展矩阵 nightly/发布 |
+
+本地提交仍按 `AGENTS.md`：业务改动运行 build/test/golangci，纯文档/普通注释不触发。不把每次 commit 都变成全量拉镜像；**合并/发布不能仅凭本地快测放行**。测试、fixture、依赖、工具链、镜像和 CI 配置变化同样会影响门禁，CI 必须覆盖，不能套用“非业务 Go 源码”的本地跳过规则。
+
+### 15.3 测试拓扑与实现边界
+
+```text
+Go testing / Testcontainers 编排器（CI runner）
+  ├─ source DB 容器 ──独立数据卷/实例身份
+  ├─ target DB 容器 ──独立数据卷/实例身份
+  ├─ intern CLI runner ──真实候选程序 + 匹配版本官方客户端
+  │    ├─ /work/backups：备份卷
+  │    ├─ /work/state：独立元数据卷
+  │    └─ /run/secrets：独立密钥、配置、证书
+  └─ 独立 SQL/HTTP oracle：观测数据库，核对 fixture 定义的期望状态
+```
+
+- harness 放入现有 `cli/integration`，共享测试辅助放 `cli/internal/testenv`，静态数据放集成目录的 `testdata`；均是**待实现目录**，本次不预造空 Go 模块或空适配器。Testcontainers 不得进入生产代码 import。测试依赖仍可能改变 Go MVS 选版，依赖变动需要实际构建与恢复验收。
+- 容器测试文件使用 `//go:build integration`，与默认快测分离。计划新增显式 `task test:containers`，对应 `go test -tags=integration -count=1 -shuffle=on -timeout=15m ./cli/integration/...`；该命令目前尚不存在。具体 timeout 根据实测固定，禁止无限等待/重试。
+- 候选 CLI 从当前源码 SHA 构建一次，记录 SHA-256；使用与 runner 平台匹配的 Linux 二进制。允许测试 runner 把真实 CLI 放进固定工具镜像，不允许用脚本模拟 CLI 或 dump/binlog。**测试工具镜像不等于正式发布镜像**；正式镜像发布前还须对其最终 digest 运行相同场景。
+- 现有 `Dockerfile` 仍是 `golang:1.26-alpine`、根 `go.mod`、`./cmd`、`new-iot` 旧模板，尚不满足当前工作区和官方工具运行条件；#7 负责修正和划清工具分发许可边界，不能将它标为已验证镜像。
+- runner 与数据库通过本次用例私有网络及 alias 通信；宿主 oracle 使用运行时 `Host` + `MappedPort`。不固定宿主 3306/5432/8086，也不假设 `localhost` 或 host networking 跨平台可用。[T3]
+- 备份/state/secrets 分别管理，保留目录 0700/文件0600和真实运行 UID；跨 CLI 调用复用本场景卷、保持相同容器内绝对路径，不能绕开当前 catalog 绝对路径约束。优先文件复制 API 和 named volumes，不默认绑定宿主目录，避免远程 Docker 的路径错误。[T4]
+- 每个可变场景独立源/目标实例、凭据、卷和项目标识；不能只换 schema 共享实例 GTID。可以缓存镜像/构建层，不能复用前一个用例的脏数据库、清除 GTID 后假装新目标。默认串行，资源验收后才启用有界并发。
+- fixture 管理账号负责建库/授权/故障控制；产品命令使用符合场景的备份/恢复账号。root-only 或关闭认证的成功，不代表权限/TLS能力通过。MySQL 模块示例的 `tls=skip-verify` 不作为本项目安全验收配置。
+
+### 15.4 生命周期与执行完整性
+
+1. **Preflight**：容器 runtime 健康、权限、平台、空间、镜像可获取、官方工具实际存在且版本匹配；记录测试请求矩阵。镜像不可用不能静默换版本/平台，也不能回落主机 mock。
+2. **启动与就绪**：使用模块等待策略，再做实际 SQL/HTTP 就绪及能力探测；确认 MySQL binlog、ROW、GTID、source/target UUID、登录权限。端口打开和初始化阶段日志均不足；不用固定 `sleep` 假定就绪。[T5]
+3. **立即登记清理**：按 v0.44.0 API，在模块 `Run` 返回后立即 `CleanupContainer`，覆盖返回非空部分实例同时报错的情况。网络/卷也登记所有权；诊断收集注册在清理之后，利用 LIFO 在资源销毁前完成。[T6]
+4. **有界操作**：启动、CLI命令、观测等待、整场景分别限时；测试取消后，清理使用独立有界 context。超时必须保存失败阶段和已执行 case，不当作业务预期错误。
+5. **清理与崩溃兜底**：先停止 CLI/子进程、关闭观察连接，再删除本会话容器/卷/网络。保留 Ryuk；即使进程被 kill，也由 Ryuk/临时 CI runner 回收。不得全局 prune；无法清理也属于门禁失败。[T6]
+6. **禁止假绿**：必需入口不调用 `SkipIfProviderIsNotHealthy`；官方将此 helper 定位为 Docker 非必需场景。无 Docker、启动失败、必需用例 skip、测试选择错误导致零 case、矩阵结果缺失、取消均不能通过 required 汇总。[T6]
+
+### 15.5 MySQL 首批场景与断言
+
+先固化 MySQL 9.7.1 的容器回归，再对一个明确的 MySQL8.4补丁版本执行准入；每项都需 server/client 精确版本、镜像 digest、平台和能力配置。未解析/未拉取的 digest 不编造；没有执行证据的组合保持候选，不进入“已支持”表。
+
+| 场景组 | 操作与必须观察的结果 |
+| --- | --- |
+| 全量与对象 | 固定 fixture 含空/非空库、NULL、Unicode、二进制、精确数值、索引约束/自增、视图/过程/触发器/事件、charset/collation；核对值、元数据与实际对象行为，不只数表/数行 |
+| 连续增量 | S0→全量F→已提交S1→I1→轮转/已提交S2→I2→源继续到S3；恢复 I2 必须是 S2，不是“当前源”的 S3；较早恢复点同理。停掉源后仍能恢复 |
+| codec/配置 | 四种压缩加密组合及混合链；YAML/env/flags/显式false/密钥位置；计划-only不写目标。无需对每个边界做无意义笛卡尔积 |
+| 目标与安全 | 源UUID、非空目标、已有来源GTID、模式/版本不匹配、错误密钥、篡改/截断/缺父、大小越界；先证明前置状态成立，再断言拒绝且目标前后数据/对象不变 |
+| 来源/日志失效 | purge、实例世代改变、默认库过滤DDL、不安全格式；不得跳过缺口推进水位；重建基线后准确呈现旧/新链断点 |
+| 真实故障 | 容器停机/重启、网络中断、CLI SIGTERM/SIGKILL、工具失败、受控磁盘满/权限故障；基于可观察屏障注入，不靠随机sleep；验证未错误发布、锁释放、重启回收及无遗留子进程 |
+| 运行契约 | 常驻调度跨日触发/间隔、长任务不重叠、停进程后不再备份；TLS VERIFY_IDENTITY正确和错误证书、最低所需权限成功和缺权限失败 |
+
+oracle 从 fixture 预定义事务阶段生成期望状态，并通过独立 SQL/HTTP 查询目标；不调用被测恢复代码生成“期望”。schema/数据/对象行为分别比较，避免只比 dump 字节或 hash。负向测试必须先到达预期故障点；“setup 连不上库”不能冒充“错误 KEK 被正确拒绝”。错误判断结合退出码、受控前置条件和公开状态，不钉死 stderr 文案。
+
+`-race` 对 Go harness 生效，不自动证明子进程 CLI 没有竞态；现有共享业务 `-race` 测试继续保留。精确调度算法用快速时钟测试，真实进程补验一次实际触发和终止，不把所有时间算法测试都变成等待一天的容器用例。
+
+### 15.6 多数据库扩展契约
+
+共享的是生命周期、场景编排、制品/证据和资源预算，不是强行统一 SQL、账号模型或增量恢复协议。首个实现保留 MySQL 具体 fixture；出现第二个实际引擎后，才提取被两者真正复用的测试接口。
+
+| 引擎 | fixture 与恢复能力边界 | 特有 oracle / 准入 |
+| --- | --- | --- |
+| MySQL | 独立 UUID/GTID、`mysqldump` + binlog；PXB 属于独立 Linux 物理链 | 行/对象/事务检查点，缺口/DDL过滤拒绝；不能替代物理增量验收 |
+| PostgreSQL（未来） | 官方 postgres 模块可建实例；`pg_dump/pg_restore` 是逻辑路径；物理基线 + WAL 才是连续恢复路径，禁止把 pg_dump 接 WAL 回放 [T7] | schema/search_path、sequence、role/extension、事务与 timeline/LSN 等按声明能力分别验收 |
+| InfluxDB（未来） | 官方模块明确支持 v1/v2，不外推 v3；分别处理 database/retention policy 与 org/bucket/token；版本/edition 的原生备份恢复方案先定再测 [T8] | 时间戳精度、series/tag/field 类型、时间窗、retention与认证域；不能强塞成关系库 username/password/db |
+| 其他数据库 | 先确认真实发行物、许可、协议、官方恢复路径和部署条件；成熟模块缺失才用 GenericContainer | 至少一个真实完整备份恢复闭环，再声明受支持能力 |
+
+每个引擎/版本的测试描述需包含 `engine/edition/version/platform`、server/tool image digests、实例身份、脱敏端点/secret引用、能力及不支持原因、seed/mutate/observe 的具体实现。能力可声明 logical-full、log-archive、physical-full、physical-incremental、checkpoint-restore、time-restore，不能用一个 `incremental=true` 混淆。
+
+PostgreSQL/InfluxDB 当前只是测试架构扩展方向，不因此在产品 CLI、支持矩阵或 CI 中显示绿色。启动对应容器仅证明 fixture 能运行，不证明 Intern 已支持备份该引擎；不支持项不得通过 `t.Skip` 伪装已验收。
+
+### 15.7 CI、制品与可追踪证据
+
+- workflow 放在**实际 Git 根**的 `.github/workflows/`，任务工作目录为 `Intern`；当前 `Intern/.github` 为空且不是 GitHub 自动识别的工作流根。现阶段没有现成容器 workflow，#10 落地后才可声称启用。
+- PR 至少要求 `quality-fast` 与 `container-mysql`，由始终执行的汇总检查判定；代码、依赖、测试/fixture、镜像、工具链、CI文件变化都参与影响分析。纯文档输出明确 `not-required`，不是“容器测试已通过”。
+- 必需场景使用稳定 case ID；汇总核对预期集合、版本矩阵结果和 skip=0，缺结果/零case/取消不通过。nightly 扩展压力/故障/平台；release 重跑所有声明支持的组合及真实候选制品。一次重跑不能删除原失败证据，不用无限重试把红色洗绿。
+- GitHub 的 required status 本身允许 `skipped`/`neutral`，因此不能只勾选某个可能被条件跳过的集成 job。必须有固定且唯一名称、`if: always()` 的汇总 job：相关改动时严格检查依赖结果为 success、必需 case 全部执行；失败/跳过/取消不能通过。纯文档须走明确的范围判定分支。[T9]
+- 初始主 CI 为 Linux amd64；arm64 在有真实镜像和 runner 证据后加入。仿真结果必须标明 emulated，不能冒充原生平台认证。文档示例版本不是自动升级策略，镜像/工具变更单独提PR并重跑门禁。
+- 报告至少含：源码 SHA、CLI SHA256、发布镜像 digest（若适用）、TC/Go/runtime版本、server/client版本、镜像 digest/平台、场景ID/种子/配置profile、来源/目标身份、基线/增量/恢复坐标、断言结果、清理结果、耗时、CI run URL。记录失败、跳过和未执行，不只保存 PASS。
+- 只上传白名单脱敏诊断；不上传明文密码、KEK、证书私钥、完整 DSN、完整 SQL dump/raw binlog、带 Env secrets 的容器 inspect 或整个临时目录。先采集诊断再清理，不为保留失败现场长期留运行数据库。
+- 使用临时隔离 runner、只读仓库权限和有限资源；不通过 `pull_request_target` 执行不可信 PR，不让 fork 代码使用共享特权主机，不向产品容器挂 Docker socket。只有编排层访问容器 API。
+- required check 和分支保护是实际仓库配置，不是写了 workflow 就算完成；权限不足或缺 runner 必须在 #10 记录阻塞，不能豁免容器门禁。本次不擅自修改分支保护或启动容器服务。
+
+### 15.8 实施顺序与结项条件
+
+| Issue | 独立交付 | 依赖/关闭条件 |
+| --- | --- | --- |
+| [#6](https://github.com/flyingEirc/IotProject/issues/6) | TC 生命周期、隔离、镜像锁定 | 并行/重复/失败场景无泄漏，runtime不足明确失败 |
+| [#7](https://github.com/flyingEirc/IotProject/issues/7) | 真实候选CLI及官方工具runner，校正Dockerfile | 不依赖宿主工具，版本/摘要可追踪；发布镜像按实际制品另验 |
+| [#8](https://github.com/flyingEirc/IotProject/issues/8) | MySQL语义矩阵 | 依赖#6/#7，恢复点数据及对象行为断言通过 |
+| [#9](https://github.com/flyingEirc/IotProject/issues/9) | 真实故障与安全拒绝 | 依赖成功基线；故障点可重复且不产生假成功 |
+| [#10](https://github.com/flyingEirc/IotProject/issues/10) | required CI与证据 | 可并行编排，放行依赖#6–#9；提供正常通过和故意失败的实际CI证据 |
+
+#2/#3/#4 按原实现范围及已有证据结项；#1 因新增门禁 #5 保持 OPEN。#5–#10 当前均为待实施，不以此次设计或已有原生进程实验代替。后续每个小功能仍独立短提交，实际实现时执行相应 build/test/golangci 和真实容器场景。
+
+### 15.9 依据
+
+- [T1] [Testcontainers Go v0.44.0 稳定发布](https://github.com/testcontainers/testcontainers-go/releases/tag/v0.44.0)、[项目与 MIT 许可](https://github.com/testcontainers/testcontainers-go)。
+- [T2] [固定版本 go.mod](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/go.mod)、[MySQL module](https://golang.testcontainers.org/modules/mysql/)。
+- [T3] [网络与动态端口](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/docs/features/networking.md)。
+- [T4] [复制文件与远程 volume](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/docs/features/files_and_mounts.md)。
+- [T5] [SQL readiness](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/docs/features/wait/sql.md)。
+- [T6] [Cleanup/Skip helper 源码及适用条件](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/testing.go)、[Ryuk与清理](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/docs/features/garbage_collector.md)。
+- [T7] [PostgreSQL模块](https://golang.testcontainers.org/modules/postgres/)、[PostgreSQL 18 连续归档与物理基线](https://www.postgresql.org/docs/18/continuous-archiving.html)。
+- [T8] [InfluxDB模块 v1/v2 范围](https://golang.testcontainers.org/modules/influxdb/)、[固定版本模块源码](https://github.com/testcontainers/testcontainers-go/blob/v0.44.0/modules/influxdb/influxdb.go)。
+- [T9] [GitHub required status checks 的成功/跳过/中立语义](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)。
