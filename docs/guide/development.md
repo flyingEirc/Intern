@@ -2,7 +2,7 @@
 
 开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)；Web 子任务另读 [Web 备份控制面与流式管道](../roadmap/Web备份控制面与流式管道-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
 
-当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），按阶段 B–E 的子 Issue 实施，不得静默更换。
+当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。前端暂缓，当前按阶段 B–E 的子 Issue 先实施后端；对前端暴露的接口以 OpenAPI 契约为准，接口变更须同步契约与测试（[#18](https://github.com/flyingEirc/Intern/issues/18)）。
 
 ## 目录与共享接口
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端；前端为 React + TypeScript + Vite + Ant Design + TanStack Query，当前目录占位，工程由阶段 B 的 W1 建立。 |
+| `app/web/` | 当前主线 Web 产品和后端；当前目录占位，后端工程与 OpenAPI 契约由阶段 B 的 W1 建立；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
