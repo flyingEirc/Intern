@@ -23,7 +23,7 @@
 - 不静默替换已定技术栈。Cobra、Gin、sqlc、goose、slog、Viper、jsonv2 等边界以路线为准；sqlc 不是运行时 ORM，Cobra 不替代 HTTP 框架。
 - 推荐、暂定、待确认、未实测不代表采纳、实现或验证；不得借调研扩大支持范围。选型、方案或验收标准变化先在 Issue 明确决策，再同步路线。
 - 参考实现不能成为本项目的隐含约束。复用代码遵守许可、版权与声明；Databasus 等参考路径以项目根和实际布局为准，不能把参考方案直接当作 Intern 已支持能力。
-- SQL 变更维护源查询和生成代码，必要时运行 `task generate`；模式变更通过版本化迁移，不手改生成结果规避源定义。
+- SQL 变更维护源查询和生成代码，必要时运行 `mise run generate`；模式变更通过版本化迁移，不手改生成结果规避源定义。
 - 官方数据库工具使用明确的可执行文件与参数调用，维护进程生命周期、取消和错误传播；不自研 redo/binlog 协议或拼接 shell 来执行用户参数。
 
 ## 安全与恢复约束
@@ -42,15 +42,24 @@
 
 ## 常用开发入口
 
-以下命令在 Intern 项目根目录执行；Go 版本遵循 `go.work`，Task 入口以 `Taskfile.yml` 为准。
+工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`，sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [#14](https://github.com/flyingEirc/IotProject/issues/14)。
+
+以下命令在 Intern 项目目录执行；在其子目录运行时，mise 仍以配置所在的 Intern 目录执行任务。也可从其他目录使用 `mise -C /path/to/Intern run <任务>`。
 
 | 目的 | 命令 |
 | --- | --- |
-| 构建 CLI 到 `bin/intern` | `task build` |
-| 查看开发入口帮助 | `task run -- --help` |
-| 快速回归 | `task test` |
-| 业务提交完整本地检查 | `task check`（build、test-race、golangci-lint） |
-| 单独 lint / 格式整理 | `task lint` / `task fmt` |
-| 重新生成 sqlc | `task generate` |
+| 构建 CLI 到 `bin/intern` | `mise run build` |
+| 查看开发入口帮助 | `mise run run --help` |
+| 快速回归 | `mise run test` |
+| 业务提交完整本地检查 | `mise run check`（build、test-race、golangci-lint） |
+| 单独 lint / 格式整理 | `mise run lint` / `mise run fmt` |
+| 重新生成 sqlc | `mise run generate` |
+| 生产与集成代码 lint | `mise run lint:integration` |
+| 所有锁定 profile 的真实容器门禁 | `mise run test:containers` |
+| 单个 profile 的真实容器门禁 | `mise run test:container --profile mysql-9.7.1` |
+
+`run` 与两个容器入口直接转发参数到实际程序，例如 `mise run run backup full --config /secure/source.yaml`。单 profile 默认 `mysql-9.7.1`，可用 `--profile` 或 `PROFILE=... mise run test:container` 指定；CLI flag 优先。帮助命令不会运行真实恢复场景，门禁是否通过仍须提供实际测试证据。
+
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 编排如需适配 mise，应在对应 CI Issue 记录并按其门禁验收，当前未提交的 CI 不因本次迁移而视为已交付。
 
 实际 Git 根当前位于 Intern 的上一级；GitHub workflow 须位于真实 Git 根的 `.github/workflows/`，工作目录设置为 Intern。不要在 `Intern/.github/` 建立无法被识别的门禁副本。本地 hook 当前配置 `core.hooksPath=Intern/.githooks`；新 clone 或布局变化后应按实际 Git 根与项目路径设置。

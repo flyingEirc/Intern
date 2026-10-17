@@ -1,0 +1,62 @@
+[tools]
+go = "1.27.0"
+golangci-lint = "2.13.2"
+
+[env]
+GOTOOLCHAIN = "local"
+
+[tasks.build]
+description = "Build the Intern CLI into bin/intern"
+run = "go build -o bin/intern ./cli"
+
+[tasks.run]
+description = "Run the CLI (mise run run --help)"
+raw_args = true
+run = '''
+#!/usr/bin/env sh
+exec go run ./cli "$@"
+'''
+
+[tasks.test]
+description = "Run shared and CLI regression tests"
+run = "go test ./base/... ./cli/..."
+
+[tasks."test:containers"]
+description = "Run and verify every locked real-container profile"
+raw_args = true
+run = '''
+#!/usr/bin/env sh
+exec go run ./cli/cmd/quality-gate all "$@"
+'''
+
+[tasks."test:container"]
+description = "Run and verify one real-container profile (default: mysql-9.7.1)"
+raw_args = true
+run = '''
+#!/usr/bin/env sh
+exec go run ./cli/cmd/quality-gate run --profile "${PROFILE:-mysql-9.7.1}" "$@"
+'''
+
+[tasks."lint:integration"]
+description = "Lint production and integration code with the same rules"
+run = "golangci-lint run --build-tags=integration ./base/... ./cli/..."
+
+[tasks.lint]
+description = "Run the configured golangci-lint checks"
+run = "golangci-lint run ./base/... ./cli/..."
+
+[tasks.fmt]
+description = "Format Go imports with the project configuration"
+run = "golangci-lint fmt ./base/... ./cli/..."
+
+[tasks.check]
+description = "Build, test with race detection, then lint; stop on any failure"
+run = [
+    "go build ./base/... ./cli/...",
+    "go test -race ./base/... ./cli/...",
+    { task = "lint" },
+]
+
+[tasks.generate]
+description = "Regenerate SQLite bindings with pinned sqlc v1.30.0"
+run = "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f base/sqlc.yaml"

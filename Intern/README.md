@@ -19,12 +19,16 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 ## 从源码开始
 
-准备 Go（版本以 `go.work` 为准，当前为 `1.27.0`）、Task，以及与源/目标 MySQL 匹配的官方 `mysql`、`mysqldump`、`mysqlbinlog`。工具准入不等于该版本已完成恢复验证。源库需要 binlog、ROW 格式和对应备份/日志读取/轮转权限；当前已记录的恢复验证使用 GTID ON。
+准备 mise，以及与源/目标 MySQL 匹配的官方 `mysql`、`mysqldump`、`mysqlbinlog`。工具准入不等于该版本已完成恢复验证。源库需要 binlog、ROW 格式和对应备份/日志读取/轮转权限；当前已记录的恢复验证使用 GTID ON。
+
+Go `1.27.0`、golangci-lint `2.13.2` 和开发任务统一声明在 [mise.toml](mise.toml) 中，Go 版本与 `go.work` 保持一致。首次使用时阅读配置后信任并安装工具。
 
 在本项目目录 `Intern/` 执行：
 
 ```sh
-task build
+mise trust
+mise install
+mise run build
 ./bin/intern --help
 ```
 

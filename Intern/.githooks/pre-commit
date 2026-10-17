@@ -12,7 +12,12 @@ if [ -z "$source_changes" ]; then
     exit 0
 fi
 
-classification=$(go run "$project_root/.githooks/source-changes.go" "$project_root")
+if ! command -v mise >/dev/null 2>&1; then
+    echo "pre-commit: mise is required; install it and run mise install in Intern" >&2
+    exit 1
+fi
+
+classification=$(mise -C "$project_root" exec -- go run "$project_root/.githooks/source-changes.go" "$project_root")
 if [ "$classification" = "unchanged" ]; then
     echo "pre-commit: only comments or non-business files changed; skipping build/test/lint"
     exit 0
@@ -24,6 +29,5 @@ trap 'rm -rf "$snapshot"' EXIT HUP INT TERM
 git -C "$repo_root" checkout-index --all --prefix="$snapshot/"
 cd "$snapshot/$project_prefix"
 
-go build ./base/... ./cli/...
-go test -race ./base/... ./cli/...
-golangci-lint run ./base/... ./cli/...
+# Trust only this staged config for this invocation, including in a fresh temp path.
+MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:+$MISE_TRUSTED_CONFIG_PATHS:}$PWD/mise.toml" mise run check
