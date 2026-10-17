@@ -63,6 +63,6 @@
 
 `run` 与两个容器入口直接转发参数到实际程序，例如 `mise run run backup full --config /secure/source.yaml`。单 profile 默认 `mysql-9.7.1`，可用 `--profile` 或 `PROFILE=... mise run test:container` 指定；CLI flag 优先。帮助命令不会运行真实恢复场景，门禁是否通过仍须提供实际测试证据。
 
-`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 编排如需适配 mise，应在对应 CI Issue 记录并按其门禁验收，当前未提交的 CI 不因本次迁移而视为已交付。
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则，工作流位于实际 Git 根的 `.github/workflows/quality.yml`；实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或分支保护已通过验收。
 
 实际 Git 根当前位于 Intern 的上一级；GitHub workflow 须位于真实 Git 根的 `.github/workflows/`，工作目录设置为 Intern。不要在 `Intern/.github/` 建立无法被识别的门禁副本。本地 hook 当前配置 `core.hooksPath=Intern/.githooks`；新 clone 或布局变化后应按实际 Git 根与项目路径设置。

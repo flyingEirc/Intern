@@ -1,6 +1,6 @@
 # Issue 跟踪规范
 
-项目开发追踪以 [当前 GitHub 仓库的 Issues](https://github.com/flyingEirc/IotProject/issues) 为主。新增功能、修改功能、问题修复和方案调整都必须关联对应 Issue，持续维护分析、执行进展和验收结果。本地任务清单、调研笔记和 PR 作为辅助材料，链接回 Issue，不替代主要记录。
+项目开发追踪以 [当前 GitHub 仓库的 Issues](https://github.com/flyingEirc/Intern/issues) 为主。新增功能、修改功能、问题修复和方案调整都必须关联对应 Issue，持续维护分析、执行进展和验收结果。本地任务清单、调研笔记和 PR 作为辅助材料，链接回 Issue，不替代主要记录。
 
 ## 必须包含的五部分
 
@@ -33,7 +33,7 @@
 
 在 GitHub 新建 Issue 时选择“功能新增、修改或问题修复”，即可带入下方五段正文。模板文件位于**实际 Git 根目录**的 [.github/ISSUE_TEMPLATE/change.md](../../../.github/ISSUE_TEMPLATE/change.md)，对应本项目目录的 `../.github/ISSUE_TEMPLATE/change.md`。
 
-模板正文与本页“正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支 `main` 后才会在 GitHub 新建界面出现，本地新增或仅推送其他分支不代表已生效。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
+模板正文与本页“正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `cli/container-quality-gate`）后才会在 GitHub 新建界面出现，本地新增或仅推送其他分支不代表已生效。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
 
 ## 正文模板
 
