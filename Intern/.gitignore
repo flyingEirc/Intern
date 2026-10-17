@@ -19,7 +19,9 @@ vendor/
 *.md
 !README.md
 !AGENTS.md
+!CLAUDE.md
 !prd.md
+!docs/**/*.md
 doc/
 .agent/
 .claude/
