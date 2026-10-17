@@ -1,0 +1,26 @@
+Intern real-container verification runtime
+
+The runtime derives from the official docker.io/library/mysql image locked in
+app/cli/internal/qualitygate/contract.json. MySQL Community Server and its client
+utilities are Oracle software distributed under GNU GPL version 2 and applicable
+additional licenses. Upstream notices in the base image are retained. The
+unmodified mysqlbinlog executable is extracted from the official, versioned
+mysql-community-client RPM; its LICENSE and README are retained under
+/usr/share/licenses/intern/mysql-community-client/.
+
+Official binary/source distribution and license information:
+https://dev.mysql.com/downloads/mysql/
+https://downloads.mysql.com/archives/community/
+https://github.com/mysql/mysql-server
+https://github.com/docker-library/mysql
+
+The exact binary RPM URLs/checksums and base image digests are recorded in
+app/cli/internal/qualitygate/contract.json. The cpio extractor is used only in a
+build stage, not added to the final image by this Dockerfile.
+
+This repository's workflow builds and exercises a private test candidate; it
+neither publishes this image nor represents a completed redistributor source
+code offer. Before external distribution, provide the corresponding source or
+other GPL-compliant source provision, and all required third-party notices for
+the chosen exact versions. A link alone is not claimed to satisfy every
+redistribution obligation. See docs/roadmap/数据库备份与恢复-2026-10-17.md, sections 10 and 15.

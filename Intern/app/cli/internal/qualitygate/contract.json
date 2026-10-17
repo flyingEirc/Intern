@@ -1,0 +1,44 @@
+{
+  "format_version": 1,
+  "testcontainers_version": "v0.44.0",
+  "builder_image": "golang:1.27.0@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146",
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "profiles": [
+    {
+      "id":"mysql-9.7.1","version":"9.7.1","image":"mysql:9.7.1@sha256:cbade841779f1661300e705721f9d2ff159865cc7a8a291affbff43ac6ec7f1d",
+      "client_packages": {
+        "arm64":{"url":"https://repo.mysql.com/yum/mysql-9.7-community/el/9/aarch64/mysql-community-client-9.7.1-1.el9.aarch64.rpm","sha256":"46c8faaad2aad31fdcb8dfbc0f938a2a6b71db400a69291978ff1250e86ed6e5"},
+        "amd64":{"url":"https://repo.mysql.com/yum/mysql-9.7-community/el/9/x86_64/mysql-community-client-9.7.1-1.el9.x86_64.rpm","sha256":"6ca7ad601b9d32e9c8bfba5b107f14029e5293c3e3e32bc159979063e2867a8f"}
+      }
+    },
+    {
+      "id":"mysql-8.4.11","version":"8.4.11","image":"mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a",
+      "client_packages": {
+        "arm64":{"url":"https://repo.mysql.com/yum/mysql-8.4-community/el/9/aarch64/mysql-community-client-8.4.11-1.el9.aarch64.rpm","sha256":"cfa858fe0325311ca7c54644ec1d839498fc2ad2205dbe9ecaecfe113bf83744"},
+        "amd64":{"url":"https://repo.mysql.com/yum/mysql-8.4-community/el/9/x86_64/mysql-community-client-8.4.11-1.el9.x86_64.rpm","sha256":"2f1e8317c557363dd1554b29a9f6d69403802dc623fe72d9995f20f542771bb1"}
+      }
+    }
+  ],
+  "cases": [
+    "full_objects", "empty_database", "codec_matrix", "checkpoint_chain",
+    "recovery_guards", "source_discontinuity", "permissions_tls",
+    "interruptions", "storage_failures", "version_refusal", "scope_rejections",
+    "scheduler", "lifecycle", "configuration"
+  ],
+  "assertions": {
+    "full_objects": ["stored-object-role-missing-super","baseline-rows","typed-values","negative-decimal-empty","view-behavior","procedure-behavior","disabled-event","database-collation","trigger-and-auto-increment","foreign-key-enforced","source-unchanged"],
+    "empty_database": ["plan-only-no-schema","empty-restored"],
+    "codec_matrix": ["codec-plain","codec-encrypted","codec-compressed","codec-both"],
+    "checkpoint_chain": ["parent-chain","source-past-checkpoint","plan-does-not-write","restored-S2-not-S3","restored-S1"],
+    "recovery_guards": ["reject-wrong_key","reject-oversized","reject-tampered","reject-missing","reject-escape","source-uuid","source-empty-target-preserved","source-guard-no-damage","nonempty-target","nonempty-preserved","reject-duplicate"],
+    "source_discontinuity": ["purged-source","purge-not-published","reset-gtid","reset-not-published","new-source-identity","identity-not-joined"],
+    "permissions_tls": ["wrong-tls-hostname","wrong-tls-ca","tls-required","missing-snapshot-privilege","missing-log-privilege","permission-errors-not-published","scoped-restore-role"],
+    "interruptions": ["stopped-database","stop-not-published","disconnected-database","network-not-published","interrupted-dump-not-published-TERM","restart-after-TERM","interrupted-dump-not-published-KILL","restart-after-KILL"],
+    "storage_failures": ["disk-full","disk-full-not-published","unwritable-backup-directory","permission-failure-not-published","storage-recovered"],
+    "version_refusal": ["real-client-server-version-mismatch","wrong-version-not-published"],
+    "scope_rejections": ["unsafe-default-schema-ddl","unsafe-ddl-not-published","new-baseline-contains-ddl","nontransactional-table","unsupported-engine-not-published","gtid-mode-mismatch","mode-mismatch-no-target","valid-chain-precondition"],
+    "scheduler": ["scheduler-directory-lock","daily-interval-and-stop","rebaseline-recovers-ddl"],
+    "lifecycle": ["database-restart-persists-data","restart-keeps-identity","independent-instances","invalid-initialization-rejected","real-database-startup-failed"],
+    "configuration": ["env-secret-overrides-yaml","flag-overrides-env","public-password-config","only-valid-configurations-published","explicit-false-codecs","unencrypted-restores-without-key"]
+  }
+}

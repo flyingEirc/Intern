@@ -1,0 +1,14 @@
+.git
+.agents
+.claude
+.githooks
+.github
+bin
+.cache
+**/.env
+**/.env.*
+**/*.key
+**/secrets
+**/reports
+**/node_modules
+**/.DS_Store
