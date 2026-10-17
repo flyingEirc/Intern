@@ -5,7 +5,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 ## 提交规则
 
 - 每完成一个独立小功能或小业务就检查、提交一次；一个提交只解决一个明确问题，包含相关实现与必要测试，不积攒多个业务后大提交。
-- message 用一句简短概括，沿用 `feat:`、`fix:`、`docs:`、`chore:` 等现有前缀。关联 Issue 时同一行附 `(#N)`，例如 `docs: 整理文档阅读索引 (#11)`，不堆叠长说明。
+- message 用一句简短概括，沿用 `feat:`、`fix:`、`docs:`、`chore:` 等现有前缀。关联 Issue 时同一行附 `(#N)`，`#N` 指当前仓库，例如 `docs: 统一路线文档与 Issue 追踪 (#16)`，不堆叠长说明。
 - 提交前检查工作区，按明确路径暂存本功能文件并检查暂存差异；不使用 `git add .` 混入他人或无关改动。
 - 业务逻辑提交前必须完成 build、test、项目配置的 `golangci-lint`；不能以 `go vet` 替代 lint，不能降低规则或跳过失败检查。检查范围和命令见 [quality.md](../guide/quality.md)。
 - 纯文档、注释和提交规范等不涉及业务逻辑的变更不运行 build/test/lint，检查链接、内容、差异与版本管理即可。CI 对测试、fixture、依赖、镜像和 workflow 变更的覆盖要求仍然有效。
@@ -31,7 +31,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 
 默认 PR 模板位于**实际 Git 根目录**的 [.github/pull_request_template.md](../../.github/pull_request_template.md)，对应本项目目录的 `.github/pull_request_template.md`；GitHub 新建 PR 时自动带入下方“内容 / 验收”正文。
 
-模板正文与本页“PR 正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `cli/container-quality-gate`）后才在 GitHub 新建界面生效，本地新增不代表已上线。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
+模板正文与本页“PR 正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `main`）后才在 GitHub 新建界面生效，本地新增不代表已上线。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [IotProject#12](https://github.com/flyingEirc/IotProject/issues/12)。
 
 ## PR 正文模板
 
