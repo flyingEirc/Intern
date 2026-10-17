@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/flyingEirc/IotProject/internal/catalog"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/catalog"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 func (e *Engine) Incremental(ctx context.Context, request string) (Result, error) {

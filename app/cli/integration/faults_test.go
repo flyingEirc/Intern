@@ -3,7 +3,7 @@
 package integration
 
 import (
-	"github.com/flyingEirc/IotProject/app/cli/internal/testenv"
+	"github.com/flyingEirc/Intern/app/cli/internal/testenv"
 )
 
 func permissionsTLS(c *testenv.Case) {

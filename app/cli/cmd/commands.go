@@ -5,9 +5,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/flyingEirc/IotProject/internal/artifact"
-	"github.com/flyingEirc/IotProject/internal/backup"
-	"github.com/flyingEirc/IotProject/internal/schedule"
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/backup"
+	"github.com/flyingEirc/Intern/internal/schedule"
 )
 
 func (a *application) backupCommand() *cobra.Command {

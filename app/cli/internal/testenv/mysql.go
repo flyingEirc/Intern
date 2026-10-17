@@ -18,7 +18,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/qualitygate"
+	"github.com/flyingEirc/Intern/app/cli/internal/qualitygate"
 )
 
 type Database struct {

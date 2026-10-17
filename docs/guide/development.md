@@ -16,7 +16,7 @@
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
 
 - 共用业务优先进入 `internal/`，产品入口负责协议、参数和交互，避免 CLI/Web 各复制恢复引擎。
-- 当前 `go.work` 只列 `internal/` 与 `app/cli/`，模块路径分别为 `github.com/flyingEirc/IotProject/internal` 和 `github.com/flyingEirc/IotProject/app/cli`；CLI replace 指向 `../../internal`。Web/site 未有实现前不创建空模块。
+- 当前 `go.work` 只列 `internal/` 与 `app/cli/`，模块路径分别为 `github.com/flyingEirc/Intern/internal` 和 `github.com/flyingEirc/Intern/app/cli`；CLI replace 指向 `../../internal`。Web/site 未有实现前不创建空模块。
 - 使用 `go.work` 管理真实存在的 Go 模块。新增模块同时维护 `go.mod` 和工作区，不为空目录虚构模块或预造空抽象。
 - 涉及 `internal/` 的改动必须在 Issue/PR 说明对 CLI/Web 的接口和行为影响及合入依赖。
 

@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 var snapshotCoordinate = regexp.MustCompile(`^-- CHANGE REPLICATION SOURCE TO SOURCE_LOG_FILE='([a-zA-Z0-9_-]+\.[0-9]{6,})', SOURCE_LOG_POS=([0-9]+);$`)

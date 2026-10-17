@@ -13,7 +13,7 @@ import (
 	"github.com/moby/moby/client"
 	tc "github.com/testcontainers/testcontainers-go"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 func (c *Case) LastLog(db *Database) string {

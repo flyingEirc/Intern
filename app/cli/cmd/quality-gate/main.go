@@ -12,7 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/qualitygate"
+	"github.com/flyingEirc/Intern/app/cli/internal/qualitygate"
 )
 
 func main() {

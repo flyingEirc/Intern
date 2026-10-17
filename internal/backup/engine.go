@@ -14,9 +14,9 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/flyingEirc/IotProject/internal/artifact"
-	"github.com/flyingEirc/IotProject/internal/catalog"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/catalog"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 var ErrNoBaseline = errors.New("no logical full baseline for this source; run backup full first")

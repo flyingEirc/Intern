@@ -14,7 +14,7 @@ import (
 	"github.com/tink-crypto/tink-go/v2/tink"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 // GenerateKey creates the independent, private AES-128 KEK. Never copy it into a backup directory.

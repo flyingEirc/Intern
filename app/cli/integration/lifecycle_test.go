@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/testenv"
-	"github.com/flyingEirc/IotProject/internal/backup"
+	"github.com/flyingEirc/Intern/app/cli/internal/testenv"
+	"github.com/flyingEirc/Intern/internal/backup"
 )
 
 func scheduler(c *testenv.Case) {

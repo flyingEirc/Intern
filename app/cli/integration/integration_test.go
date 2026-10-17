@@ -5,7 +5,7 @@ package integration
 import (
 	"testing"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/testenv"
+	"github.com/flyingEirc/Intern/app/cli/internal/testenv"
 )
 
 func TestMySQL(t *testing.T) {

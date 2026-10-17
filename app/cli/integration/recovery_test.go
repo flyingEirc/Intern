@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/testenv"
+	"github.com/flyingEirc/Intern/app/cli/internal/testenv"
 )
 
 func codecMatrix(c *testenv.Case) {

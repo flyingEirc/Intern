@@ -17,7 +17,7 @@ import (
 	"github.com/tink-crypto/tink-go/v2/streamingaead"
 	"github.com/tink-crypto/tink-go/v2/tink"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) (manifest []byte, retErr error) {

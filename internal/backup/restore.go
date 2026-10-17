@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/flyingEirc/IotProject/internal/catalog"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/catalog"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type preparedBackup struct {

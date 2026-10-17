@@ -14,8 +14,8 @@ import (
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/qualitygate"
-	"github.com/flyingEirc/IotProject/internal/backup"
+	"github.com/flyingEirc/Intern/app/cli/internal/qualitygate"
+	"github.com/flyingEirc/Intern/internal/backup"
 )
 
 type connectionConfig struct {

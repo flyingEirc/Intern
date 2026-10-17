@@ -12,7 +12,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	_ "github.com/pingcap/tidb/pkg/parser/test_driver"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type binlogValidation struct {

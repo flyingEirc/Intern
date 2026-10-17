@@ -19,8 +19,8 @@ import (
 	"github.com/moby/moby/client"
 	tc "github.com/testcontainers/testcontainers-go"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/qualitygate"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/app/cli/internal/qualitygate"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type Suite struct {

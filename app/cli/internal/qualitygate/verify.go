@@ -12,10 +12,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
-const IntegrationPackage = "github.com/flyingEirc/IotProject/app/cli/integration"
+const IntegrationPackage = "github.com/flyingEirc/Intern/app/cli/integration"
 
 var checksum = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var sourceID = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)

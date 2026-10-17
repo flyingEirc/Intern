@@ -16,7 +16,7 @@ formatters:
       sections:
         - standard # Go 标准库，例如 fmt、context、net/http
         - default # 第三方依赖，例如 github.com/xxx/xxx
-        - prefix(github.com/flyingEirc/IotProject) # 当前项目模块
+        - prefix(github.com/flyingEirc/Intern) # 当前项目模块
 
 linters:
   default: none # 不启用默认 linter 集合，只运行下面显式指定的检查器

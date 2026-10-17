@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type Jobs struct {

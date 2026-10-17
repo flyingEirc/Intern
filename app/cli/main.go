@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/flyingEirc/IotProject/app/cli/cmd"
+	"github.com/flyingEirc/Intern/app/cli/cmd"
 )
 
 func main() {

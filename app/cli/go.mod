@@ -1,9 +1,9 @@
-module github.com/flyingEirc/IotProject/app/cli
+module github.com/flyingEirc/Intern/app/cli
 
 go 1.27.0
 
 require (
-	github.com/flyingEirc/IotProject/internal v0.0.0
+	github.com/flyingEirc/Intern/internal v0.0.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/moby/moby/api v1.55.0
 	github.com/moby/moby/client v0.5.0
@@ -105,4 +105,4 @@ require (
 	modernc.org/sqlite v1.38.2 // indirect
 )
 
-replace github.com/flyingEirc/IotProject/internal => ../../internal
+replace github.com/flyingEirc/Intern/internal => ../../internal

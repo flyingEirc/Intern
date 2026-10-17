@@ -17,8 +17,8 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
-	"github.com/flyingEirc/IotProject/internal/catalog/internal/catalogsql"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/catalog/internal/catalogsql"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 //go:embed migrations/*.sql

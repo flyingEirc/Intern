@@ -8,9 +8,9 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/flyingEirc/IotProject/internal/backup"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
-	"github.com/flyingEirc/IotProject/internal/schedule"
+	"github.com/flyingEirc/Intern/internal/backup"
+	"github.com/flyingEirc/Intern/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/schedule"
 )
 
 type backupConfig struct {

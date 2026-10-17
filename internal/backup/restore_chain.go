@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/flyingEirc/IotProject/internal/artifact"
-	"github.com/flyingEirc/IotProject/internal/catalog"
-	"github.com/flyingEirc/IotProject/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/catalog"
+	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 func (e *Engine) prepareChain(ctx context.Context, work, id string) ([]preparedBackup, int64, error) {

@@ -5,7 +5,7 @@ package integration
 import (
 	"encoding/json/v2"
 
-	"github.com/flyingEirc/IotProject/app/cli/internal/testenv"
+	"github.com/flyingEirc/Intern/app/cli/internal/testenv"
 )
 
 func configuration(c *testenv.Case) {
