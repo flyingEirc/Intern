@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -337,7 +338,7 @@ func runTool(ctx context.Context, name, creds string, input io.Reader, output io
 	cmd.Stdout = output
 	// Client stderr may contain SQL or credentials; never forward it to logs/errors.
 	cmd.Stderr = io.Discard
-	if err = cmd.Run(); err != nil {
+	if err = executeTool(cmd); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -354,14 +355,16 @@ func toolVersion(ctx context.Context, name, server string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := cmd.Output()
-	if err != nil {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = io.Discard
+	if err = executeTool(cmd); err != nil {
 		return "", fmt.Errorf("required tool %s is unavailable", name)
 	}
-	v := versionPattern.FindStringSubmatch(string(out))
+	v := versionPattern.FindStringSubmatch(out.String())
 	s := versionPattern.FindStringSubmatch(server)
 	if len(v) == 0 || len(s) == 0 || v[1] != s[1] || v[2] != s[2] {
 		return "", fmt.Errorf("%s major/minor version must match MySQL server %s", name, server)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(out.String()), nil
 }
