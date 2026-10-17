@@ -13,4 +13,4 @@
 
 所有任务先读产品路线与适用 guide；涉及功能变更时先落实对应 GitHub Issue，再按 Issue/PR 流程推进。纯文档整理按文档规范和对应流程检查。未决方案与未验证内容保持明确状态。
 
-完整目录与维护职责见 [docs/README.md](docs/README.md)。原 [prd.md](prd.md) 仅保留迁移入口，不再维护另一份方案；Claude 的入口见 [CLAUDE.md](CLAUDE.md)。
+完整目录与维护职责见 [docs/README.md](docs/README.md)。Claude 的入口见 [CLAUDE.md](CLAUDE.md)。

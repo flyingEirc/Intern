@@ -17,4 +17,4 @@
 - `workflow/`：描述怎么跟踪任务、提交与评审；具体执行进展写入 [GitHub Issues](https://github.com/flyingEirc/IotProject/issues)。
 - `guide/`：描述开发中必须遵守的规范；不要另立相互冲突的产品方案。
 
-新增核心文档时更新本目录；新增必读约束时同步两个 AI 阅读入口。旧 [prd.md](../prd.md) 只用于兼容历史链接，原章节号保留在迁入的路线文档中。此次结构调整追踪 [#11](https://github.com/flyingEirc/IotProject/issues/11)。
+新增核心文档时更新本目录；新增必读约束时同步两个 AI 阅读入口。此次结构调整追踪 [#11](https://github.com/flyingEirc/IotProject/issues/11)。

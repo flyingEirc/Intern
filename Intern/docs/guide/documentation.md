@@ -7,7 +7,6 @@
 - `docs/roadmap/` 维护功能路线与 PRD：产品范围、阶段目标、依赖、选型决策、状态和验收边界。
 - `docs/workflow/issue.md` / `pr.md` 维护跟踪与提交流程；具体背景、分析、执行进度、验收和交付以 GitHub Issue 为主。
 - `docs/guide/` 维护开发、质量与文档规范。目录职责和必读列表汇总到 [docs/README.md](../README.md)。
-- 根 `prd.md` 仅保留兼容入口，不再复制整体方案；旧章节引用在迁入的路线中保留对应编号。
 
 ## Roadmap 命名与内容
 
