@@ -27,10 +27,17 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 
 合并前检查对应 Issue 的交付完整性和剩余门禁；发布还必须满足候选制品与支持矩阵要求。未满足 Issue 验收标准时不得将其标记完成。
 
+## GitHub 模板入口
+
+默认 PR 模板位于**实际 Git 根目录**的 [.github/pull_request_template.md](../../../.github/pull_request_template.md)，对应本项目目录的 `../.github/pull_request_template.md`；GitHub 新建 PR 时自动带入下方“内容 / 验收”正文。
+
+模板正文与本页“PR 正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支 `main` 后才在 GitHub 新建界面生效，本地新增不代表已上线。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
+
 ## PR 正文模板
 
 ```markdown
 ## 1. 内容
+
 | 跟踪 Issue | 本 PR 交付内容 | 完成范围与剩余工作 |
 | --- | --- | --- |
 | #N | | |
@@ -39,6 +46,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 - 共享接口及 CLI/Web 影响（若适用）：
 
 ## 2. 验收
+
 | Issue / 验收项 | 实际结果 | 方法 / 环境 / 版本 | 证据（提交/制品/CI/附件） |
 | --- | --- | --- | --- |
 | #N / 1 | 待执行 | | |

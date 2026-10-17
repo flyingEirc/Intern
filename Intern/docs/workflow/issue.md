@@ -29,6 +29,12 @@
 - UI/UX 截图或 MP4 必须来自实际交付版本，链接可访问的 Issue/PR 附件或版本化证据路径，并注明提交 SHA、页面/关键状态、操作步骤和对应验收项。截图覆盖静态效果，交互或动态效果可用 MP4 展示；mockup 不能冒充已实现界面。
 - 证据先脱敏，禁止暴露密码、密钥、token、完整 DSN 或用户敏感数据。纯后端、CLI 或文档交付可明确填写“UI/UX 证据：不适用（原因）”；实际涉及 UI/UX 的任务不得省略。
 
+## GitHub 模板入口
+
+在 GitHub 新建 Issue 时选择“功能新增、修改或问题修复”，即可带入下方五段正文。模板文件位于**实际 Git 根目录**的 [.github/ISSUE_TEMPLATE/change.md](../../../.github/ISSUE_TEMPLATE/change.md)，对应本项目目录的 `../.github/ISSUE_TEMPLATE/change.md`。
+
+模板正文与本页“正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支 `main` 后才会在 GitHub 新建界面出现，本地新增或仅推送其他分支不代表已生效。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
+
 ## 正文模板
 
 ```markdown
@@ -47,6 +53,7 @@
 - [ ] 步骤二：
 
 ## 4. 验收
+
 | 验收步骤 | 预期结果与通过条件 | 方法 / 环境 / 版本 | 实际结果与证据 |
 | --- | --- | --- | --- |
 | 1 | | | 待执行 |
