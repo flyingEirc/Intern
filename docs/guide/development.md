@@ -47,7 +47,7 @@
 
 工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`，sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [#14](https://github.com/flyingEirc/IotProject/issues/14)。
 
-以下命令在 Intern 项目目录执行；在其子目录运行时，mise 仍以配置所在的 Intern 目录执行任务。也可从其他目录使用 `mise -C /path/to/Intern run <任务>`。
+以下命令在仓库根目录执行；在其子目录运行时，mise 仍以根目录的 mise.toml 所在目录执行任务。也可从其他目录使用 `mise -C /path/to/Intern run <任务>`。
 
 | 目的 | 命令 |
 | --- | --- |
@@ -65,4 +65,4 @@
 
 `check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则，工作流位于实际 Git 根的 `.github/workflows/quality.yml`；实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或分支保护已通过验收。
 
-实际 Git 根当前位于 Intern 的上一级；GitHub workflow 须位于真实 Git 根的 `.github/workflows/`，工作目录设置为 Intern。不要在 `Intern/.github/` 建立无法被识别的门禁副本。本地 hook 当前配置 `core.hooksPath=Intern/.githooks`；新 clone 或布局变化后应按实际 Git 根与项目路径设置。
+项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。

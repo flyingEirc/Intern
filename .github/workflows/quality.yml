@@ -17,7 +17,7 @@ concurrency:
 defaults:
   run:
     shell: bash
-    working-directory: Intern
+    working-directory: .
 
 env:
   GOTOOLCHAIN: local
@@ -54,9 +54,9 @@ jobs:
         with:
           go-version: '1.27.0'
           cache-dependency-path: |
-            Intern/internal/go.sum
-            Intern/app/cli/go.sum
-            Intern/go.work.sum
+            internal/go.sum
+            app/cli/go.sum
+            go.work.sum
       - name: Build
         run: go build ./internal/... ./app/cli/...
       - name: Behavior and race tests
@@ -78,7 +78,7 @@ jobs:
       INTERN_TEST_PROFILE: ${{ matrix.profile }}
       INTERN_TEST_SOURCE_SHA: ${{ github.sha }}
       INTERN_TEST_PLATFORM: linux/amd64
-      INTERN_TEST_REPORT_DIR: ${{ github.workspace }}/Intern/.cache/quality/${{ matrix.profile }}
+      INTERN_TEST_REPORT_DIR: ${{ github.workspace }}/.cache/quality/${{ matrix.profile }}
       INTERN_CONTAINER_PARALLEL: '2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -88,9 +88,9 @@ jobs:
         with:
           go-version: '1.27.0'
           cache-dependency-path: |
-            Intern/internal/go.sum
-            Intern/app/cli/go.sum
-            Intern/go.work.sum
+            internal/go.sum
+            app/cli/go.sum
+            go.work.sum
       - name: Real CLI and database container scenarios
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
@@ -110,9 +110,9 @@ jobs:
           retention-days: 7
           include-hidden-files: true # Only the explicit evidence allowlist below.
           path: |
-            Intern/.cache/quality/${{ matrix.profile }}/candidate.json
-            Intern/.cache/quality/${{ matrix.profile }}/events.jsonl
-            Intern/.cache/quality/${{ matrix.profile }}/receipts/*.json
+            .cache/quality/${{ matrix.profile }}/candidate.json
+            .cache/quality/${{ matrix.profile }}/events.jsonl
+            .cache/quality/${{ matrix.profile }}/receipts/*.json
 
   quality-gate:
     name: quality-gate
@@ -144,14 +144,14 @@ jobs:
         with:
           go-version: '1.27.0'
           cache-dependency-path: |
-            Intern/internal/go.sum
-            Intern/app/cli/go.sum
-            Intern/go.work.sum
+            internal/go.sum
+            app/cli/go.sum
+            go.work.sum
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.scope.outputs.required == 'true'
         with:
           pattern: container-*
-          path: Intern/.cache/downloaded
+          path: .cache/downloaded
       - name: Verify the entire locked matrix for this exact commit
         if: needs.scope.outputs.required == 'true'
         env:

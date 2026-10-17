@@ -34,7 +34,7 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 Go `1.27.0`、golangci-lint `2.13.2` 和开发任务统一声明在 [mise.toml](mise.toml) 中，Go 版本与 `go.work` 保持一致。首次使用时阅读配置后信任并安装工具。
 
-在本项目目录 `Intern/` 执行：
+在克隆后的仓库根目录（与 `.github/`、`go.work` 和 `mise.toml` 同级）执行：
 
 ```sh
 mise trust

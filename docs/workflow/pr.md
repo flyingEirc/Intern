@@ -29,7 +29,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 
 ## GitHub 模板入口
 
-默认 PR 模板位于**实际 Git 根目录**的 [.github/pull_request_template.md](../../../.github/pull_request_template.md)，对应本项目目录的 `../.github/pull_request_template.md`；GitHub 新建 PR 时自动带入下方“内容 / 验收”正文。
+默认 PR 模板位于**实际 Git 根目录**的 [.github/pull_request_template.md](../../.github/pull_request_template.md)，对应本项目目录的 `.github/pull_request_template.md`；GitHub 新建 PR 时自动带入下方“内容 / 验收”正文。
 
 模板正文与本页“PR 正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `cli/container-quality-gate`）后才在 GitHub 新建界面生效，本地新增不代表已上线。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
 
