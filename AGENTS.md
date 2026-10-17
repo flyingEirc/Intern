@@ -4,7 +4,8 @@
 
 | 要了解或执行什么 | 必须阅读的位置 |
 | --- | --- |
-| 当前总路线、Web 优先、CLI 暂停与 app/internal 边界 | [docs/roadmap/Web优先与多应用架构-2026-10-17.md](docs/roadmap/Web优先与多应用架构-2026-10-17.md) |
+| 当前总路线、Web 优先、CLI 暂停与 app/internal 边界；Web 阶段 A–E 与 Issue、新旧仓库编号对照 | [docs/roadmap/Web优先与多应用架构-2026-10-17.md](docs/roadmap/Web优先与多应用架构-2026-10-17.md) |
+| Web 首版方案（XtraBackup 物理链、Docker 部署、FTP 仓库）、子任务 P/S/R/D/V/W 与测试验收 | [docs/roadmap/Web备份控制面与流式管道-2026-10-17.md](docs/roadmap/Web备份控制面与流式管道-2026-10-17.md) |
 | 备份恢复技术选型、详细设计与验收要求 | [docs/roadmap/数据库备份与恢复-2026-10-17.md](docs/roadmap/数据库备份与恢复-2026-10-17.md)；其他文档从 [docs/README.md](docs/README.md) 查找 |
 | 修改代码、复用组件、处理 CLI/Web/internal 边界 | [docs/guide/development.md](docs/guide/development.md) |
 | 选择检查范围、执行真实组件测试、判断能否验收 | [docs/guide/quality.md](docs/guide/quality.md)；产品矩阵细节见路线文档第 15 节 |

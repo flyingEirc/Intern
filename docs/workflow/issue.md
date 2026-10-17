@@ -2,6 +2,8 @@
 
 项目开发追踪以 [当前 GitHub 仓库的 Issues](https://github.com/flyingEirc/Intern/issues) 为主。新增功能、修改功能、问题修复和方案调整都必须关联对应 Issue，持续维护分析、执行进展和验收结果。本地任务清单、调研笔记和 PR 作为辅助材料，链接回 Issue，不替代主要记录。
 
+远程仓库迁移前的旧仓库 `flyingEirc/IotProject` 只保留历史，不再新建或推进 Issue。Issue、文档和 PR 中的裸 `#N` 只指当前仓库；引用旧仓库写作 `IotProject#N` 并附链接。新旧编号对照与历史提交后缀的归属见 [Web 优先总路线第 6 节](../roadmap/Web优先与多应用架构-2026-10-17.md)。
+
 ## 必须包含的五部分
 
 按“背景 → 功能 → 步骤 → 验收 → 交付”组织正文；开始时尚未获得的分析、结果或产物标记待完成，不把推测写成结论。
@@ -33,7 +35,7 @@
 
 在 GitHub 新建 Issue 时选择“功能新增、修改或问题修复”，即可带入下方五段正文。模板文件位于**实际 Git 根目录**的 [.github/ISSUE_TEMPLATE/change.md](../../.github/ISSUE_TEMPLATE/change.md)，对应本项目目录的 `.github/ISSUE_TEMPLATE/change.md`。
 
-模板正文与本页“正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `cli/container-quality-gate`）后才会在 GitHub 新建界面出现，本地新增或仅推送其他分支不代表已生效。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [#12](https://github.com/flyingEirc/IotProject/issues/12)。
+模板正文与本页“正文模板”保持一致；修改其中一处时同步另一处。模板进入仓库默认分支（当前为 `main`）后才会在 GitHub 新建界面出现，本地新增或仅推送其他分支不代表已生效。规则依据见 [GitHub 模板说明](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/about-issue-and-pull-request-templates)。此入口交付追踪 [IotProject#12](https://github.com/flyingEirc/IotProject/issues/12)。
 
 ## 正文模板
 

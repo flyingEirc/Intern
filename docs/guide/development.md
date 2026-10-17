@@ -1,8 +1,8 @@
 # 开发规范
 
-开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
+开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)；Web 子任务另读 [Web 备份控制面与流式管道](../roadmap/Web备份控制面与流式管道-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
 
-当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 前端栈及首版范围由 [#18](https://github.com/flyingEirc/IotProject/issues/18) 决策，不能在本轮目录调整中静默指定。
+当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），按阶段 B–E 的子 Issue 实施，不得静默更换。
 
 ## 目录与共享接口
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端；前端栈尚未确定，当前目录占位。 |
+| `app/web/` | 当前主线 Web 产品和后端；前端为 React + TypeScript + Vite + Ant Design + TanStack Query，当前目录占位，工程由阶段 B 的 W1 建立。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
@@ -45,7 +45,7 @@
 
 ## 常用开发入口
 
-工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`，sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [#14](https://github.com/flyingEirc/IotProject/issues/14)。
+工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`，sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [IotProject#14](https://github.com/flyingEirc/IotProject/issues/14)。
 
 以下命令在仓库根目录执行；在其子目录运行时，mise 仍以根目录的 mise.toml 所在目录执行任务。也可从其他目录使用 `mise -C /path/to/Intern run <任务>`。
 

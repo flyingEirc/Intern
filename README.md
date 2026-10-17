@@ -21,7 +21,7 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线；目录已就位，首版范围和前端选型待明确。 |
+| `app/web/` | 当前产品主线；首版范围与前端选型已确认（XtraBackup 物理链、Docker 单宿主机、本地仓库 + FTP 副本），尚未实现，目录占位。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
@@ -103,7 +103,7 @@ chmod 600 "$HOME/intern-secrets/source.yaml"
 | 备份恢复设计与验收边界 | [详细能力方案](docs/roadmap/数据库备份与恢复-2026-10-17.md) |
 | 全部核心约束目录 | [docs/README.md](docs/README.md) |
 | 配置字段 | [app/cli/example.yaml](app/cli/example.yaml) |
-| 任务和开发进度 | [GitHub Issues](https://github.com/flyingEirc/IotProject/issues) |
+| 任务和开发进度 | [GitHub Issues](https://github.com/flyingEirc/Intern/issues)；Web 总路线 [#10](https://github.com/flyingEirc/Intern/issues/10) |
 | 如何开发与验证 | [开发规范](docs/guide/development.md)、[质量规范](docs/guide/quality.md) |
 | 如何跟踪交付和提交 PR | [Issue 流程](docs/workflow/issue.md)、[PR 流程](docs/workflow/pr.md) |
 | AI 协作阅读入口 | [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) |
