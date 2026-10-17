@@ -4,7 +4,8 @@
 
 | 要了解或执行什么 | 必须阅读的位置 |
 | --- | --- |
-| 产品范围、路线、技术选型、共享架构与恢复边界 | [docs/roadmap/数据库备份与恢复-2026-10-17.md](docs/roadmap/数据库备份与恢复-2026-10-17.md)；后续功能路线从 [docs/README.md](docs/README.md) 查找 |
+| 当前总路线、Web 优先、CLI 暂停与 app/internal 边界 | [docs/roadmap/Web优先与多应用架构-2026-10-17.md](docs/roadmap/Web优先与多应用架构-2026-10-17.md) |
+| 备份恢复技术选型、详细设计与验收要求 | [docs/roadmap/数据库备份与恢复-2026-10-17.md](docs/roadmap/数据库备份与恢复-2026-10-17.md)；其他文档从 [docs/README.md](docs/README.md) 查找 |
 | 修改代码、复用组件、处理 CLI/Web/internal 边界 | [docs/guide/development.md](docs/guide/development.md) |
 | 选择检查范围、执行真实组件测试、判断能否验收 | [docs/guide/quality.md](docs/guide/quality.md)；产品矩阵细节见路线文档第 15 节 |
 | 新增或修改功能、排障、拆分任务、记录交付 | [docs/workflow/issue.md](docs/workflow/issue.md) |

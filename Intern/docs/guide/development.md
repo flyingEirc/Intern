@@ -1,19 +1,22 @@
 # 开发规范
 
-开发前阅读 [产品路线与 PRD](../roadmap/数据库备份与恢复-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
+开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
+
+当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 前端栈及首版范围由 [#18](https://github.com/flyingEirc/IotProject/issues/18) 决策，不能在本轮目录调整中静默指定。
 
 ## 目录与共享接口
 
 | 项目根目录下的路径 | 职责 |
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
-| `app/cli/` | CLI 命令、配置、终端交互及专属行为。 |
-| `app/web/` | Web 产品和后端；前端栈尚未确定。 |
+| `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
+| `app/web/` | 当前主线 Web 产品和后端；前端栈尚未确定，当前目录占位。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
 
 - 共用业务优先进入 `internal/`，产品入口负责协议、参数和交互，避免 CLI/Web 各复制恢复引擎。
+- 当前 `go.work` 只列 `internal/` 与 `app/cli/`，模块路径分别为 `github.com/flyingEirc/IotProject/internal` 和 `github.com/flyingEirc/IotProject/app/cli`；CLI replace 指向 `../../internal`。Web/site 未有实现前不创建空模块。
 - 使用 `go.work` 管理真实存在的 Go 模块。新增模块同时维护 `go.mod` 和工作区，不为空目录虚构模块或预造空抽象。
 - 涉及 `internal/` 的改动必须在 Issue/PR 说明对 CLI/Web 的接口和行为影响及合入依赖。
 
