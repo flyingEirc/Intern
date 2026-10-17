@@ -11,7 +11,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
-	"github.com/flyingEirc/IotProject/base/backup"
+	"github.com/flyingEirc/IotProject/internal/backup"
 )
 
 type Config struct {

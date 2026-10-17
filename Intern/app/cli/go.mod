@@ -1,9 +1,9 @@
-module github.com/flyingEirc/IotProject/cli
+module github.com/flyingEirc/IotProject/app/cli
 
 go 1.27.0
 
 require (
-	github.com/flyingEirc/IotProject/base v0.0.0
+	github.com/flyingEirc/IotProject/internal v0.0.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.20.1
@@ -58,4 +58,4 @@ require (
 	modernc.org/sqlite v1.38.2 // indirect
 )
 
-replace github.com/flyingEirc/IotProject/base => ../base
+replace github.com/flyingEirc/IotProject/internal => ../../internal

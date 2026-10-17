@@ -18,7 +18,7 @@ import (
 	"github.com/tink-crypto/tink-go/v2/streamingaead"
 	"github.com/tink-crypto/tink-go/v2/tink"
 
-	"github.com/flyingEirc/IotProject/base/fsutil"
+	"github.com/flyingEirc/IotProject/internal/fsutil"
 )
 
 type sealer struct {

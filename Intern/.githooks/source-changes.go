@@ -35,7 +35,7 @@ func git(project string, args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 func businessChanged(project string) (bool, error) {
-	files, err := git(project, "diff", "--cached", "--name-only", "-z", "--", "base", "cli")
+	files, err := git(project, "diff", "--cached", "--name-only", "-z", "--", "internal", "app")
 	if err != nil {
 		return false, err
 	}

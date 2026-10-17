@@ -1,6 +1,6 @@
 go 1.27.0
 
 use (
-	./base
-	./cli
+	./internal
+	./app/cli
 )

@@ -37,11 +37,11 @@ mise run build
 ```sh
 mkdir -p "$HOME/intern/backups" "$HOME/intern/state" "$HOME/intern-secrets"
 chmod 700 "$HOME/intern/backups" "$HOME/intern/state" "$HOME/intern-secrets"
-cp cli/example.yaml "$HOME/intern-secrets/source.yaml"
+cp app/cli/example.yaml "$HOME/intern-secrets/source.yaml"
 chmod 600 "$HOME/intern-secrets/source.yaml"
 ```
 
-编辑 `source.yaml`，将连接信息改为实际源库，将 `backup.directory`、`backup.state_directory`、`backup.key_file` 改为上面目录的**绝对路径**。YAML 不会自动展开示例中的 `$HOME`。TCP 默认校验服务器身份，需要正确 CA 与匹配的主机名；本地 Unix socket 的配置见 [示例](cli/example.yaml)。
+编辑 `source.yaml`，将连接信息改为实际源库，将 `backup.directory`、`backup.state_directory`、`backup.key_file` 改为上面目录的**绝对路径**。YAML 不会自动展开示例中的 `$HOME`。TCP 默认校验服务器身份，需要正确 CA 与匹配的主机名；本地 Unix socket 的配置见 [示例](app/cli/example.yaml)。
 
 示例通过 `password_env: INTERN_MYSQL_PASSWORD` 引用密码。运行前用你的 secret 管理方式将该环境变量注入当前进程，避免把真实密码写入命令历史、日志或仓库。
 
@@ -90,7 +90,7 @@ chmod 600 "$HOME/intern-secrets/source.yaml"
 | --- | --- |
 | 产品路线、设计决策和验收边界 | [产品路线与 PRD](docs/roadmap/数据库备份与恢复-2026-10-17.md) |
 | 全部核心约束目录 | [docs/README.md](docs/README.md) |
-| 配置字段 | [cli/example.yaml](cli/example.yaml) |
+| 配置字段 | [app/cli/example.yaml](app/cli/example.yaml) |
 | 任务和开发进度 | [GitHub Issues](https://github.com/flyingEirc/IotProject/issues) |
 | 如何开发与验证 | [开发规范](docs/guide/development.md)、[质量规范](docs/guide/quality.md) |
 | 如何跟踪交付和提交 PR | [Issue 流程](docs/workflow/issue.md)、[PR 流程](docs/workflow/pr.md) |

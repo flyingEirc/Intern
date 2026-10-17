@@ -20,7 +20,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/flyingEirc/IotProject/base/fsutil"
+	"github.com/flyingEirc/IotProject/internal/fsutil"
 )
 
 var databaseName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_$-]{0,63}$`)

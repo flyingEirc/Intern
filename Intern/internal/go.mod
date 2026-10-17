@@ -1,4 +1,4 @@
-module github.com/flyingEirc/IotProject/base
+module github.com/flyingEirc/IotProject/internal
 
 go 1.27.0
 
