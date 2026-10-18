@@ -4,15 +4,24 @@
 // forward order, and commits only after every write and close has succeeded.
 // A Source must wait for its writers and external processes before returning;
 // a write failure cancels its context so that blocked processes can terminate.
-// The first write or close failure is recorded with context.WithCancelCause so
-// a stage may write downstream from its own goroutines without racing the chain.
+// The first write or close failure is recorded with context.WithCancelCause.
+// A stage may report that failure from a worker goroutine. Each writer's Write
+// is serial: workers coordinate downstream writes and join before Close.
+// Cancel records the chain failure and does not serialize Write. Overlapping
+// Write is undefined for a checked writer, CountTap, and SHA256Tap, and it
+// corrupts hash.Hash. checkedWriter adds no mutex for that misuse. zstd
+// encoders used with Run flush one downstream Write at a time, including when
+// encoder concurrency is greater than one, and Close waits for that flush.
 // Checked writers return the caller context's Err when that context has ended,
 // joined with its cause when the cause is a different error. An internal abort
 // returns that cause and does not match context.Canceled.
 //
 // CountTap and SHA256Tap are single-use, zero-value-ready stages. Pass their
-// Stage methods to Run. CountTap.Bytes is safe to read while the chain runs;
-// SHA256Tap.Sum is read after Run has closed the stages.
+// Stage methods to Run. CountTap.Bytes is safe to read while the single writer
+// runs; SHA256Tap.Sum is read after Run has closed the stages.
+//
+// FTP and S3 sinks are not implemented. A nil Commit error is the object
+// completion point, not a completed backup.
 package pipeline
 
 import (
@@ -28,10 +37,15 @@ type Source interface {
 	Run(ctx context.Context, w io.Writer) error
 }
 
-// Stage wraps next without taking ownership of it; Close flushes only this stage.
+// Stage wraps next without taking ownership of it. Close flushes only this
+// stage and returns after its workers have finished writing to next. Write on
+// the stage and on next is serial.
 type Stage func(next io.Writer) (io.WriteCloser, error)
 
-// Sink keeps its object private until Commit and supports idempotent Abort.
+// Sink receives the finished byte stream. A nil error from Commit is the
+// object completion point; Abort is for an object that has not committed and
+// is idempotent. Local bytes stay private until Publish. Remote sinks are not
+// implemented.
 type Sink interface {
 	io.Writer
 	Commit(ctx context.Context) (Receipt, error)
@@ -45,7 +59,11 @@ type Receipt struct {
 }
 
 // Run executes a synchronous writer chain, closing upstream stages first.
-// Every failure aborts the sink and preserves its cause alongside cleanup errors.
+// A source error, short write, stage Close error, or Commit error aborts the
+// sink and preserves that cause alongside cleanup errors. Cancellation before
+// Commit aborts and returns an empty receipt. After Commit returns nil, Run
+// returns the receipt and does not call Abort, including when the caller
+// context has already ended.
 func Run(ctx context.Context, src Source, stages []Stage, sink Sink) (Receipt, error) {
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -69,8 +87,8 @@ func Run(ctx context.Context, src Source, stages []Stage, sink Sink) (Receipt, e
 	}
 
 	receipt, err := sink.Commit(runCtx)
-	err = joinDistinct(err, context.Cause(runCtx), ctx.Err())
 	if err != nil {
+		err = joinDistinct(err, context.Cause(runCtx), ctx.Err())
 		return Receipt{}, errors.Join(err, sink.Abort())
 	}
 	return receipt, nil

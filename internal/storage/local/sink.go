@@ -30,6 +30,7 @@ type fileSink struct {
 
 func (s *fileSink) Write(p []byte) (int, error) {
 	// Data-path I/O uses Staging.mu only; Repository.mu stays free for readers.
+	// Sinks in one staging share that mutex and are written one at a time.
 	s.staging.mu.Lock()
 	defer s.staging.mu.Unlock()
 	if s.state != fileOpen || s.staging.state != stagingOpen {
@@ -48,17 +49,20 @@ func (s *fileSink) Write(p []byte) (int, error) {
 
 func (s *fileSink) Commit(ctx context.Context) (pipeline.Receipt, error) {
 	// fsync and close stay on Staging.mu so a multi-GB commit does not lock List.
+	// Sync and Close run to completion. Cancellation before Sync fails the commit.
+	// After both succeed, the receipt is returned even if the context ended during
+	// the syscall. A real Sync or Close error leaves the file uncommitted.
 	s.staging.mu.Lock()
 	defer s.staging.mu.Unlock()
 	if s.state != fileOpen || s.staging.state != stagingOpen {
 		return pipeline.Receipt{}, fs.ErrClosed
 	}
-	s.state = fileFailed
 	if err := ctx.Err(); err != nil {
+		s.state = fileFailed
 		return pipeline.Receipt{}, errors.Join(err, s.closeFile())
 	}
-	err := s.file.Sync()
-	err = errors.Join(err, s.closeFile(), ctx.Err())
+	s.state = fileFailed
+	err := errors.Join(s.file.Sync(), s.closeFile())
 	if err != nil {
 		return pipeline.Receipt{}, err
 	}
@@ -69,6 +73,12 @@ func (s *fileSink) Commit(ctx context.Context) (pipeline.Receipt, error) {
 func (s *fileSink) Abort() error {
 	// Staging.mu first: Abort waits out Write or Commit without holding the
 	// repository lock, so List, Open, and Size stay available.
+	// The file is closed only after that Write or Sync returns. A syscall
+	// blocked in the kernel, including a stuck NFS RPC, runs to completion.
+	// Callers write one pipeline stream, or commit several sinks one after
+	// another. A per-sink lock becomes relevant only when one staging directory
+	// has parallel streams; that caller does not exist. The wait is cancellation
+	// latency, and the bytes already given to the kernel stay on the sink.
 	s.staging.mu.Lock()
 	defer s.staging.mu.Unlock()
 	s.staging.repo.mu.Lock()

@@ -11,6 +11,7 @@
 // A caller must Commit every created sink before Publish, or Abort the staging
 // directory on failure. Aborting a sink invalidates that staging publication.
 // Close the repository only after its staging directories and readers are done.
+// Close waits until an in-flight Publish has finished using os.Root.
 package local
 
 import (
@@ -28,16 +29,29 @@ import (
 // Repository confines all object access to a pinned private directory.
 type Repository struct {
 	// mu serializes namespace operations on the pinned root: Open, Size, List,
-	// Delete, Begin, exclusive Create, Publish rename, Abort removal, and Close.
+	// Delete, Begin, exclusive Create, Abort removal, and Close. Publish holds
+	// mu for parent creation, the exclusive rename, and the parent/root
+	// directory sync. Create and Abort acquire Staging.mu before mu and hold mu
+	// until they return.
 	//
 	// Write and Commit fsync take only Staging.mu. They never acquire mu, so a
-	// large object does not block readers of this Repository. Create, Publish,
-	// and Abort acquire Staging.mu before mu. While one of those calls waits
-	// for Staging.mu it does not hold mu, and List, Open, and Size proceed.
-	// After it acquires both locks, the namespace update holds mu until it
-	// returns.
-	mu   sync.Mutex
-	root *os.Root
+	// large object does not block readers of this Repository. While Create,
+	// Publish, or Abort waits for Staging.mu it does not hold mu, and List,
+	// Open, and Size proceed.
+	//
+	// Publish syncs its private pending directory before taking mu. That sync
+	// holds Staging.mu and inflight. Close waits for inflight before it closes
+	// os.Root, so List, Open, and Size do not wait for the pending sync. After
+	// Publish takes mu, readers block until the namespace section returns.
+	// Directory sync is a normal file syscall: canceling the caller context
+	// does not interrupt it, and Close cannot cancel a syscall already inside
+	// the kernel.
+	mu        sync.Mutex
+	root      *os.Root
+	closed    bool
+	inflight  sync.WaitGroup
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Open opens an absolute root, creating it with mode 0700 if necessary.
@@ -83,11 +97,35 @@ func verifyRoot(name string, root *os.Root) error {
 }
 
 // Close releases the pinned repository directory after staging work has ended.
+// It waits for a Publish that still holds a root pin, including the private
+// pending-directory sync that runs without mu. A second Close returns the
+// same result after the root has been closed.
 func (r *Repository) Close() error {
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		r.closed = true
+		r.mu.Unlock()
+		r.inflight.Wait()
+		r.mu.Lock()
+		r.closeErr = r.root.Close()
+		r.mu.Unlock()
+	})
+	return r.closeErr
+}
+
+// pin keeps os.Root open across work that does not hold mu.
+// Close waits for every pin before closing the root.
+func (r *Repository) pin() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.root.Close()
+	if r.closed {
+		return fs.ErrClosed
+	}
+	r.inflight.Add(1)
+	return nil
 }
+
+func (r *Repository) unpin() { r.inflight.Done() }
 
 // Open opens a published regular file without following symlink components.
 func (r *Repository) Open(name string) (file io.ReadCloser, result error) {

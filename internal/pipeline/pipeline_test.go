@@ -499,8 +499,9 @@ func (s *serialSink) Abort() error {
 }
 
 func TestRunCancelWithConcurrentEncoder(t *testing.T) {
-	// Incompressible input forces the concurrent encoder to write downstream
-	// from its own goroutines. Repeated runs make a shared chain error race.
+	// Concurrency above one writes the sink from a worker, one Write at a time,
+	// and Close joins that worker before Run can Abort. Cancellation is before
+	// Commit. The sink mutex guards this double's counters only.
 	payload := make([]byte, 128<<10)
 	if _, err := rand.Read(payload); err != nil {
 		t.Fatal(err)

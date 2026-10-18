@@ -25,7 +25,7 @@ func (t *CountTap) Stage(next io.Writer) (io.WriteCloser, error) {
 	return t, nil
 }
 
-// Write forwards p and counts only bytes accepted downstream.
+// Write forwards p and counts only bytes accepted downstream. Calls are serial.
 func (t *CountTap) Write(p []byte) (int, error) {
 	if t.closed.Load() || t.next == nil {
 		return 0, io.ErrClosedPipe
@@ -41,11 +41,12 @@ func (t *CountTap) Close() error {
 	return nil
 }
 
-// Bytes returns the number of accepted bytes and may be read while writes run.
+// Bytes returns the number of accepted bytes and may be read while the single writer runs.
 func (t *CountTap) Bytes() int64 { return t.bytes.Load() }
 
 // SHA256Tap hashes bytes accepted by its downstream writer.
-// Its zero value is ready for one Stage construction.
+// Its zero value is ready for one Stage construction. Write is serial;
+// hash.Hash corrupts the digest if calls overlap.
 type SHA256Tap struct {
 	next   io.Writer
 	hash   hash.Hash
@@ -63,7 +64,7 @@ func (t *SHA256Tap) Stage(next io.Writer) (io.WriteCloser, error) {
 	return t, nil
 }
 
-// Write forwards p and hashes only bytes accepted downstream.
+// Write forwards p and hashes only bytes accepted downstream. Calls are serial.
 func (t *SHA256Tap) Write(p []byte) (int, error) {
 	if t.closed || t.next == nil {
 		return 0, io.ErrClosedPipe

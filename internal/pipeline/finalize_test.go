@@ -50,25 +50,49 @@ func TestCloseCannotSwallowShortWrite(t *testing.T) {
 	assertSinkCalls(t, sink, 0, 1)
 }
 
-type cancelCommitSink struct {
+type cancelDuringCommitSink struct {
 	*testSink
 	cancel context.CancelFunc
+	fail   bool
 }
 
-func (s cancelCommitSink) Commit(ctx context.Context) (Receipt, error) {
+func (s cancelDuringCommitSink) Commit(ctx context.Context) (Receipt, error) {
 	receipt, err := s.testSink.Commit(ctx)
 	s.cancel()
-	return receipt, err
+	if err != nil {
+		return Receipt{}, err
+	}
+	if s.fail {
+		return Receipt{}, ctx.Err()
+	}
+	return receipt, nil
 }
 
-func TestCancellationDuringCommitAborts(t *testing.T) {
+func TestCommitSuccessIgnoresLaterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, stages, sink, _ := newTestChain()
-	wrapped := cancelCommitSink{testSink: sink, cancel: cancel}
+	specs, stages, sink, _ := newTestChain()
+	wrapped := cancelDuringCommitSink{testSink: sink, cancel: cancel}
+	receipt, err := Run(ctx, sourceFunc(writeSource), stages, wrapped)
+	if err != nil || receipt != (Receipt{Path: "payload", Size: 7}) {
+		t.Fatalf("committed receipt = %+v, %v", receipt, err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("context was not canceled after commit")
+	}
+	assertSinkCalls(t, sink, 1, 0)
+	assertStageCloses(t, specs, []int{1, 1, 1})
+}
+
+func TestCommitErrorStillAborts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	specs, stages, sink, _ := newTestChain()
+	wrapped := cancelDuringCommitSink{testSink: sink, cancel: cancel, fail: true}
 	receipt, err := Run(ctx, sourceFunc(writeSource), stages, wrapped)
 	if !errors.Is(err, context.Canceled) || receipt != (Receipt{}) {
-		t.Fatalf("commit cancellation = %+v, %v", receipt, err)
+		t.Fatalf("commit error = %+v, %v", receipt, err)
 	}
 	assertSinkCalls(t, sink, 1, 1)
+	assertStageCloses(t, specs, []int{1, 1, 1})
 }

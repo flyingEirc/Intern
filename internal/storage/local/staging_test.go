@@ -150,31 +150,25 @@ func (c errWhenPendingMoved) Err() error {
 	return c.Context.Err()
 }
 
-func TestPublishRollbackAfterRename(t *testing.T) {
+func TestPublishKeepsDirectoryWhenCanceledAfterRename(t *testing.T) {
 	repo, root := newRepository(t)
 	staging := begin(t, repo, "backup")
-	commitBytes(t, staging, "payload", "rolled-back")
+	commitBytes(t, staging, "payload", "durable")
 	ctx := errWhenPendingMoved{
 		Context: context.Background(),
 		root:    root,
 		pending: staging.pending,
 	}
-	if err := staging.Publish(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("rollback publish error = %v", err)
+	if err := staging.Publish(ctx); err != nil {
+		t.Fatalf("cancellation after rename = %v", err)
 	}
-	if staging.state == stagingPublished {
-		t.Fatal("published after a failed post-rename sync")
+	if staging.state != stagingPublished {
+		t.Fatal("durable publish was not recorded")
 	}
-	if _, err := os.Stat(filepath.Join(root, "backup")); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatal("final directory remained after rollback")
+	if _, err := os.Stat(filepath.Join(root, staging.pending)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("pending directory still present: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, staging.pending)); err != nil {
-		t.Fatalf("pending directory was not restored: %v", err)
-	}
-	if err := staging.Abort(); err != nil {
-		t.Fatal(err)
-	}
-	assertNoPending(t, root)
+	assertObject(t, repo, "backup/payload", "durable")
 }
 
 func TestPublishRequiresAllCommittedSinks(t *testing.T) {
@@ -202,11 +196,14 @@ func TestPublishDoesNotReplaceExistingTargets(t *testing.T) {
 	for _, target := range []string{"empty directory", "populated directory", "file"} {
 		t.Run(target, func(t *testing.T) {
 			repo, root := newRepository(t)
-			makeExistingTarget(t, root, target)
 			staging := begin(t, repo, "backup")
 			commitBytes(t, staging, "payload", "replacement")
+			makeExistingTarget(t, root, target)
 			if err := staging.Publish(context.Background()); !errors.Is(err, fs.ErrExist) {
-				t.Fatalf("existing target publish error = %v", err)
+				t.Fatalf("target created after Begin: publish error = %v", err)
+			}
+			if staging.state == stagingPublished {
+				t.Fatal("rejected rename was recorded as published")
 			}
 			if err := staging.Abort(); err != nil {
 				t.Fatal(err)
@@ -249,6 +246,220 @@ func assertExistingTarget(t *testing.T, repo *Repository, root, kind string) {
 			t.Fatalf("empty target changed: %v, %v", entries, err)
 		}
 	}
+}
+
+func TestBeginRejectsExistingTarget(t *testing.T) {
+	for _, target := range []string{"empty directory", "populated directory", "file"} {
+		t.Run(target, func(t *testing.T) {
+			repo, root := newRepository(t)
+			makeExistingTarget(t, root, target)
+			staging, err := repo.Begin("backup")
+			if staging != nil {
+				t.Cleanup(func() {
+					if abortErr := staging.Abort(); abortErr != nil {
+						t.Error(abortErr)
+					}
+				})
+			}
+			if !errors.Is(err, fs.ErrExist) {
+				t.Fatalf("Begin error = %v", err)
+			}
+			assertNoPending(t, root)
+			assertExistingTarget(t, repo, root, target)
+		})
+	}
+}
+
+func TestBeginRejectsNestedExistingFile(t *testing.T) {
+	repo, root := newRepository(t)
+	parent := filepath.Join(root, "parent")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "backup"), []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	staging, err := repo.Begin("parent/backup")
+	if staging != nil {
+		if abortErr := staging.Abort(); abortErr != nil {
+			t.Fatal(abortErr)
+		}
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("Begin error = %v", err)
+	}
+	assertNoPending(t, root)
+	assertFileContains(t, filepath.Join(parent, "backup"), "original")
+}
+
+func TestBeginAllowsAbsentTarget(t *testing.T) {
+	repo, root := newRepository(t)
+	if err := os.Mkdir(filepath.Join(root, "parent"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	staging := begin(t, repo, "parent/leaf")
+	if _, err := os.Stat(filepath.Join(root, staging.pending)); err != nil {
+		t.Fatalf("pending directory was not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "parent", "leaf")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("Begin created the final path")
+	}
+}
+
+func TestSyncRenamedReturnsDirectorySyncError(t *testing.T) {
+	t.Run("parent", func(t *testing.T) { assertSyncRenamedParentClosed(t) })
+	t.Run("root", func(t *testing.T) { assertSyncRenamedRootClosed(t) })
+}
+
+func assertSyncRenamedParentClosed(t *testing.T) {
+	t.Helper()
+	parent, rootDir := openTempDirPair(t)
+	t.Cleanup(func() { rootDir.Close() })
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := syncRenamed("backup", rootDir, parent)
+	if !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("sync error = %v", err)
+	}
+}
+
+func assertSyncRenamedRootClosed(t *testing.T) {
+	t.Helper()
+	parent, rootDir := openTempDirPair(t)
+	t.Cleanup(func() { parent.Close() })
+	if err := rootDir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err := syncRenamed("nested/backup", rootDir, parent)
+	if !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("sync error = %v", err)
+	}
+}
+
+func openTempDirPair(t *testing.T) (parent, rootDir *os.File) {
+	t.Helper()
+	parent, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootDir, err = os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parent, rootDir
+}
+
+func TestRestorePendingAfterDirectorySyncFailure(t *testing.T) {
+	repo, root := newRepository(t)
+	staging := begin(t, repo, "backup")
+	commitBytes(t, staging, "payload", "rolled-back")
+	rootDir, parent := openRootPair(t, repo)
+	if err := renameExclusive(rootDir, staging.pending, parent, "backup"); err != nil {
+		t.Fatal(err)
+	}
+	cause := closedDirectorySyncError(t)
+	published, err := staging.restorePending(parent, rootDir, cause)
+	if published {
+		t.Fatal("directory sync failure stayed published")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("restore error = %v, want %v", err, cause)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "backup")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatal("final directory remained after rollback")
+	}
+	payload, readErr := os.ReadFile(filepath.Join(root, staging.pending, "payload"))
+	if readErr != nil || string(payload) != "rolled-back" {
+		t.Fatalf("restored payload = %q, %v", payload, readErr)
+	}
+}
+
+func TestRestoreRenameFailureLeavesPublishedDirectory(t *testing.T) {
+	repo, root := newRepository(t)
+	staging := begin(t, repo, "backup")
+	commitBytes(t, staging, "payload", "keep")
+	rootDir, parent := openRootPair(t, repo)
+	if err := renameExclusive(rootDir, staging.pending, parent, "backup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.root.Mkdir(staging.pending, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cause := closedDirectorySyncError(t)
+	published, err := staging.restorePending(parent, rootDir, cause)
+	if !published || !errors.Is(err, cause) || !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("published=%v restore error=%v", published, err)
+	}
+	assertFileContains(t, filepath.Join(root, "backup", "payload"), "keep")
+	if err = staging.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContains(t, filepath.Join(root, "backup", "payload"), "keep")
+}
+
+func assertFileContains(t *testing.T, name, want string) {
+	t.Helper()
+	got, err := os.ReadFile(name)
+	if err != nil || string(got) != want {
+		t.Fatalf("%s = %q, %v", name, got, err)
+	}
+}
+
+func TestCloseWaitsForRootPin(t *testing.T) {
+	repo, _ := newRepository(t)
+	if err := repo.pin(); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			repo.unpin()
+		}
+	}
+	defer release()
+	done := make(chan error, 1)
+	go func() { done <- repo.Close() }()
+	select {
+	case err := <-done:
+		t.Fatalf("Close finished while a root pin was held: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	callWithin(t, 2*time.Second, func() error { return <-done })
+}
+
+func openRootPair(t *testing.T, repo *Repository) (rootDir, parent *os.File) {
+	t.Helper()
+	var err error
+	rootDir, err = repo.root.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rootDir.Close() })
+	parent, err = repo.root.Open(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { parent.Close() })
+	return rootDir, parent
+}
+
+func closedDirectorySyncError(t *testing.T) error {
+	t.Helper()
+	dir, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	err = dir.Sync()
+	if !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("closed directory sync = %v", err)
+	}
+	return err
 }
 
 func TestConcurrentPublishDoesNotReplace(t *testing.T) {
