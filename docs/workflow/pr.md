@@ -10,6 +10,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 - 业务逻辑提交前必须完成 build、test、项目配置的 `golangci-lint`；不能以 `go vet` 替代 lint，不能降低规则或跳过失败检查。检查范围和命令见 [quality.md](../guide/quality.md)。
 - 纯文档、注释和提交规范等不涉及业务逻辑的变更不运行 build/test/lint，检查链接、内容、差异与版本管理即可。CI 对测试、fixture、依赖、镜像和 workflow 变更的覆盖要求仍然有效。
 - 默认不创建/切换分支、不推送；按用户明确授权执行相应操作。CLI/Web 独立分支与共享接口约束见 [development.md](../guide/development.md)。
+- 提交 PR 时直接以正式 PR 形式创建，不使用草稿（Draft）PR。
 
 ## PR 必须包含的两部分
 
