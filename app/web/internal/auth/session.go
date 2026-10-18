@@ -30,9 +30,12 @@ func (c SessionConfig) Validate() error {
 
 // PasswordHasher hashes and verifies passwords. Implementations must perform
 // exactly one dummy verification when the account does not exist.
+// Verify is the anonymous login path. VerifyAuthenticated is for a session
+// that has already been accepted, and must not consume the anonymous slot budget.
 type PasswordHasher interface {
 	Hash(password string) (string, error)
 	Verify(password, encoded string) (bool, error)
+	VerifyAuthenticated(password, encoded string) (bool, error)
 	VerifyDummy(password string) error
 }
 

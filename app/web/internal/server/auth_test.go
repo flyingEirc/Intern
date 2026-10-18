@@ -61,7 +61,7 @@ func (f *authFixture) seed(t *testing.T, username, role string) store.User {
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := f.database.CreateUser(t.Context(), username, hash, role)
+	user, err := f.database.CreateUser(t.Context(), username, hash, role, store.SystemAudit("users.create", store.AuditDetail{Role: role}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestLoginFailuresAreIndistinguishableAndUnknownUserUsesDummy(t *testing.T) 
 	f := newAuthFixture(t)
 	user := f.seed(t, "disabled", "viewer")
 	disabled := true
-	if _, err := f.database.UpdateUser(t.Context(), user.ID, store.UserChanges{Disabled: &disabled}); err != nil {
+	if _, err := f.database.UpdateUser(t.Context(), user.ID, store.UserChanges{Disabled: &disabled}, store.SystemAudit("users.update", store.AuditDetail{Disabled: &disabled})); err != nil {
 		t.Fatal(err)
 	}
 	for _, username := range []string{"missing", "disabled"} {

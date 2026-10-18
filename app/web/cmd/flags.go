@@ -29,7 +29,7 @@ func newConfigLoader(root *cobra.Command) *configLoader {
 	flags.String("log-level", "info", "JSON log level: debug, info, warn, error")
 	flags.String("tls-cert-file", "", "TLS certificate PEM file (requires --tls-key-file)")
 	flags.String("tls-key-file", "", "TLS private key PEM file (requires --tls-cert-file)")
-	flags.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown window; cancellation may be followed by additional audit and SQLite busy-wait draining")
+	flags.Duration("shutdown-timeout", 30*time.Second, "Graceful shutdown window only. After it, in-flight handlers may still drain for the detached-audit budget plus the SQLite busy timeout plus a small margin (currently 10.5s). This is not an absolute process-exit deadline. Canceling a request does not interrupt a SQLite busy wait or fsync.")
 	flags.StringSlice("trusted-proxies", nil, "Trusted reverse proxy IPs or CIDRs (default: none)")
 	flags.Bool("tls-terminated-by-proxy", false, "Allow plain HTTP when a reverse proxy terminates TLS. Requires --trusted-proxies. Firewall direct access; this is not end-to-end TLS")
 	flags.Duration("session-idle-timeout", 30*time.Minute, "Maximum session inactivity (must not exceed lifetime)")

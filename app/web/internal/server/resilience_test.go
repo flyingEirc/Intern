@@ -181,6 +181,9 @@ type unavailableHasher struct{ auth.PasswordHasher }
 func (unavailableHasher) Verify(string, string) (bool, error) {
 	return false, auth.ErrUnavailable
 }
+func (unavailableHasher) VerifyAuthenticated(string, string) (bool, error) {
+	return false, auth.ErrUnavailable
+}
 func (unavailableHasher) VerifyDummy(string) error { return auth.ErrUnavailable }
 func (unavailableHasher) Hash(string) (string, error) {
 	return "", auth.ErrUnavailable

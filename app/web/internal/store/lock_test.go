@@ -47,7 +47,7 @@ func TestReadOnlyBeginDoesNotReserveTheWriteLock(t *testing.T) {
 func TestSessionAndUserWritesWaitForExternalLock(t *testing.T) {
 	database, path := openLockedStore(t)
 	database.SetSessionLifetime(time.Hour)
-	user, err := database.CreateUser(t.Context(), "viewer", "hash", "viewer")
+	user, err := database.CreateUser(t.Context(), "viewer", "hash", "viewer", SystemAudit("users.create", AuditDetail{Role: "viewer"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestSessionAndUserWritesWaitForExternalLock(t *testing.T) {
 	assertSessionAbsent(t, database.Sessions(), "held")
 	role := "operator"
 	assertWaitsForLock(t, path, func() error {
-		updated, updateErr := database.UpdateUser(t.Context(), user.ID, UserChanges{Role: &role})
+		updated, updateErr := database.UpdateUser(t.Context(), user.ID, UserChanges{Role: &role}, SystemAudit("users.update", AuditDetail{Role: role}))
 		if updateErr != nil {
 			return updateErr
 		}

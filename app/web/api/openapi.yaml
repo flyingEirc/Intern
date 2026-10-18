@@ -14,8 +14,12 @@ info:
     username shares one fixed key per IP and is not stored. The per-user bucket
     is not created when the IP bucket already denies the attempt.
     Current-password checks on PUT /api/v1/auth/password are limited to 5
-    attempts/minute/user (burst 5). At most 2 argon2id hash or verify operations
-    run at once; a full cap returns 503 unavailable immediately with Retry-After.
+    attempts/minute/user (burst 5). At most 2 argon2id operations run at once
+    per process, not machine-wide. Anonymous login verification holds at most
+    1 of those slots; authenticated password and user-administration hashes use
+    the remaining capacity. A full cap returns 503 unavailable immediately with
+    Retry-After and does not queue. API responses are buffered up to 8 MiB; a
+    larger or streaming body becomes one 500 and does not commit a session.
 security:
   - cookieAuth: []
 paths:
@@ -135,10 +139,17 @@ paths:
   /api/v1/auth/password:
     put:
       operationId: changeOwnPassword
-      summary: Change own password, rotate this token and revoke all other sessions
+      summary: Change own password and revoke other sessions
       description: >-
         Current-password verification is limited to 5 attempts per minute per user
-        (burst 5). Hashing and verification share the global argon2id cap of 2.
+        (burst 5). It uses the authenticated portion of the per-process argon2id
+        cap of 2, so anonymous login cannot hold every slot.
+        A 204 means the password change and its success audit committed. When
+        token rotation succeeds, this session continues on a new token and every
+        other session is revoked. If the password transaction succeeds but token
+        rotation fails, the response is still 204: the password change succeeded,
+        the previous session is no longer valid, and the client must log in again
+        with the new password.
       requestBody:
         required: true
         content:

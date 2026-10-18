@@ -106,6 +106,7 @@ func TestAuditDetailJSONContainsOnlyWhitelistedKeys(t *testing.T) {
 	requestAPI(t, f.client, req, 403)
 	got := detailJSONList(t, f.dir)
 	want := []string{
+		`{"role":"admin"}`,
 		`{}`,
 		`{}`,
 		`{"role":"viewer"}`,

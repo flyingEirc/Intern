@@ -64,8 +64,22 @@ func createUser(ctx context.Context, queries *storesql.Queries, username, hash, 
 	return userFromRow(row), userError(err)
 }
 
-func (s *Store) CreateUser(ctx context.Context, username, hash, role string) (User, error) {
-	return createUser(ctx, storesql.New(s.db), username, hash, role)
+// CreateUser commits the new user and its success audit together. An empty
+// action or an audit insert failure rolls the user back.
+func (s *Store) CreateUser(ctx context.Context, username, hash, role string, entry AuditLog) (User, error) {
+	var user User
+	err := s.withTx(ctx, func(q *storesql.Queries) error {
+		created, err := createUser(ctx, q, username, hash, role)
+		if err != nil {
+			return err
+		}
+		user = created
+		return insertSuccessAudit(ctx, q, entry, "user", user.ID)
+	})
+	if err != nil {
+		return User{}, err
+	}
+	return user, nil
 }
 
 func (s *Store) User(ctx context.Context, id string) (User, error) {
@@ -90,11 +104,29 @@ func (s *Store) Users(ctx context.Context) ([]User, error) {
 	return users, nil
 }
 
-// UpdateUser uses one guarded SQL statement so concurrent requests cannot remove
-// the last enabled administrator, including requests from create-admin's connection.
+// UpdateUser commits the user change and its success audit together. The
+// last-admin guard stays in the same UPDATE, so concurrent requests cannot
+// remove the last enabled administrator, including create-admin's connection.
 // SQLite reserves the write lock at the start of that UPDATE, before the
 // last-admin subquery, so busy_timeout applies without a deferred lock upgrade.
-func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges) (User, error) {
+// An audit failure rolls the change back.
+func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges, entry AuditLog) (User, error) {
+	var user User
+	err := s.withTx(ctx, func(q *storesql.Queries) error {
+		updated, err := updateUser(ctx, q, id, changes)
+		if err != nil {
+			return err
+		}
+		user = updated
+		return insertSuccessAudit(ctx, q, entry, "user", user.ID)
+	})
+	if err != nil {
+		return User{}, err
+	}
+	return user, nil
+}
+
+func updateUser(ctx context.Context, queries *storesql.Queries, id string, changes UserChanges) (User, error) {
 	params := storesql.UpdateUserParams{ID: id, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if changes.Role != nil {
 		params.Role = sql.NullString{String: *changes.Role, Valid: true}
@@ -108,25 +140,55 @@ func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges) 
 	if changes.PasswordHash != nil {
 		params.PasswordHash = sql.NullString{String: *changes.PasswordHash, Valid: true}
 	}
-	row, err := storesql.New(s.db).UpdateUser(ctx, params)
+	row, err := queries.UpdateUser(ctx, params)
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, lookupErr := s.User(ctx, id); lookupErr != nil {
-			return User{}, lookupErr
+		// Same transaction as the UPDATE. A second pool connection would deadlock
+		// because the writable pool allows only one connection.
+		if _, lookupErr := queries.GetUser(ctx, id); lookupErr != nil {
+			return User{}, userError(lookupErr)
 		}
 		return User{}, ErrLastAdmin
 	}
 	return userFromRow(row), err
 }
 
-func (s *Store) ChangePassword(ctx context.Context, user User, hash string) (User, error) {
-	row, err := storesql.New(s.db).ChangePassword(ctx, storesql.ChangePasswordParams{
+// ChangePassword commits the password, epoch bump, and success audit together.
+// Session token rotation is a later cookie write and is not part of this transaction.
+func (s *Store) ChangePassword(ctx context.Context, user User, hash string, entry AuditLog) (User, error) {
+	var updated User
+	err := s.withTx(ctx, func(q *storesql.Queries) error {
+		changed, err := changePassword(ctx, q, user, hash)
+		if err != nil {
+			return err
+		}
+		updated = changed
+		return insertSuccessAudit(ctx, q, entry, "user", updated.ID)
+	})
+	if err != nil {
+		return User{}, err
+	}
+	return updated, nil
+}
+
+func changePassword(ctx context.Context, queries *storesql.Queries, user User, hash string) (User, error) {
+	row, err := queries.ChangePassword(ctx, storesql.ChangePasswordParams{
 		ID: user.ID, SessionEpoch: user.SessionEpoch, PasswordHash: hash, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	return userFromRow(row), userError(err)
 }
 
-func (s *Store) RevokeSessions(ctx context.Context, id string) error {
-	_, err := storesql.New(s.db).RevokeUserSessions(ctx, storesql.RevokeUserSessionsParams{
+// RevokeSessions commits the epoch bump and its success audit together.
+func (s *Store) RevokeSessions(ctx context.Context, id string, entry AuditLog) error {
+	return s.withTx(ctx, func(q *storesql.Queries) error {
+		if err := revokeSessions(ctx, q, id); err != nil {
+			return err
+		}
+		return insertSuccessAudit(ctx, q, entry, "user", id)
+	})
+}
+
+func revokeSessions(ctx context.Context, queries *storesql.Queries, id string) error {
+	_, err := queries.RevokeUserSessions(ctx, storesql.RevokeUserSessionsParams{
 		ID: id, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	})
 	return userError(err)

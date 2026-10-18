@@ -59,13 +59,17 @@ func (h authHandlers) createUser(c *gin.Context) {
 		validationError(c, err)
 		return
 	}
-	user, err := h.service.Database.CreateUser(c.Request.Context(), request.Username, hash, request.Role)
+	user, err := h.service.Database.CreateUser(c.Request.Context(), request.Username, hash, request.Role,
+		middleware.SuccessAudit(c, "users.create", http.StatusCreated, "user", "", store.AuditDetail{Role: request.Role}))
 	if err != nil {
 		resourceError(c, err)
 		return
 	}
 	middleware.AuditResource(c, "user", user.ID, store.AuditDetail{Role: user.Role})
 	render.JSON(c, http.StatusCreated, user)
+	if c.Writer.Status() < 500 {
+		middleware.MarkAuditRecorded(c)
+	}
 }
 
 type updateUserRequest struct {
@@ -109,15 +113,18 @@ func (h authHandlers) updateUser(c *gin.Context) {
 		}
 		changes.PasswordHash = &hash
 	}
-	user, err := h.service.Database.UpdateUser(c.Request.Context(), c.Param("id"), changes)
+	detail := store.AuditDetail{Role: roleDetail(request.Role), Disabled: request.Disabled, PasswordChanged: request.Password != nil}
+	user, err := h.service.Database.UpdateUser(c.Request.Context(), c.Param("id"), changes,
+		middleware.SuccessAudit(c, "users.update", http.StatusOK, "user", c.Param("id"), detail))
 	if err != nil {
 		resourceError(c, err)
 		return
 	}
-	middleware.AuditResource(c, "user", user.ID, store.AuditDetail{
-		Role: roleDetail(request.Role), Disabled: request.Disabled, PasswordChanged: request.Password != nil,
-	})
+	middleware.AuditResource(c, "user", user.ID, detail)
 	render.JSON(c, http.StatusOK, user)
+	if c.Writer.Status() < 500 {
+		middleware.MarkAuditRecorded(c)
+	}
 }
 
 func roleDetail(role *string) string {
@@ -130,11 +137,13 @@ func roleDetail(role *string) string {
 func (h authHandlers) revokeSessions(c *gin.Context) {
 	id := c.Param("id")
 	middleware.AuditResource(c, "user", id, store.AuditDetail{})
-	if err := h.service.Database.RevokeSessions(c.Request.Context(), id); err != nil {
+	if err := h.service.Database.RevokeSessions(c.Request.Context(), id,
+		middleware.SuccessAudit(c, "users.revoke_sessions", http.StatusNoContent, "user", id, store.AuditDetail{})); err != nil {
 		resourceError(c, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
+	middleware.MarkAuditRecorded(c)
 }
 
 type auditPage struct {

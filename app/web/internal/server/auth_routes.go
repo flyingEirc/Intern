@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -18,6 +19,7 @@ type authHandlers struct {
 	service   *auth.Service
 	limiter   *auth.LoginLimiter
 	passwords *auth.PasswordLimiter
+	logger    *slog.Logger
 }
 
 type userResponse struct {
@@ -33,8 +35,8 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func registerAuth(engine *gin.Engine, service *auth.Service) {
-	h := authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: auth.NewPasswordLimiter()}
+func registerAuth(engine *gin.Engine, service *auth.Service, logger *slog.Logger) {
+	h := authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: auth.NewPasswordLimiter(), logger: logger}
 	permissions := middleware.Authorization{Service: service}
 	engine.POST("/api/v1/auth/login", h.login)
 	self := engine.Group("/api/v1/auth", permissions.RequirePermission(auth.SessionSelf))
@@ -75,6 +77,9 @@ func (h authHandlers) login(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	// RenewToken deletes the previous session row immediately. The replacement
+	// cookie is written only after the response is known to be success, and the
+	// login audit is best-effort after that. Neither is atomic with the other.
 	if err = h.service.Sessions.RenewToken(ctx); err != nil {
 		internalError(c)
 		return
@@ -99,12 +104,17 @@ func (h authHandlers) verifyLogin(c *gin.Context, request loginRequest) (store.U
 }
 
 func (h authHandlers) logout(c *gin.Context) {
-	middleware.AuditResource(c, "user", middleware.CurrentUser(c).ID, store.AuditDetail{})
-	if err := h.service.Sessions.Destroy(c.Request.Context()); err != nil {
+	user := middleware.CurrentUser(c)
+	middleware.AuditResource(c, "user", user.ID, store.AuditDetail{})
+	entry := middleware.SuccessAudit(c, "auth.logout", http.StatusNoContent, "user", user.ID, store.AuditDetail{})
+	// The tombstone and the success audit commit together. A best-effort audit
+	// row is not also written when this succeeds.
+	if err := h.service.Sessions.Destroy(store.WithLogoutAudit(c.Request.Context(), entry)); err != nil {
 		internalError(c)
 		return
 	}
 	c.Status(http.StatusNoContent)
+	middleware.MarkAuditRecorded(c)
 }
 
 func (h authHandlers) session(c *gin.Context) {
@@ -128,7 +138,7 @@ func (h authHandlers) password(c *gin.Context) {
 	if !allowPasswordAttempt(c, h.passwords, user.ID) {
 		return
 	}
-	valid, ok := verifiedPassword(c, h.service.Passwords, request.CurrentPassword, user.PasswordHash)
+	valid, ok := verifiedCurrentPassword(c, h.service.Passwords, request.CurrentPassword, user.PasswordHash)
 	if !ok {
 		return
 	}
@@ -140,7 +150,9 @@ func (h authHandlers) password(c *gin.Context) {
 	if !ok {
 		return
 	}
-	updated, err := h.service.Database.ChangePassword(c.Request.Context(), user, hash)
+	detail := store.AuditDetail{PasswordChanged: true}
+	updated, err := h.service.Database.ChangePassword(c.Request.Context(), user, hash,
+		middleware.SuccessAudit(c, "auth.password", http.StatusNoContent, "user", user.ID, detail))
 	if errors.Is(err, store.ErrNotFound) {
 		render.Error(c, http.StatusUnauthorized, render.Unauthorized, "Authentication required")
 		return
@@ -149,13 +161,24 @@ func (h authHandlers) password(c *gin.Context) {
 		internalError(c)
 		return
 	}
+	// The password and success audit are already committed. Token rotation writes
+	// a new cookie afterwards and cannot join that transaction, so a rotation
+	// error must not turn that commit into an HTTP 500. The new epoch is written
+	// only after RenewToken has deleted the old token. Writing it after a failed
+	// delete would let the session middleware commit the new epoch onto the old
+	// token, which keeps that session valid. The loaded epoch stays unchanged, so
+	// the old session no longer matches and the user must log in again. Destroy
+	// is not called: it repeats the same tombstone write, and a second failure
+	// must not replace this response.
 	if err = h.service.Sessions.RenewToken(c.Request.Context()); err != nil {
-		internalError(c)
-		return
+		h.logger.ErrorContext(c.Request.Context(), "session token rotation failed after password change; log in again",
+			"request_id", c.Writer.Header().Get(render.RequestIDHeader), "error", err)
+	} else {
+		h.service.Sessions.Put(c.Request.Context(), "epoch", updated.SessionEpoch)
 	}
-	h.service.Sessions.Put(c.Request.Context(), "epoch", updated.SessionEpoch)
-	middleware.AuditResource(c, "user", user.ID, store.AuditDetail{PasswordChanged: true})
+	middleware.AuditResource(c, "user", user.ID, detail)
 	c.Status(http.StatusNoContent)
+	middleware.MarkAuditRecorded(c)
 }
 
 func allowPasswordAttempt(c *gin.Context, limiter *auth.PasswordLimiter, userID string) bool {
@@ -168,8 +191,8 @@ func allowPasswordAttempt(c *gin.Context, limiter *auth.PasswordLimiter, userID 
 	return false
 }
 
-func verifiedPassword(c *gin.Context, hasher auth.PasswordHasher, password, encoded string) (bool, bool) {
-	valid, err := hasher.Verify(password, encoded)
+func verifiedCurrentPassword(c *gin.Context, hasher auth.PasswordHasher, password, encoded string) (bool, bool) {
+	valid, err := hasher.VerifyAuthenticated(password, encoded)
 	if errors.Is(err, auth.ErrUnavailable) {
 		unavailable(c)
 		return false, false

@@ -30,11 +30,17 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string,
 	if err := engine.SetTrustedProxies(trustedProxies); err != nil {
 		return nil, err
 	}
+	// The inner Recovery turns panics in the session buffer and handlers into one
+	// 500 before Audit reads the status. The outer Recovery covers panics in
+	// cross-origin rejection and audit recording. RequestLog stays outside both
+	// so the access log sees that final status.
 	engine.Use(middleware.RequestID(), middleware.RequestLog(logger),
+		middleware.Recovery(logger),
 		middleware.CrossOriginRejection(authentication.Database, logger),
 		middleware.Audit(authentication.Database, logger),
+		middleware.Recovery(logger),
 		middleware.Session(authentication.Sessions, logger),
-		middleware.Recovery(logger), middleware.BodyLimit())
+		middleware.BodyLimit())
 	engine.NoRoute(func(c *gin.Context) {
 		render.Error(c, http.StatusNotFound, render.NotFound, "Route not found")
 	})
@@ -51,6 +57,6 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string,
 		}
 		render.JSON(c, http.StatusOK, StatusResponse{Status: "ready"})
 	})
-	registerAuth(engine, authentication)
+	registerAuth(engine, authentication, logger)
 	return engine, nil
 }

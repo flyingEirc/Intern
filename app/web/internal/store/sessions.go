@@ -99,19 +99,12 @@ func (s *SessionStore) DeleteCtx(ctx context.Context, token string) (retErr erro
 		return err
 	}
 	defer func() {
-		if retErr != nil {
-			if rollbackErr := tx.Rollback(); !errors.Is(rollbackErr, sql.ErrTxDone) {
-				retErr = errors.Join(retErr, rollbackErr)
-			}
-		}
+		retErr = rollbackOnFailure(tx, retErr)
 	}()
 	queries := storesql.New(tx)
-	until := unixSeconds(s.tombstoneUntil(time.Now()))
-	stored, expiryErr := queries.GetSessionExpiry(ctx, token)
-	if expiryErr == nil && stored > until {
-		until = stored
-	} else if expiryErr != nil && !errors.Is(expiryErr, sql.ErrNoRows) {
-		return expiryErr
+	until, err := s.deletedSessionTombstoneExpiry(ctx, queries, token)
+	if err != nil {
+		return err
 	}
 	if err = queries.UpsertSessionTombstone(ctx, storesql.UpsertSessionTombstoneParams{Token: token, Expiry: until}); err != nil {
 		return err
@@ -119,7 +112,43 @@ func (s *SessionStore) DeleteCtx(ctx context.Context, token string) (retErr erro
 	if err = queries.DeleteSession(ctx, token); err != nil {
 		return err
 	}
+	if err = insertLogoutSuccessAudit(ctx, queries); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func rollbackOnFailure(tx *sql.Tx, err error) error {
+	if err == nil {
+		return nil
+	}
+	if rollbackErr := tx.Rollback(); !errors.Is(rollbackErr, sql.ErrTxDone) {
+		return errors.Join(err, rollbackErr)
+	}
+	return err
+}
+
+func (s *SessionStore) deletedSessionTombstoneExpiry(ctx context.Context, queries *storesql.Queries, token string) (float64, error) {
+	until := unixSeconds(s.tombstoneUntil(time.Now()))
+	stored, err := queries.GetSessionExpiry(ctx, token)
+	if err == nil && stored > until {
+		return stored, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	return until, nil
+}
+
+func insertLogoutSuccessAudit(ctx context.Context, queries *storesql.Queries) error {
+	entry, ok := logoutAuditFrom(ctx)
+	if !ok {
+		return nil
+	}
+	if entry.Result != "success" {
+		return errors.New("logout audit must be a success record")
+	}
+	return insertSuccessAudit(ctx, queries, entry, "user", entry.ResourceID)
 }
 
 func (s *SessionStore) tombstoneUntil(now time.Time) time.Time {

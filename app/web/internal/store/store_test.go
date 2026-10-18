@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,9 +31,15 @@ func privateTempDir(t *testing.T) string {
 }
 
 func TestPragmasAndPermissions(t *testing.T) {
+	if BusyTimeout != 5*time.Second {
+		t.Fatalf("BusyTimeout = %s, want 5s", BusyTimeout)
+	}
 	dir := filepath.Join(t.TempDir(), "metadata")
 	s := openTestStore(t, dir)
-	for pragma, want := range map[string]string{"journal_mode": "wal", "busy_timeout": "5000", "synchronous": "2", "foreign_keys": "1"} {
+	for pragma, want := range map[string]string{
+		"journal_mode": "wal", "busy_timeout": strconv.FormatInt(BusyTimeout.Milliseconds(), 10),
+		"synchronous": "2", "foreign_keys": "1",
+	} {
 		var got string
 		if err := s.db.QueryRowContext(t.Context(), "PRAGMA "+pragma).Scan(&got); err != nil || got != want {
 			t.Fatalf("PRAGMA %s = %q, %v; want %q", pragma, got, err, want)

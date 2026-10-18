@@ -19,6 +19,13 @@ import (
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
+// BusyTimeout is the SQLite busy_timeout on every control-plane connection.
+// modernc.org/sqlite's default busy callback does not observe sqlite3_interrupt,
+// so a statement already waiting on a lock keeps running until this elapses
+// even after its context is canceled. Shutdown waits at least this long, in
+// addition to the detached-audit budget, before it may close the database.
+const BusyTimeout = 5 * time.Second
+
 type Store struct {
 	db              *sql.DB
 	provider        *goose.Provider
@@ -76,7 +83,7 @@ func openStore(ctx context.Context, dir string) (_ *Store, retErr error) {
 func openDatabase(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", BusyTimeout.Milliseconds()))
 	q.Add("_pragma", "synchronous(FULL)")
 	q.Add("_pragma", "foreign_keys(1)")
 	if readOnly {
@@ -86,7 +93,8 @@ func openDatabase(ctx context.Context, path string, readOnly bool) (*sql.DB, err
 		q.Add("_pragma", "journal_mode(WAL)")
 		// modernc.org/sqlite applies _txlock only when the transaction is not
 		// read-only (newTx uses BEGIN IMMEDIATE for !opts.ReadOnly). The write
-		// lock is reserved before any SELECT, so busy_timeout waits. A deferred
+		// lock is reserved before any SELECT, so busy_timeout waits. That wait
+		// does not return early when the context is canceled. A deferred
 		// transaction that has already read does not invoke the busy handler and
 		// returns SQLITE_BUSY or SQLITE_BUSY_SNAPSHOT instead.
 		q.Set("_txlock", "immediate")
@@ -156,6 +164,9 @@ func insertInstance(ctx context.Context, q *storesql.Queries) (storesql.GetInsta
 
 func (s *Store) InstanceID() string { return s.instanceID }
 
+// ConnectionsInUse reports pooled connections currently inside a driver call.
+func (s *Store) ConnectionsInUse() int { return s.db.Stats().InUse }
+
 // Ready checks both connectivity and the exact migration version.
 func (s *Store) Ready(ctx context.Context) error {
 	if err := s.db.PingContext(ctx); err != nil {
@@ -169,6 +180,26 @@ func (s *Store) Ready(ctx context.Context) error {
 		return fmt.Errorf("metadata database version %d does not match embedded latest version %d", current, s.latest)
 	}
 	return nil
+}
+
+// withTx runs fn inside one BEGIN IMMEDIATE transaction. A non-nil error rolls
+// the mutation and any success audit inserted by fn back together.
+func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (retErr error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if retErr != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				retErr = errors.Join(retErr, rollbackErr)
+			}
+		}
+	}()
+	if err = fn(storesql.New(tx)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Close closes the database before releasing exclusive ownership.

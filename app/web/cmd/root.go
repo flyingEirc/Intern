@@ -54,6 +54,7 @@ func (a *application) serveCommand() *cobra.Command {
 }
 
 func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
+	// Configuration failure returns before metadata creation or a listen socket.
 	c, err := a.config.load()
 	if err != nil {
 		return err
@@ -85,9 +86,15 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 	}
 	config := server.Config{
 		Listen: c.Listen, CertFile: c.TLS.CertFile, KeyFile: c.TLS.KeyFile,
-		ShutdownTimeout: c.ShutdownTimeout,
+		ShutdownTimeout: c.ShutdownTimeout, TLSTerminatedByProxy: c.TLSTerminatedByProxy,
 	}
-	logger.Info("starting server", "listen", c.Listen, "instance_id", database.InstanceID())
+	plainProxy := c.TLSTerminatedByProxy && c.TLS.CertFile == ""
+	logger.Info("starting server", "listen", c.Listen, "instance_id", database.InstanceID(),
+		"tls", c.TLS.CertFile != "", "tls_terminated_by_proxy", plainProxy)
+	if plainProxy {
+		logger.Warn("serving plain HTTP behind a TLS-terminating proxy; firewall this listener so clients cannot connect directly. This mode is not end-to-end TLS.",
+			"trusted_proxies", c.TrustedProxies)
+	}
 	srv := server.New(config, server.Handler(engine))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
 	return server.Run(command.Context(), srv, config)

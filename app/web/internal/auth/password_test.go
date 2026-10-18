@@ -37,7 +37,7 @@ func saturatedPasswords(t *testing.T) *Passwords {
 	t.Helper()
 	passwords := testPasswords(t)
 	for range Argon2Concurrency {
-		if err := passwords.acquire(); err != nil {
+		if err := passwords.acquireSlot(false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -51,6 +51,46 @@ func saturatedPasswords(t *testing.T) *Passwords {
 		}
 	})
 	return passwords
+}
+
+func TestAnonymousVerificationCannotTakeEveryHashSlot(t *testing.T) {
+	if Argon2Concurrency != 2 || Argon2AnonymousLimit != 1 {
+		t.Fatalf("concurrency=%d anonymous=%d", Argon2Concurrency, Argon2AnonymousLimit)
+	}
+	passwords := testPasswords(t)
+	if err := passwords.acquireSlot(true); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err := passwords.Verify("test-credential-123", passwords.dummy)
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("second anonymous verify waited %s", time.Since(start))
+	}
+	requireUnavailable(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, hashErr := passwords.Hash("test-credential-123")
+		done <- hashErr
+	}()
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("authenticated hash blocked while one anonymous slot was held")
+	}
+	if err = passwords.acquireSlot(false); err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	_, err = passwords.Hash("test-credential-123")
+	if time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("hash queued for %s", time.Since(start))
+	}
+	requireUnavailable(t, err)
+	_, err = passwords.VerifyAuthenticated("test-credential-123", passwords.dummy)
+	requireUnavailable(t, err)
 }
 
 func requireUnavailable(t *testing.T, err error) {

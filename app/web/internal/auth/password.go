@@ -32,9 +32,16 @@ func (p PasswordParams) validate() error {
 	return nil
 }
 
-// Argon2Concurrency is the process-wide cap on concurrent argon2id hash and
-// verify operations for one Passwords value. The server keeps a single value.
-const Argon2Concurrency = 2
+// Argon2Concurrency is the cap on concurrent argon2id operations for one
+// Passwords value. It is per process, not machine-wide: the server and the CLI
+// each have their own value. Anonymous verification may hold at most
+// Argon2AnonymousLimit of those slots so authenticated password changes and
+// user administration can still acquire one. Callers fail immediately instead
+// of queueing another 64 MiB hash.
+const (
+	Argon2Concurrency    = 2
+	Argon2AnonymousLimit = 1
+)
 
 // UnavailableRetryAfter is the Retry-After delay, in seconds, when that cap is
 // already full. Callers fail immediately instead of queueing more 64 MiB hashes.
@@ -44,16 +51,23 @@ const UnavailableRetryAfter = 1
 var ErrUnavailable = errors.New("password hasher is at capacity")
 
 type Passwords struct {
-	params PasswordParams
-	dummy  string
-	slots  chan struct{}
+	params    PasswordParams
+	dummy     string
+	slots     chan struct{}
+	anonymous chan struct{}
 }
 
 func NewPasswords(params PasswordParams) (*Passwords, error) {
 	if err := params.validate(); err != nil {
 		return nil, err
 	}
-	passwords := &Passwords{params: params, slots: make(chan struct{}, Argon2Concurrency)}
+	if Argon2AnonymousLimit < 1 || Argon2AnonymousLimit >= Argon2Concurrency {
+		return nil, errors.New("argon2 anonymous limit must leave a slot for authenticated operations")
+	}
+	passwords := &Passwords{
+		params: params, slots: make(chan struct{}, Argon2Concurrency),
+		anonymous: make(chan struct{}, Argon2AnonymousLimit),
+	}
 	dummy, err := passwords.Hash(base64.RawStdEncoding.EncodeToString(randomBytes(32)))
 	if err != nil {
 		return nil, err
@@ -62,16 +76,33 @@ func NewPasswords(params PasswordParams) (*Passwords, error) {
 	return passwords, nil
 }
 
-func (p *Passwords) acquire() error {
+// acquireSlot takes one total slot. Anonymous callers also take the smaller
+// anonymous budget and release it if the total cap is already full.
+func (p *Passwords) acquireSlot(anonymous bool) error {
+	if anonymous {
+		select {
+		case p.anonymous <- struct{}{}:
+		default:
+			return ErrUnavailable
+		}
+	}
 	select {
 	case p.slots <- struct{}{}:
 		return nil
 	default:
+		if anonymous {
+			<-p.anonymous
+		}
 		return ErrUnavailable
 	}
 }
 
-func (p *Passwords) release() { <-p.slots }
+func (p *Passwords) releaseSlot(anonymous bool) {
+	<-p.slots
+	if anonymous {
+		<-p.anonymous
+	}
+}
 
 func randomBytes(size int) []byte {
 	data := make([]byte, size)
@@ -83,10 +114,10 @@ func (p *Passwords) Hash(password string) (string, error) {
 	if err := ValidatePassword(password); err != nil {
 		return "", err
 	}
-	if err := p.acquire(); err != nil {
+	if err := p.acquireSlot(false); err != nil {
 		return "", err
 	}
-	defer p.release()
+	defer p.releaseSlot(false)
 	salt := randomBytes(16)
 	hash := argon2.IDKey([]byte(password), salt, p.params.Time, p.params.Memory, p.params.Parallelism, 32)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", p.params.Memory, p.params.Time, p.params.Parallelism,
@@ -94,15 +125,26 @@ func (p *Passwords) Hash(password string) (string, error) {
 }
 
 // Verify parses the stored PHC parameters rather than silently using new defaults.
+// It consumes the anonymous budget. Login is the only anonymous verifier.
 func (p *Passwords) Verify(password, encoded string) (bool, error) {
+	return p.verify(password, encoded, true)
+}
+
+// VerifyAuthenticated checks a password for a request that already has a session.
+// It uses the total cap and does not take the anonymous budget.
+func (p *Passwords) VerifyAuthenticated(password, encoded string) (bool, error) {
+	return p.verify(password, encoded, false)
+}
+
+func (p *Passwords) verify(password, encoded string, anonymous bool) (bool, error) {
 	params, salt, hash, err := parsePHC(encoded)
 	if err != nil {
 		return false, err
 	}
-	if err = p.acquire(); err != nil {
+	if err = p.acquireSlot(anonymous); err != nil {
 		return false, err
 	}
-	defer p.release()
+	defer p.releaseSlot(anonymous)
 	actual := argon2.IDKey([]byte(password), salt, params.Time, params.Memory, params.Parallelism, 32)
 	return subtle.ConstantTimeCompare(actual, hash) == 1, nil
 }

@@ -218,21 +218,21 @@ func TestSQLSessionCleanupStopsAndRemovesExpiredRows(t *testing.T) {
 
 func TestUsersSchemaAndLastAdminGuard(t *testing.T) {
 	database := openTestStore(t, privateTempDir(t))
-	admin, err := database.CreateUser(t.Context(), "Admin", "test-hash", "admin")
+	admin, err := database.CreateUser(t.Context(), "Admin", "test-hash", "admin", SystemAudit("users.create", AuditDetail{Role: "admin"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertUserSchema(t, database, admin)
 	disabled, viewer := true, "viewer"
 	for _, changes := range []UserChanges{{Disabled: &disabled}, {Role: &viewer}} {
-		if _, err = database.UpdateUser(t.Context(), admin.ID, changes); !errors.Is(err, ErrLastAdmin) {
+		if _, err = database.UpdateUser(t.Context(), admin.ID, changes, SystemAudit("users.update", AuditDetail{})); !errors.Is(err, ErrLastAdmin) {
 			t.Fatalf("last admin guard: %v", err)
 		}
 	}
-	if _, err = database.CreateUser(t.Context(), "secondadmin", "other", "admin"); err != nil {
+	if _, err = database.CreateUser(t.Context(), "secondadmin", "other", "admin", SystemAudit("users.create", AuditDetail{Role: "admin"})); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := database.UpdateUser(t.Context(), admin.ID, UserChanges{Role: &viewer})
+	updated, err := database.UpdateUser(t.Context(), admin.ID, UserChanges{Role: &viewer}, SystemAudit("users.update", AuditDetail{Role: viewer}))
 	if err != nil || updated.Role != "viewer" || updated.SessionEpoch != 1 {
 		t.Fatalf("demote with second admin: %+v, %v", updated, err)
 	}
@@ -244,10 +244,10 @@ func assertUserSchema(t *testing.T, database *Store, admin User) {
 	if err != nil || id.Version() != 7 {
 		t.Fatal("user ID is not UUIDv7")
 	}
-	if _, err = database.CreateUser(t.Context(), "ADMIN", "other", "viewer"); !errors.Is(err, ErrConflict) {
+	if _, err = database.CreateUser(t.Context(), "ADMIN", "other", "viewer", SystemAudit("users.create", AuditDetail{Role: "viewer"})); !errors.Is(err, ErrConflict) {
 		t.Fatalf("duplicate username: %v", err)
 	}
-	if _, err = database.CreateUser(t.Context(), "invalidrole", "other", "owner"); err == nil {
+	if _, err = database.CreateUser(t.Context(), "invalidrole", "other", "owner", SystemAudit("users.create", AuditDetail{Role: "owner"})); err == nil {
 		t.Fatal("role CHECK missing")
 	}
 	if _, err = database.db.ExecContext(t.Context(), "UPDATE users SET disabled = 2 WHERE id = ?", admin.ID); err == nil {

@@ -57,6 +57,46 @@ func (s *Store) Audit(ctx context.Context, entry AuditLog) error {
 	return insertAudit(ctx, storesql.New(s.db), entry)
 }
 
+type logoutAuditKey struct{}
+
+// WithLogoutAudit attaches the success audit that must commit in the same
+// transaction as an explicit logout's session tombstone. Login and password-change
+// token rotation also delete a session row; they must not use this value, or they
+// would record a false auth.logout.
+func WithLogoutAudit(ctx context.Context, entry AuditLog) context.Context {
+	entry.Result = "success"
+	return context.WithValue(ctx, logoutAuditKey{}, entry)
+}
+
+func logoutAuditFrom(ctx context.Context) (AuditLog, bool) {
+	entry, ok := ctx.Value(logoutAuditKey{}).(AuditLog)
+	if !ok || entry.Action == "" {
+		return AuditLog{}, false
+	}
+	return entry, true
+}
+
+// SystemAudit is the success-audit record for a caller that is not an HTTP
+// request. Test fixtures and other in-process writers pass it explicitly;
+// there is no mutation API that omits the audit.
+func SystemAudit(action string, detail AuditDetail) AuditLog {
+	return AuditLog{ActorType: "system", Action: action, Result: "success", Detail: detail}
+}
+
+func insertSuccessAudit(ctx context.Context, queries *storesql.Queries, entry AuditLog, resourceType, resourceID string) error {
+	if entry.Action == "" {
+		return errors.New("success audit action is required")
+	}
+	entry.Result = "success"
+	if entry.ResourceType == "" {
+		entry.ResourceType = resourceType
+	}
+	if entry.ResourceID == "" {
+		entry.ResourceID = resourceID
+	}
+	return insertAudit(ctx, queries, entry)
+}
+
 func (s *Store) AuditLogs(ctx context.Context, before int64, limit int) ([]AuditLog, error) {
 	if before == 0 {
 		before = math.MaxInt64
