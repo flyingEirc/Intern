@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/flyingEirc/Intern/app/web/api"
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
@@ -65,12 +66,17 @@ func newContractClient(t *testing.T, handler http.Handler) *contractClient {
 // Unregistered paths and methods must be rejected by the specification router;
 // their wire bodies are validated separately against ErrorResponse, not invented routes.
 func (client *contractClient) roundTrip(req *http.Request) (*httptest.ResponseRecorder, error) {
+	return client.roundTripRequest(req, false)
+}
+
+func (client *contractClient) roundTripRequest(req *http.Request, invalidRequest bool) (*httptest.ResponseRecorder, error) {
 	route, params, routeErr := client.router.FindRoute(req)
 	var input *openapi3filter.RequestValidationInput
 	if routeErr == nil {
-		input = &openapi3filter.RequestValidationInput{Request: req, Route: route, PathParams: params}
-		if err := openapi3filter.ValidateRequest(req.Context(), input); err != nil {
-			return nil, fmt.Errorf("request contract: %w", err)
+		input = &openapi3filter.RequestValidationInput{Request: req, Route: route, PathParams: params,
+			Options: &openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc}}
+		if err := openapi3filter.ValidateRequest(req.Context(), input); (err != nil) != invalidRequest {
+			return nil, fmt.Errorf("request contract (invalid expected=%t): %w", invalidRequest, err)
 		}
 	} else if !errors.Is(routeErr, routers.ErrPathNotFound) && !errors.Is(routeErr, routers.ErrMethodNotAllowed) {
 		return nil, routeErr
@@ -78,10 +84,7 @@ func (client *contractClient) roundTrip(req *http.Request) (*httptest.ResponseRe
 	recorder := httptest.NewRecorder()
 	client.handler.ServeHTTP(recorder, req)
 	if routeErr != nil {
-		want := http.StatusNotFound
-		if errors.Is(routeErr, routers.ErrMethodNotAllowed) {
-			want = http.StatusMethodNotAllowed
-		}
+		want := unmatchedStatus(req, routeErr)
 		if recorder.Code != want {
 			return nil, fmt.Errorf("specification rejected route, got status %d instead of %d", recorder.Code, want)
 		}
@@ -95,6 +98,16 @@ func (client *contractClient) roundTrip(req *http.Request) (*httptest.ResponseRe
 		return nil, fmt.Errorf("response contract: %w", err)
 	}
 	return recorder, nil
+}
+
+func unmatchedStatus(req *http.Request, routeErr error) int {
+	if http.NewCrossOriginProtection().Check(req) != nil {
+		return http.StatusForbidden
+	}
+	if errors.Is(routeErr, routers.ErrMethodNotAllowed) {
+		return http.StatusMethodNotAllowed
+	}
+	return http.StatusNotFound
 }
 
 func (client *contractClient) validateError(recorder *httptest.ResponseRecorder) error {
@@ -122,7 +135,20 @@ func requestAPI(t *testing.T, client *contractClient, req *http.Request, status 
 
 func testEngine(t *testing.T, database Readiness, output io.Writer, proxies []string) *gin.Engine {
 	t.Helper()
-	engine, err := NewEngine(database, slog.New(slog.NewJSONHandler(output, nil)), proxies)
+	metadata, ok := database.(*store.Store)
+	if !ok {
+		var err error
+		metadata, err = store.Open(t.Context(), filepath.Join(t.TempDir(), "metadata"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { metadata.Close() })
+	}
+	service, err := auth.New(metadata, auth.DefaultSessionConfig(), auth.PasswordParams{Memory: 64, Time: 1, Parallelism: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(database, slog.New(slog.NewJSONHandler(output, nil)), proxies, service)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +183,98 @@ func TestOpenAPIRoutesMatchBothDirections(t *testing.T) {
 	}
 	if gin.Mode() != gin.ReleaseMode || !engine.HandleMethodNotAllowed || engine.RedirectTrailingSlash || engine.RedirectFixedPath {
 		t.Fatal("engine is not configured for production")
+	}
+}
+
+func TestOperationSecurityAndExplicitErrors(t *testing.T) {
+	doc := loadContract(t)
+	public := map[string]bool{
+		"GET /healthz": true, "GET /readyz": true, "POST /api/v1/auth/login": true,
+	}
+	required := map[string][]string{
+		"POST /api/v1/auth/login":            {"401", "403", "429", "503"},
+		"POST /api/v1/auth/logout":           {"401", "403"},
+		"GET /api/v1/auth/session":           {"401"},
+		"PUT /api/v1/auth/password":          {"400", "401", "403", "429", "503"},
+		"GET /api/v1/users":                  {"401", "403"},
+		"POST /api/v1/users":                 {"401", "403", "409", "503"},
+		"GET /api/v1/users/{id}":             {"401", "403"},
+		"PATCH /api/v1/users/{id}":           {"401", "403", "409", "503"},
+		"DELETE /api/v1/users/{id}/sessions": {"401", "403"},
+		"GET /api/v1/audit-logs":             {"401", "403"},
+	}
+	retryAfter := map[string][]string{
+		"POST /api/v1/auth/login":   {"429", "503"},
+		"PUT /api/v1/auth/password": {"429", "503"},
+		"POST /api/v1/users":        {"503"},
+		"PATCH /api/v1/users/{id}":  {"503"},
+	}
+	seen := map[string]bool{}
+	for path, item := range doc.Paths.Map() {
+		for method, operation := range item.Operations() {
+			key := method + " " + path
+			seen[key] = true
+			assertOperationContract(t, doc, operation, key, public[key], required[key], retryAfter[key])
+		}
+	}
+	assertSpecKeysSeen(t, seen, public, required)
+}
+
+func assertOperationContract(t *testing.T, doc *openapi3.T, operation *openapi3.Operation, key string, public bool, required, retryAfter []string) {
+	t.Helper()
+	if public {
+		if operation.Security == nil || len(*operation.Security) != 0 {
+			t.Fatalf("%s security=%v, want []", key, operation.Security)
+		}
+	} else if !requiresCookie(doc, operation) {
+		t.Fatalf("%s does not require cookieAuth", key)
+	}
+	for _, status := range required {
+		if operation.Responses == nil || operation.Responses.Value(status) == nil {
+			t.Fatalf("%s missing explicit %s", key, status)
+		}
+	}
+	for _, status := range retryAfter {
+		assertDeclaredRetryAfter(t, operation, key, status)
+	}
+}
+
+func assertSpecKeysSeen(t *testing.T, seen, public map[string]bool, required map[string][]string) {
+	t.Helper()
+	for key := range public {
+		if !seen[key] {
+			t.Fatalf("public operation %s missing from spec", key)
+		}
+	}
+	for key := range required {
+		if !seen[key] {
+			t.Fatalf("operation %s missing from spec", key)
+		}
+	}
+}
+
+func requiresCookie(doc *openapi3.T, operation *openapi3.Operation) bool {
+	requirements := doc.Security
+	if operation.Security != nil {
+		requirements = *operation.Security
+	}
+	for _, requirement := range requirements {
+		if _, ok := requirement["cookieAuth"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func assertDeclaredRetryAfter(t *testing.T, operation *openapi3.Operation, key, status string) {
+	t.Helper()
+	ref := operation.Responses.Value(status)
+	if ref == nil || ref.Value == nil {
+		t.Fatalf("%s %s is not an explicit response", key, status)
+	}
+	header := ref.Value.Headers["Retry-After"]
+	if header == nil || header.Value == nil || !header.Value.Required {
+		t.Fatalf("%s %s does not require Retry-After", key, status)
 	}
 }
 

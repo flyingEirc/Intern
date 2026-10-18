@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
 )
 
 func cleanConfigEnv(t *testing.T) {
 	t.Helper()
-	keys := []string{"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES"}
+	keys := []string{"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME"}
 	for _, key := range keys {
 		value, existed := os.LookupEnv(key)
 		t.Cleanup(func() {
@@ -79,6 +81,7 @@ func assertConfig(t *testing.T, c configuration, err error, listen, dir, level s
 	}
 	want := configuration{Listen: listen, MetadataDir: dir, ShutdownTimeout: timeout, TrustedProxies: proxies}
 	want.Log.Level = level
+	want.Session = auth.DefaultSessionConfig()
 	if !reflect.DeepEqual(c, want) {
 		t.Fatalf("configuration = %+v; want %+v", c, want)
 	}
@@ -99,6 +102,9 @@ func TestConfigErrorsHaveNoSideEffects(t *testing.T) {
 		{"relative metadata", "metadata_dir", []string{"--metadata-dir", "relative"}, nil},
 		{"log level", "log.level", []string{"--log-level", "verbose"}, nil},
 		{"timeout", "shutdown_timeout", []string{"--shutdown-timeout", "0s"}, nil},
+		{"session idle", "session.idle_timeout", []string{"--session-idle-timeout", "0s"}, nil},
+		{"session lifetime", "session.lifetime", []string{"--session-lifetime", "-1s"}, nil},
+		{"session ordering", "idle_timeout <= lifetime", []string{"--session-idle-timeout", "13h"}, nil},
 		{"cert without key", "supplied together", []string{"--tls-cert-file", "/missing/cert"}, nil},
 		{"key without cert", "supplied together", []string{"--tls-key-file", "/missing/key"}, nil},
 		{"unreadable TLS", "cannot load TLS", []string{"--tls-cert-file", "/missing/cert", "--tls-key-file", "/missing/key"}, nil},

@@ -7,9 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/server"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/fsutil"
@@ -28,7 +30,7 @@ func New(out, stderr io.Writer) *cobra.Command {
 	root.SetOut(out)
 	root.SetErr(stderr)
 	app := &application{config: newConfigLoader(root), out: out, stderr: stderr}
-	root.AddCommand(app.serveCommand(), app.migrateCommand())
+	root.AddCommand(app.serveCommand(), app.migrateCommand(), app.userCommand())
 	return root
 }
 
@@ -71,7 +73,13 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 			logger.Info("shutdown complete")
 		}
 	}()
-	engine, err := server.NewEngine(database, logger, c.TrustedProxies)
+	authentication, err := auth.New(database, c.Session, auth.DefaultPasswordParams())
+	if err != nil {
+		return err
+	}
+	stopCleanup := authentication.StartCleanup(command.Context(), time.Minute, logger)
+	defer stopCleanup()
+	engine, err := server.NewEngine(database, logger, c.TrustedProxies, authentication)
 	if err != nil {
 		return err
 	}
@@ -80,7 +88,7 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 		ShutdownTimeout: c.ShutdownTimeout,
 	}
 	logger.Info("starting server", "listen", c.Listen, "instance_id", database.InstanceID())
-	srv := server.New(config, engine)
+	srv := server.New(config, server.Handler(engine))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
 	return server.Run(command.Context(), srv, config)
 }

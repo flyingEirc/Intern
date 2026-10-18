@@ -21,6 +21,12 @@ const (
 	MethodNotAllowed     = "method_not_allowed"
 	Internal             = "internal"
 	Unavailable          = "unavailable"
+	Unauthorized         = "unauthorized"
+	Forbidden            = "forbidden"
+	CrossOriginRejected  = "cross_origin_rejected"
+	RateLimited          = "rate_limited"
+	Conflict             = "conflict"
+	ValidationFailed     = "validation_failed"
 )
 
 type ErrorDetail struct {
@@ -47,6 +53,20 @@ func Error(c *gin.Context, status int, code, message string) {
 	JSON(c, status, ErrorResponse{Error: ErrorDetail{
 		Code: code, Message: message, RequestID: c.Writer.Header().Get(RequestIDHeader),
 	}})
+}
+
+// HTTPError preserves the same wire format for errors outside the Gin engine.
+func HTTPError(w http.ResponseWriter, status int, code, message string) error {
+	data, err := json.Marshal(ErrorResponse{Error: ErrorDetail{
+		Code: code, Message: message, RequestID: w.Header().Get(RequestIDHeader),
+	}})
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, err = w.Write(data)
+	return err
 }
 
 // DecodeJSON rejects unknown fields, trailing JSON values, and unsupported media.

@@ -11,7 +11,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "metadata")
 	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 1, PendingMigrations: 1})
+	assertStatus(t, status, err, Status{LatestVersion: 3, PendingMigrations: 3})
 	if _, err = os.Lstat(dir); !os.IsNotExist(err) {
 		t.Fatalf("status created directory: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err = ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 1, PendingMigrations: 1})
+	assertStatus(t, status, err, Status{LatestVersion: 3, PendingMigrations: 3})
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("status created files: %v, %v", entries, err)
@@ -37,7 +37,7 @@ func TestStatusDoesNotMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 1, PendingMigrations: 1})
+	assertStatus(t, status, err, Status{LatestVersion: 3, PendingMigrations: 3})
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("status changed database: %v", err)

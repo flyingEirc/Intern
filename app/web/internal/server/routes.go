@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 )
@@ -20,7 +21,7 @@ type StatusResponse struct {
 	Status string `json:"status"`
 }
 
-func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string) (*gin.Engine, error) {
+func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.HandleMethodNotAllowed = true
@@ -29,7 +30,11 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string)
 	if err := engine.SetTrustedProxies(trustedProxies); err != nil {
 		return nil, err
 	}
-	engine.Use(middleware.RequestID(), middleware.RequestLog(logger), middleware.Recovery(logger), middleware.BodyLimit())
+	engine.Use(middleware.RequestID(), middleware.RequestLog(logger),
+		middleware.CrossOriginRejection(authentication.Database, logger),
+		middleware.Audit(authentication.Database, logger),
+		middleware.Session(authentication.Sessions, logger),
+		middleware.Recovery(logger), middleware.BodyLimit())
 	engine.NoRoute(func(c *gin.Context) {
 		render.Error(c, http.StatusNotFound, render.NotFound, "Route not found")
 	})
@@ -46,5 +51,6 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string)
 		}
 		render.JSON(c, http.StatusOK, StatusResponse{Status: "ready"})
 	})
+	registerAuth(engine, authentication)
 	return engine, nil
 }

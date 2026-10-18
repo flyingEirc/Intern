@@ -94,7 +94,7 @@ func TestExclusiveOwnershipAndReadOnlyStatus(t *testing.T) {
 		t.Fatalf("second writer: %v", err)
 	}
 	status, err := ReadStatus(t.Context(), dir)
-	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != 1 || status.LatestVersion != 1 || status.PendingMigrations != 0 {
+	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != 3 || status.LatestVersion != 3 || status.PendingMigrations != 0 {
 		t.Fatalf("status under writer lock: %+v, %v", status, err)
 	}
 	if err = s.Close(); err != nil {
@@ -168,7 +168,7 @@ func TestMigrationFailureAndFutureVersion(t *testing.T) {
 		if err := s.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := Open(t.Context(), dir); err == nil || !strings.Contains(err.Error(), "42") || !strings.Contains(err.Error(), "version 1") {
+		if _, err := Open(t.Context(), dir); err == nil || !strings.Contains(err.Error(), "42") || !strings.Contains(err.Error(), "version 3") {
 			t.Fatalf("future version: %v", err)
 		}
 		status, err := ReadStatus(t.Context(), dir)
@@ -183,7 +183,7 @@ func TestReadyRequiresLiveExactVersion(t *testing.T) {
 	if err := s.Ready(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 1"); err != nil {
+	if _, err := s.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 3"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Ready(t.Context()); err == nil {

@@ -10,7 +10,7 @@
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库与 `api/openapi.yaml` 契约；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
+| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`、`user create-admin`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库、scs 服务端会话与 admin / operator / viewer 三角色、变更审计，以及 `api/openapi.yaml` 契约；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
@@ -54,6 +54,7 @@
 | 构建 CLI 与 Web 后端到 `bin/intern`、`bin/intern-web` | `mise run build` |
 | 启动 Web 后端（监听前自动迁移元数据库） | `./bin/intern-web serve --metadata-dir <绝对路径> --listen 127.0.0.1:8080` |
 | 查看或执行 Web 元数据库迁移 | `./bin/intern-web migrate status` / `./bin/intern-web migrate up` |
+| 创建初始管理员（serve 运行期间也可执行） | `./bin/intern-web user create-admin --username <用户名> --metadata-dir <绝对路径>`（终端无回显输入两次；脚本使用 `--password-stdin` 从标准输入读一行，不接受命令行明文） |
 | 查看开发入口帮助 | `mise run run --help` |
 | 快速回归 | `mise run test` |
 | 业务提交完整本地检查 | `mise run check`（build、test-race、golangci-lint） |
@@ -64,6 +65,8 @@
 | 单个 profile 的真实容器门禁 | `mise run test:container --profile mysql-9.7.1` |
 
 `run` 与两个容器入口直接转发参数到实际程序，例如 `mise run run backup full --config /secure/source.yaml`。单 profile 默认 `mysql-9.7.1`，可用 `--profile` 或 `PROFILE=... mise run test:container` 指定；CLI flag 优先。帮助命令不会运行真实恢复场景，门禁是否通过仍须提供实际测试证据。
+
+Web 登录 Cookie 固定带 `Secure`，浏览器访问需要 HTTPS：使用内置 TLS（`--tls-cert-file` / `--tls-key-file`，最低 TLS 1.2），或由终止 TLS 的反向代理转发，并用 `--trusted-proxies` 显式信任该代理；默认不信任任何 `X-Forwarded-For`。
 
 `check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则，工作流位于实际 Git 根的 `.github/workflows/quality.yml`；实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或分支保护已通过验收。
 

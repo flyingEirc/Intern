@@ -28,16 +28,25 @@ func validRequestIDChar(c rune) bool {
 
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.GetHeader(render.RequestIDHeader)
-		if !validRequestID(id) {
-			generated, err := uuid.NewV7()
-			if err != nil {
-				render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot generate request identity")
-				return
-			}
-			id = generated.String()
+		if err := EnsureRequestID(c.Writer, c.Request); err != nil {
+			render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot generate request identity")
+			return
 		}
-		c.Header(render.RequestIDHeader, id)
 		c.Next()
 	}
+}
+
+// EnsureRequestID gives every response, including those written before a handler
+// runs, the same request identity.
+func EnsureRequestID(w http.ResponseWriter, r *http.Request) error {
+	id := r.Header.Get(render.RequestIDHeader)
+	if !validRequestID(id) {
+		generated, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		id = generated.String()
+	}
+	w.Header().Set(render.RequestIDHeader, id)
+	return nil
 }

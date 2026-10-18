@@ -20,11 +20,12 @@ import (
 )
 
 type Store struct {
-	db         *sql.DB
-	provider   *goose.Provider
-	lock       *flock.Flock
-	instanceID string
-	latest     int64
+	db              *sql.DB
+	provider        *goose.Provider
+	lock            *flock.Flock
+	instanceID      string
+	latest          int64
+	sessionLifetime time.Duration
 }
 
 // Open acquires exclusive ownership, migrates, and preserves the instance identity.
@@ -83,6 +84,12 @@ func openDatabase(ctx context.Context, path string, readOnly bool) (*sql.DB, err
 		q.Add("_pragma", "query_only(1)")
 	} else {
 		q.Add("_pragma", "journal_mode(WAL)")
+		// modernc.org/sqlite applies _txlock only when the transaction is not
+		// read-only (newTx uses BEGIN IMMEDIATE for !opts.ReadOnly). The write
+		// lock is reserved before any SELECT, so busy_timeout waits. A deferred
+		// transaction that has already read does not invoke the busy handler and
+		// returns SQLITE_BUSY or SQLITE_BUSY_SNAPSHOT instead.
+		q.Set("_txlock", "immediate")
 	}
 	u.RawQuery = q.Encode()
 	db, err := sql.Open("sqlite", u.String())
@@ -110,6 +117,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+// ensureInstance reads the singleton row and inserts it when absent. The writable
+// pool starts this transaction with BEGIN IMMEDIATE, so that read cannot upgrade
+// into SQLITE_BUSY_SNAPSHOT.
 func ensureInstance(ctx context.Context, db *sql.DB) (_ string, retErr error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -162,4 +172,9 @@ func (s *Store) Ready(ctx context.Context) error {
 }
 
 // Close closes the database before releasing exclusive ownership.
-func (s *Store) Close() error { return errors.Join(s.db.Close(), s.lock.Close()) }
+func (s *Store) Close() error {
+	if s.lock == nil {
+		return s.db.Close()
+	}
+	return errors.Join(s.db.Close(), s.lock.Close())
+}

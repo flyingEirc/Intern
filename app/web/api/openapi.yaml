@@ -1,15 +1,28 @@
 openapi: 3.0.3
 info:
   title: Intern Web control plane
-  version: 0.1.0
+  version: 0.2.0
   description: >-
-    The implemented control-plane health API. JSON is encoded with encoding/json/v2.
-    The backend is handwritten; kin-openapi validates the contract in tests.
-    oapi-codegen's Gin server encoder uses encoding/json and is not used.
+    Session authentication, three-role authorization, users and audit API.
+    JSON uses encoding/json/v2; handwritten handlers are checked by kin-openapi.
+    HTTPS is required for the Secure intern_session cookie; no insecure-cookie option exists.
+    Session defaults are 30 minutes idle and 12 hours absolute, configured by
+    session.idle_timeout and session.lifetime (positive, idle <= lifetime).
+    Login limits are 30 attempts/minute/IP (burst 30) and 5 attempts/minute/IP +
+    case-folded username (burst 5), with at most 10000 combined LRU buckets.
+    Only usernames matching Username are distinct limiter keys; every other
+    username shares one fixed key per IP and is not stored. The per-user bucket
+    is not created when the IP bucket already denies the attempt.
+    Current-password checks on PUT /api/v1/auth/password are limited to 5
+    attempts/minute/user (burst 5). At most 2 argon2id hash or verify operations
+    run at once; a full cap returns 503 unavailable immediately with Retry-After.
+security:
+  - cookieAuth: []
 paths:
   /healthz:
     get:
       operationId: health
+      security: []
       summary: Check process liveness independently of the metadata database
       parameters:
         - $ref: '#/components/parameters/RequestID'
@@ -30,6 +43,7 @@ paths:
   /readyz:
     get:
       operationId: readiness
+      security: []
       summary: Check database connectivity and the exact expected migration version
       parameters:
         - $ref: '#/components/parameters/RequestID'
@@ -49,8 +63,302 @@ paths:
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      security: []
+      summary: Authenticate and renew the session token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Authenticated user; a fresh server-side session is issued
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Set-Cookie:
+              required: true
+              description: intern_session with Secure, HttpOnly, SameSite=Lax, Path=/
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/RetryableError'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      summary: Destroy the current server-side session
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/auth/session:
+    get:
+      operationId: currentSession
+      summary: Read the current database user and effective permissions
+      responses:
+        '200':
+          description: Current session
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/auth/password:
+    put:
+      operationId: changeOwnPassword
+      summary: Change own password, rotate this token and revoke all other sessions
+      description: >-
+        Current-password verification is limited to 5 attempts per minute per user
+        (burst 5). Hashing and verification share the global argon2id cap of 2.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [current_password, new_password]
+              properties:
+                current_password:
+                  type: string
+                  writeOnly: true
+                new_password:
+                  $ref: '#/components/schemas/Password'
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/RetryableError'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/users:
+    get:
+      operationId: listUsers
+      summary: List users (users:manage, admin only)
+      responses:
+        '200':
+          description: Users ordered by case-insensitive username
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createUser
+      summary: Create a user (users:manage, admin only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, password, role]
+              properties:
+                username:
+                  $ref: '#/components/schemas/Username'
+                password:
+                  $ref: '#/components/schemas/Password'
+                role:
+                  $ref: '#/components/schemas/Role'
+      responses:
+        '201':
+          $ref: '#/components/responses/User'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+    get:
+      operationId: getUser
+      summary: Read a user (users:manage, admin only)
+      responses:
+        '200':
+          $ref: '#/components/responses/User'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    patch:
+      operationId: updateUser
+      summary: Update a user and revoke their sessions (users:manage, admin only)
+      description: The last enabled administrator cannot be disabled or demoted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              minProperties: 1
+              properties:
+                role:
+                  $ref: '#/components/schemas/Role'
+                disabled:
+                  type: boolean
+                password:
+                  $ref: '#/components/schemas/Password'
+      responses:
+        '200':
+          $ref: '#/components/responses/User'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/users/{id}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/UserID'
+    delete:
+      operationId: revokeUserSessions
+      summary: Revoke all sessions for a user (users:manage, admin only)
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/audit-logs:
+    get:
+      operationId: listAuditLogs
+      summary: Read audit history (audit:read, admin only)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+        - name: before
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Descending ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items, next_before]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditLog'
+                  next_before:
+                    type: integer
+                    format: int64
+                    nullable: true
+                    minimum: 1
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
 components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: intern_session
   parameters:
+    UserID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
     RequestID:
       name: X-Request-ID
       in: header
@@ -70,10 +378,42 @@ components:
         maxLength: 64
         pattern: '^[A-Za-z0-9._-]+$'
   responses:
+    NoContent:
+      description: Operation completed
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    User:
+      description: User without password hash or session epoch
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/User'
+    RetryableError:
+      description: >-
+        rate_limited (429) or unavailable (503). Retry-After is whole seconds.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     Error:
       description: >-
-        A structured error. Includes method_not_allowed (405), internal (500),
-        payload_too_large (413), and unavailable (503) as applicable.
+        Unified error; covers invalid_json (400), validation_failed (400),
+        unauthorized (401), forbidden and cross_origin_rejected (403), not_found
+        (404), method_not_allowed (405), conflict (409), payload_too_large (413),
+        unsupported_media_type (415), rate_limited (429), internal (500), and
+        unavailable (503), as applicable. Wrong current password is 400, not 401.
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -82,6 +422,122 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
   schemas:
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          writeOnly: true
+    Username:
+      type: string
+      pattern: '^[A-Za-z0-9._-]{3,64}$'
+    Password:
+      type: string
+      writeOnly: true
+      minLength: 12
+      maxLength: 256
+      description: 12–256 Unicode characters; never returned or logged
+    Role:
+      type: string
+      enum: [admin, operator, viewer]
+    Permission:
+      type: string
+      enum: ['session:self', 'users:manage', 'audit:read']
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, username, role, disabled, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          $ref: '#/components/schemas/Username'
+        role:
+          $ref: '#/components/schemas/Role'
+        disabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserResponse:
+      type: object
+      additionalProperties: false
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+    SessionResponse:
+      type: object
+      additionalProperties: false
+      required: [user, permissions]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Permission'
+    AuditLog:
+      type: object
+      additionalProperties: false
+      required: [id, ts, actor_type, actor_id, actor_name, action, resource_type, resource_id, ip, result, status, request_id, detail]
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        ts:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          enum: [user, system, anonymous]
+        actor_id:
+          type: string
+        actor_name:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        ip:
+          type: string
+        result:
+          type: string
+          enum: [success, denied, failed]
+        status:
+          type: integer
+          nullable: true
+          minimum: 100
+          maximum: 599
+        request_id:
+          type: string
+        detail:
+          type: object
+          additionalProperties: false
+          properties:
+            role:
+              $ref: '#/components/schemas/Role'
+            disabled:
+              type: boolean
+            password_changed:
+              type: boolean
+            method:
+              type: string
+              enum: [POST, PUT, PATCH, DELETE]
+            route:
+              type: string
     HealthResponse:
       type: object
       additionalProperties: false
@@ -112,15 +568,7 @@ components:
       properties:
         code:
           type: string
-          enum:
-            - bad_request
-            - invalid_json
-            - unsupported_media_type
-            - payload_too_large
-            - not_found
-            - method_not_allowed
-            - internal
-            - unavailable
+          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed]
         message:
           type: string
           minLength: 1

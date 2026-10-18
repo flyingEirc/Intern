@@ -15,14 +15,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type configuration struct {
-	Listen          string        `mapstructure:"listen"`
-	MetadataDir     string        `mapstructure:"metadata_dir"`
-	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
-	TrustedProxies  []string      `mapstructure:"trusted_proxies"`
+	Listen          string             `mapstructure:"listen"`
+	MetadataDir     string             `mapstructure:"metadata_dir"`
+	ShutdownTimeout time.Duration      `mapstructure:"shutdown_timeout"`
+	TrustedProxies  []string           `mapstructure:"trusted_proxies"`
+	Session         auth.SessionConfig `mapstructure:"session"`
 	Log             struct {
 		Level string `mapstructure:"level"`
 	} `mapstructure:"log"`
@@ -99,6 +101,9 @@ func (c configuration) validate() error {
 		return errors.New("shutdown_timeout must be positive")
 	}
 	if err := validateProxies(c.TrustedProxies); err != nil {
+		return err
+	}
+	if err := c.Session.Validate(); err != nil {
 		return err
 	}
 	return c.validateTLS()
