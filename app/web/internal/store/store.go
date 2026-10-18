@@ -1,0 +1,165 @@
+// Package store owns the single-process Web control-plane database.
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"path/filepath"
+	"time"
+
+	"github.com/gofrs/flock"
+	"github.com/google/uuid"
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
+
+	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
+	"github.com/flyingEirc/Intern/internal/fsutil"
+)
+
+type Store struct {
+	db         *sql.DB
+	provider   *goose.Provider
+	lock       *flock.Flock
+	instanceID string
+	latest     int64
+}
+
+// Open acquires exclusive ownership, migrates, and preserves the instance identity.
+func Open(ctx context.Context, dir string) (*Store, error) {
+	lock, err := lockDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	s, err := openStore(ctx, dir)
+	if err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+	s.lock = lock
+	return s, nil
+}
+
+func openStore(ctx context.Context, dir string) (_ *Store, retErr error) {
+	path := filepath.Join(dir, "intern.db")
+	if err := prepareDatabaseFile(path); err != nil {
+		return nil, err
+	}
+	db, err := openDatabase(ctx, path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			fsutil.Close(&retErr, db)
+		}
+	}()
+	fsys, err := migrationFS()
+	if err != nil {
+		return nil, err
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, fsys, providerOptions()...)
+	if err != nil {
+		return nil, err
+	}
+	latest := provider.ListSources()
+	s := &Store{db: db, provider: provider, latest: latest[len(latest)-1].Version}
+	if err = s.migrate(ctx); err != nil {
+		return nil, err
+	}
+	s.instanceID, err = ensureInstance(ctx, db)
+	return s, err
+}
+
+func openDatabase(ctx context.Context, path string, readOnly bool) (*sql.DB, error) {
+	u := url.URL{Scheme: "file", Path: path}
+	q := u.Query()
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "synchronous(FULL)")
+	q.Add("_pragma", "foreign_keys(1)")
+	if readOnly {
+		q.Set("mode", "ro")
+		q.Add("_pragma", "query_only(1)")
+	} else {
+		q.Add("_pragma", "journal_mode(WAL)")
+	}
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err = db.PingContext(ctx); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	return db, nil
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	current, err := s.provider.GetDBVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("read migration version: %w", err)
+	}
+	if err = checkVersion(current, s.latest); err != nil {
+		return err
+	}
+	if _, err = s.provider.Up(ctx); err != nil {
+		return fmt.Errorf("migrate metadata database: %w", err)
+	}
+	return nil
+}
+
+func ensureInstance(ctx context.Context, db *sql.DB) (_ string, retErr error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if retErr != nil {
+			rollbackErr := tx.Rollback()
+			if !errors.Is(rollbackErr, sql.ErrTxDone) {
+				retErr = errors.Join(retErr, rollbackErr)
+			}
+		}
+	}()
+	q := storesql.New(tx)
+	instance, err := q.GetInstance(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		instance, err = insertInstance(ctx, q)
+	}
+	if err != nil {
+		return "", err
+	}
+	return instance.ID, tx.Commit()
+}
+
+func insertInstance(ctx context.Context, q *storesql.Queries) (storesql.GetInstanceRow, error) {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return storesql.GetInstanceRow{}, err
+	}
+	instance := storesql.GetInstanceRow{ID: id.String(), CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	err = q.InsertInstance(ctx, storesql.InsertInstanceParams(instance))
+	return instance, err
+}
+
+func (s *Store) InstanceID() string { return s.instanceID }
+
+// Ready checks both connectivity and the exact migration version.
+func (s *Store) Ready(ctx context.Context) error {
+	if err := s.db.PingContext(ctx); err != nil {
+		return err
+	}
+	current, err := s.provider.GetDBVersion(ctx)
+	if err != nil {
+		return err
+	}
+	if current != s.latest {
+		return fmt.Errorf("metadata database version %d does not match embedded latest version %d", current, s.latest)
+	}
+	return nil
+}
+
+// Close closes the database before releasing exclusive ownership.
+func (s *Store) Close() error { return errors.Join(s.db.Close(), s.lock.Close()) }

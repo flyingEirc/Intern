@@ -1,0 +1,131 @@
+openapi: 3.0.3
+info:
+  title: Intern Web control plane
+  version: 0.1.0
+  description: >-
+    The implemented control-plane health API. JSON is encoded with encoding/json/v2.
+    The backend is handwritten; kin-openapi validates the contract in tests.
+    oapi-codegen's Gin server encoder uses encoding/json and is not used.
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Check process liveness independently of the metadata database
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: The process is alive
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '413':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /readyz:
+    get:
+      operationId: readiness
+      summary: Check database connectivity and the exact expected migration version
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: Metadata is ready
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '413':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: >-
+        A nonempty value of at most 64 ASCII letters, digits, dots, underscores, or
+        hyphens is echoed. Other values are replaced with a generated UUIDv7.
+      schema:
+        type: string
+  headers:
+    RequestID:
+      description: Accepted incoming request ID or a generated UUIDv7
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: '^[A-Za-z0-9._-]+$'
+  responses:
+    Error:
+      description: >-
+        A structured error. Includes method_not_allowed (405), internal (500),
+        payload_too_large (413), and unavailable (503) as applicable.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ReadyResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready]
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum:
+            - bad_request
+            - invalid_json
+            - unsupported_media_type
+            - payload_too_large
+            - not_found
+            - method_not_allowed
+            - internal
+            - unavailable
+        message:
+          type: string
+          minLength: 1
+        request_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._-]+$'

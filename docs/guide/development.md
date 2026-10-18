@@ -2,7 +2,7 @@
 
 开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)；Web 子任务另读 [Web 备份控制面与流式管道](../roadmap/Web备份控制面与流式管道-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
 
-当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。前端暂缓，当前按阶段 B–E 的子 Issue 先实施后端；对前端暴露的接口以 OpenAPI 契约为准，接口变更须同步契约与测试（[#18](https://github.com/flyingEirc/Intern/issues/18)）。
+当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。前端暂缓，当前按阶段 B–E 的子 Issue 先实施后端；对前端暴露的接口以 OpenAPI 契约 `app/web/api/openapi.yaml` 为准，接口变更须同步契约与测试（[#18](https://github.com/flyingEirc/Intern/issues/18)）。契约测试使用 kin-openapi 校验规范本身、Gin 路由与规范操作双向一致，以及 API 测试中的全部请求与响应；后端不做代码生成（[#22](https://github.com/flyingEirc/Intern/issues/22)）。
 
 ## 目录与共享接口
 
@@ -10,13 +10,13 @@
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端；当前目录占位，后端工程与 OpenAPI 契约由阶段 B 的 W1 建立；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
+| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库与 `api/openapi.yaml` 契约；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
 
 - 共用业务优先进入 `internal/`，产品入口负责协议、参数和交互，避免 CLI/Web 各复制恢复引擎。
-- 当前 `go.work` 只列 `internal/` 与 `app/cli/`，模块路径分别为 `github.com/flyingEirc/Intern/internal` 和 `github.com/flyingEirc/Intern/app/cli`；CLI replace 指向 `../../internal`。Web/site 未有实现前不创建空模块。
+- `go.work` 列出 `internal/`、`app/cli/`、`app/web/` 三个模块，模块路径分别为 `github.com/flyingEirc/Intern/internal`、`github.com/flyingEirc/Intern/app/cli`、`github.com/flyingEirc/Intern/app/web`；CLI 与 Web 的 replace 均指向 `../../internal`。site 未有实现前不创建空模块。
 - 使用 `go.work` 管理真实存在的 Go 模块。新增模块同时维护 `go.mod` 和工作区，不为空目录虚构模块或预造空抽象。
 - 涉及 `internal/` 的改动必须在 Issue/PR 说明对 CLI/Web 的接口和行为影响及合入依赖。
 
@@ -51,7 +51,9 @@
 
 | 目的 | 命令 |
 | --- | --- |
-| 构建 CLI 到 `bin/intern` | `mise run build` |
+| 构建 CLI 与 Web 后端到 `bin/intern`、`bin/intern-web` | `mise run build` |
+| 启动 Web 后端（监听前自动迁移元数据库） | `./bin/intern-web serve --metadata-dir <绝对路径> --listen 127.0.0.1:8080` |
+| 查看或执行 Web 元数据库迁移 | `./bin/intern-web migrate status` / `./bin/intern-web migrate up` |
 | 查看开发入口帮助 | `mise run run --help` |
 | 快速回归 | `mise run test` |
 | 业务提交完整本地检查 | `mise run check`（build、test-race、golangci-lint） |
