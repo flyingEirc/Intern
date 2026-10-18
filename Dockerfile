@@ -6,6 +6,7 @@ WORKDIR /src
 COPY go.work go.work.sum ./
 COPY internal/go.mod internal/go.sum ./internal/
 COPY app/cli/go.mod app/cli/go.sum ./app/cli/
+COPY app/web/go.mod app/web/go.sum ./app/web/
 RUN cd app/cli && go mod download
 COPY internal ./internal
 COPY app/cli ./app/cli

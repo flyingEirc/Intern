@@ -21,12 +21,12 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线；首版范围与前端选型已确认（XtraBackup 物理链、Docker 单宿主机、本地仓库 + FTP 副本）；当前先做后端与对前端的 API 契约，前端暂缓。尚未实现，目录占位。 |
+| `app/web/` | 当前产品主线；阶段 B 后端基础已有实现：服务与迁移命令、SQLite 元数据、会话鉴权、三角色、审计与 OpenAPI 契约（[#12](https://github.com/flyingEirc/Intern/issues/12)）。XtraBackup、FTP 复制、恢复业务与部署仍属后续阶段；前端暂缓，Web 产品未交付。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
 
-总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。以下源码构建与使用示例用于维护现有 CLI 基线；后续 Web 命令随实际实现加入。
+总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。`mise run build` 同时构建 CLI 与 Web 后端；Web 服务、迁移与管理员命令见 [开发入口](docs/guide/development.md#常用开发入口)，接口定义见 [OpenAPI 契约](app/web/api/openapi.yaml)。以下备份恢复示例仍用于现有 CLI 基线。
 
 ## 从源码开始
 
@@ -41,6 +41,7 @@ mise trust
 mise install
 mise run build
 ./bin/intern --help
+./bin/intern-web --help
 ```
 
 准备三个独立位置：备份目录、状态目录和密钥目录。以下使用当前用户的 home 目录演示：

@@ -6,8 +6,8 @@ golangci-lint = "2.13.2"
 GOTOOLCHAIN = "local"
 
 [tasks.build]
-description = "Build the Intern CLI into bin/intern"
-run = "go build -o bin/intern ./app/cli"
+description = "Build the CLI and Web server into bin/intern and bin/intern-web"
+run = ["go build -o bin/intern ./app/cli", "go build -o bin/intern-web ./app/web"]
 
 [tasks.run]
 description = "Run the CLI (mise run run --help)"
@@ -18,8 +18,8 @@ exec go run ./app/cli "$@"
 '''
 
 [tasks.test]
-description = "Run shared and CLI regression tests"
-run = "go test ./internal/... ./app/cli/..."
+description = "Run shared, CLI, and Web regression tests"
+run = "go test ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks."test:containers"]
 description = "Run and verify every locked real-container profile"
@@ -39,24 +39,27 @@ exec go run ./app/cli/cmd/quality-gate run --profile "${PROFILE:-mysql-9.7.1}" "
 
 [tasks."lint:integration"]
 description = "Lint production and integration code with the same rules"
-run = "golangci-lint run --build-tags=integration ./internal/... ./app/cli/..."
+run = "golangci-lint run --build-tags=integration ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks.lint]
 description = "Run the configured golangci-lint checks"
-run = "golangci-lint run ./internal/... ./app/cli/..."
+run = "golangci-lint run ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks.fmt]
 description = "Format Go imports with the project configuration"
-run = "golangci-lint fmt ./internal/... ./app/cli/..."
+run = "golangci-lint fmt ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks.check]
 description = "Build, test with race detection, then lint; stop on any failure"
 run = [
-    "go build ./internal/... ./app/cli/...",
-    "go test -race ./internal/... ./app/cli/...",
+    "go build ./internal/... ./app/cli/... ./app/web/...",
+    "go test -race ./internal/... ./app/cli/... ./app/web/...",
     { task = "lint" },
 ]
 
 [tasks.generate]
 description = "Regenerate SQLite bindings with pinned sqlc v1.30.0"
-run = "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f internal/sqlc.yaml"
+run = [
+    "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f internal/sqlc.yaml",
+    "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f app/web/sqlc.yaml",
+]
