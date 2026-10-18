@@ -16,16 +16,18 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/app/web/internal/server"
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 type configuration struct {
-	Listen          string             `mapstructure:"listen"`
-	MetadataDir     string             `mapstructure:"metadata_dir"`
-	ShutdownTimeout time.Duration      `mapstructure:"shutdown_timeout"`
-	TrustedProxies  []string           `mapstructure:"trusted_proxies"`
-	Session         auth.SessionConfig `mapstructure:"session"`
-	Log             struct {
+	Listen               string             `mapstructure:"listen"`
+	MetadataDir          string             `mapstructure:"metadata_dir"`
+	ShutdownTimeout      time.Duration      `mapstructure:"shutdown_timeout"`
+	TrustedProxies       []string           `mapstructure:"trusted_proxies"`
+	TLSTerminatedByProxy bool               `mapstructure:"tls_terminated_by_proxy"`
+	Session              auth.SessionConfig `mapstructure:"session"`
+	Log                  struct {
 		Level string `mapstructure:"level"`
 	} `mapstructure:"log"`
 	TLS struct {
@@ -106,7 +108,21 @@ func (c configuration) validate() error {
 	if err := c.Session.Validate(); err != nil {
 		return err
 	}
+	if err := c.validateTransport(); err != nil {
+		return err
+	}
 	return c.validateTLS()
+}
+
+// validateTransport rejects plain non-loopback listeners before any certificate
+// read. tls_terminated_by_proxy is explicit and still requires trusted_proxies;
+// the proxy list alone does not prove TLS. The mode is not end-to-end TLS:
+// clients must be prevented from opening the backend port directly.
+func (c configuration) validateTransport() error {
+	if c.TLSTerminatedByProxy && len(c.TrustedProxies) == 0 {
+		return errors.New("tls_terminated_by_proxy requires trusted_proxies and does not prove end-to-end TLS")
+	}
+	return server.RejectUnprotectedListen(c.Listen, c.TLS.CertFile != "", c.TLSTerminatedByProxy)
 }
 
 func validateListen(address string) error {

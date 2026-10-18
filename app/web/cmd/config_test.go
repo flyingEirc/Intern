@@ -19,7 +19,7 @@ import (
 
 func cleanConfigEnv(t *testing.T) {
 	t.Helper()
-	keys := []string{"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME"}
+	keys := []string{"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_TLS_TERMINATED_BY_PROXY", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME"}
 	for _, key := range keys {
 		value, existed := os.LookupEnv(key)
 		t.Cleanup(func() {
@@ -48,7 +48,7 @@ func TestConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Listen != ":8080" || c.MetadataDir != "/var/lib/intern/metadata" || c.Log.Level != "info" || c.ShutdownTimeout != 30*time.Second || len(c.TrustedProxies) != 0 {
+	if c.Listen != "127.0.0.1:8080" || c.MetadataDir != "/var/lib/intern/metadata" || c.Log.Level != "info" || c.ShutdownTimeout != 30*time.Second || len(c.TrustedProxies) != 0 || c.TLSTerminatedByProxy {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 }
@@ -110,6 +110,9 @@ func TestConfigErrorsHaveNoSideEffects(t *testing.T) {
 		{"unreadable TLS", "cannot load TLS", []string{"--tls-cert-file", "/missing/cert", "--tls-key-file", "/missing/key"}, nil},
 		{"configuration", "cannot open YAML", []string{"--config", "/missing/config.yaml"}, nil},
 		{"proxy", "trusted_proxies", []string{"--trusted-proxies", "not-an-ip"}, nil},
+		{"plain non-loopback", "non-loopback", []string{"--listen", "0.0.0.0:8080"}, nil},
+		{"proxies are not TLS", "non-loopback", []string{"--listen", "192.0.2.10:8080", "--trusted-proxies", "192.0.2.1"}, nil},
+		{"proxy mode without proxies", "does not prove end-to-end TLS", []string{"--tls-terminated-by-proxy"}, nil},
 		{"zone proxy", "trusted_proxies", []string{"--trusted-proxies", "fe80::1%lo0"}, nil},
 		{"zone proxy CIDR", "trusted_proxies", []string{"--trusted-proxies", "fe80::1%lo0/64"}, nil},
 		{"config directory", "regular file", nil, configDirectoryFlag},
@@ -246,5 +249,39 @@ func TestListenAddressSyntax(t *testing.T) {
 				t.Fatalf("listen %q: valid=%v, error=%v", tc.address, tc.valid, err)
 			}
 		})
+	}
+}
+
+func TestPlainListenPolicy(t *testing.T) {
+	cleanConfigEnv(t)
+	c, err := loadConfig(t, "--listen", "localhost:8080")
+	if err != nil || c.Listen != "localhost:8080" {
+		t.Fatalf("localhost listen: %v %+v", err, c)
+	}
+	if _, err = loadConfig(t, "--listen", "[::1]:9090"); err != nil {
+		t.Fatal(err)
+	}
+	resolver := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		t.Errorf("listen validation resolved DNS")
+		return nil, errors.New("resolved")
+	}}
+	t.Cleanup(func() { net.DefaultResolver = resolver })
+	start := time.Now()
+	_, err = loadConfig(t, "--listen", "unresolvable.invalid:8080")
+	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("hostname listen: %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("hostname check took %s", time.Since(start))
+	}
+	c, err = loadConfig(t, "--listen", "192.0.2.10:8443", "--tls-terminated-by-proxy", "--trusted-proxies", "192.0.2.1")
+	assertProxyTerminatedListen(t, c, err)
+}
+
+func assertProxyTerminatedListen(t *testing.T, c configuration, err error) {
+	t.Helper()
+	if err != nil || !c.TLSTerminatedByProxy || len(c.TrustedProxies) != 1 || c.TrustedProxies[0] != "192.0.2.1" {
+		t.Fatalf("proxy mode: %v %+v", err, c)
 	}
 }
