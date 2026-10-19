@@ -56,7 +56,7 @@ func TestConfigDefaults(t *testing.T) {
 func TestConfigPrecedence(t *testing.T) {
 	cleanConfigEnv(t)
 	path := filepath.Join(t.TempDir(), "web.yaml")
-	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:7001\nmetadata_dir: /yaml/metadata\nlog:\n  level: warn\nshutdown_timeout: 5s\ntrusted_proxies: [127.0.0.0/8]\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("listen: 127.0.0.1:7001\nmetadata_dir: /yaml/metadata\nlog:\n  level: warn\nshutdown_timeout: 5s\ntrusted_proxies: [127.0.0.0/8]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("INTERN_CONFIG", path)
@@ -221,7 +221,7 @@ func TestTrustedProxyAcceptance(t *testing.T) {
 func TestUnknownConfigurationRejected(t *testing.T) {
 	cleanConfigEnv(t)
 	path := filepath.Join(t.TempDir(), "web.yaml")
-	if err := os.WriteFile(path, []byte("unknown: true\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("unknown: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadConfig(t, "--config", path); err == nil || !strings.Contains(err.Error(), "configuration key") {
@@ -238,10 +238,18 @@ func TestListenAddressSyntax(t *testing.T) {
 		address string
 		valid   bool
 	}{
-		{":8080", true}, {"127.0.0.1:0", true}, {"[::1]:8080", true},
-		{"[fe80::1%lo0]:8080", true}, {"localhost:8080", true}, {"intern-1.example.:8080", true},
-		{"bad host:8080", false}, {"[:::]:8080", false}, {"-bad.example:8080", false},
-		{"bad-.example:8080", false}, {"bad..example:8080", false}, {"localhost:", false},
+		{":8080", true},
+		{"127.0.0.1:0", true},
+		{"[::1]:8080", true},
+		{"[fe80::1%lo0]:8080", true},
+		{"localhost:8080", true},
+		{"intern-1.example.:8080", true},
+		{"bad host:8080", false},
+		{"[:::]:8080", false},
+		{"-bad.example:8080", false},
+		{"bad-.example:8080", false},
+		{"bad..example:8080", false},
+		{"localhost:", false},
 		{strings.Repeat("a", 64) + ".example:8080", false},
 	} {
 		t.Run(tc.address, func(t *testing.T) {

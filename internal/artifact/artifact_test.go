@@ -18,12 +18,14 @@ func requireNoError(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
 func testKey(t *testing.T) string {
 	t.Helper()
 	key := filepath.Join(t.TempDir(), "key")
 	requireNoError(t, GenerateKey(key))
 	return key
 }
+
 func testPayload(size int, seed byte) []byte {
 	data := make([]byte, size)
 	rand.NewChaCha8([32]byte{seed}).Read(data)
@@ -39,6 +41,7 @@ func TestArtifactRoundTripAndExpandedLimit(t *testing.T) {
 		}
 	}
 }
+
 func checkRoundTrip(t *testing.T, key string, payload []byte, compress, encrypt bool) {
 	t.Helper()
 	dir := t.TempDir()
@@ -56,6 +59,7 @@ func checkRoundTrip(t *testing.T, key string, payload []byte, compress, encrypt 
 		t.Fatal("expanded size limit ignored")
 	}
 }
+
 func TestEmptyAuthenticatedStream(t *testing.T) {
 	key := testKey(t)
 	dir := t.TempDir()
@@ -67,6 +71,7 @@ func TestEmptyAuthenticatedStream(t *testing.T) {
 		t.Fatal("non-empty recovered empty stream")
 	}
 }
+
 func assertRejectedBeforeOutput(t *testing.T, dir, key string) {
 	t.Helper()
 	var out bytes.Buffer
@@ -77,6 +82,7 @@ func assertRejectedBeforeOutput(t *testing.T, dir, key string) {
 		t.Fatal("unauthenticated plaintext reached output")
 	}
 }
+
 func TestAuthenticationBeforeOutput(t *testing.T) {
 	key := testKey(t)
 	dir := t.TempDir()
@@ -90,12 +96,13 @@ func TestAuthenticationBeforeOutput(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			altered := tamperCiphertext(ciphertext, kind)
 			encoded := resignOuterDigest(t, key, originalEnv, altered)
-			requireNoError(t, os.WriteFile(filepath.Join(dir, "envelope.json"), encoded, 0600))
-			requireNoError(t, os.WriteFile(filepath.Join(dir, "payload.bin"), altered, 0600))
+			requireNoError(t, os.WriteFile(filepath.Join(dir, "envelope.json"), encoded, 0o600))
+			requireNoError(t, os.WriteFile(filepath.Join(dir, "payload.bin"), altered, 0o600))
 			assertRejectedBeforeOutput(t, dir, key)
 		})
 	}
 }
+
 func tamperCiphertext(ciphertext []byte, kind string) []byte {
 	altered := bytes.Clone(ciphertext)
 	switch kind {
@@ -110,6 +117,7 @@ func tamperCiphertext(ciphertext []byte, kind string) []byte {
 	}
 	return altered
 }
+
 func resignOuterDigest(t *testing.T, key string, original, altered []byte) []byte {
 	t.Helper()
 	// Re-authenticate the outer digest to exercise Tink's full-stream authentication.

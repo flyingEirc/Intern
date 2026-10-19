@@ -15,7 +15,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 	if _, err = os.Lstat(dir); !os.IsNotExist(err) {
 		t.Fatalf("status created directory: %v", err)
 	}
-	if err = os.Mkdir(dir, 0700); err != nil {
+	if err = os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	status, err = ReadStatus(t.Context(), dir)
@@ -29,7 +29,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 func TestStatusDoesNotMigrate(t *testing.T) {
 	dir := privateTempDir(t)
 	path := filepath.Join(dir, "intern.db")
-	if err := os.WriteFile(path, nil, 0600); err != nil {
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(path)

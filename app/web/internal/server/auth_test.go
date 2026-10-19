@@ -19,8 +19,10 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 )
 
-const testPassword = "test-only-password-12345"
-const changedPassword = "changed-only-password-12345"
+const (
+	testPassword    = "test-only-password-12345"
+	changedPassword = "changed-only-password-12345"
+)
 
 type authFixture struct {
 	database *store.Store

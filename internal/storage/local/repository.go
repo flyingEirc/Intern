@@ -65,7 +65,7 @@ func Open(root string) (*Repository, error) {
 		return nil, fmt.Errorf("repository root must be absolute: %w", fs.ErrInvalid)
 	}
 	root = filepath.Clean(root)
-	if err := os.MkdirAll(root, 0700); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create repository root: %w", err)
 	}
 	pinned, err := os.OpenRoot(root)
@@ -83,7 +83,7 @@ func verifyRoot(name string, root *os.Root) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode() != os.ModeDir|0700 {
+	if info.Mode() != os.ModeDir|0o700 {
 		return fmt.Errorf("repository root must be a non-symlink directory with mode 0700: %w", fs.ErrPermission)
 	}
 	pinnedInfo, err := root.Stat(".")

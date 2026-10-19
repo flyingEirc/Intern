@@ -22,6 +22,7 @@ func permissionsTLS(c *testenv.Case) {
 	c.Restore(full.ID, true)
 	c.Assert("scoped-restore-role", rows(c, c.Target, "restored") == "1:baseline|2:old|3:delete")
 }
+
 func interruptions(c *testenv.Case) {
 	seedBasic(c)
 	c.Backup("full")
@@ -39,6 +40,7 @@ func interruptions(c *testenv.Case) {
 	interruptedDump(c, "TERM")
 	interruptedDump(c, "KILL")
 }
+
 func interruptedDump(c *testenv.Case, signal string) {
 	c.Stage("blocked-dump-" + signal)
 	before := len(c.List())
@@ -53,6 +55,7 @@ func interruptedDump(c *testenv.Case, signal string) {
 	c.Backup("full")
 	c.Assert("restart-after-"+signal, len(c.List()) == before+1)
 }
+
 func storageFailures(c *testenv.Case) {
 	seedBasic(c)
 	c.SQL(c.Source, "CREATE TABLE app.large_payload(id INT PRIMARY KEY,payload LONGBLOB) ENGINE=InnoDB; INSERT INTO app.large_payload VALUES(1,REPEAT('x',2097152))")
@@ -66,6 +69,7 @@ func storageFailures(c *testenv.Case) {
 	c.Assert("storage-recovered", len(c.List()) == 1)
 	c.Root("/bin/sh", "-c", "for path in /work/state/work-* /work/backups/.pending-*; do test ! -e \"$path\" || exit 1; done")
 }
+
 func versionRefusal(c *testenv.Case) {
 	seedBasic(c)
 	var alternate string
@@ -83,6 +87,7 @@ func versionRefusal(c *testenv.Case) {
 	c.Refuse("real-client-server-version-mismatch", "backup", "full", "--config", "/run/secrets/source.yaml")
 	c.Assert("wrong-version-not-published", len(c.List()) == 0)
 }
+
 func scopeRejections(c *testenv.Case) {
 	seedBasic(c)
 	full := c.Backup("full")

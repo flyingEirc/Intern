@@ -25,6 +25,7 @@ func main() {
 		os.Exit(1)
 	}
 }
+
 func emit(w io.Writer, value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -37,11 +38,13 @@ func emit(w io.Writer, value any) error {
 	}
 	return err
 }
+
 func command() *cobra.Command {
 	root := &cobra.Command{Use: "quality-gate", SilenceUsage: true, SilenceErrors: true}
 	root.AddCommand(matrixCommand(), verifyCommand(), aggregateCommand(), runCommand(), allCommand())
 	return root
 }
+
 func matrixCommand() *cobra.Command {
 	return &cobra.Command{Use: "matrix", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		c, err := qualitygate.Load()
@@ -55,6 +58,7 @@ func matrixCommand() *cobra.Command {
 		return emit(cmd.OutOrStdout(), map[string]any{"profile": ids})
 	}}
 }
+
 func verifyCommand() *cobra.Command {
 	var dir string
 	var want qualitygate.Verification
@@ -72,6 +76,7 @@ func verifyCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&want.RequireClean, "ci", false, "reject candidates built from uncommitted source")
 	return cmd
 }
+
 func aggregateCommand() *cobra.Command {
 	var dir, source, platform string
 	var jobs qualitygate.Jobs
@@ -91,6 +96,7 @@ func aggregateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&jobs.Containers, "containers", "", "matrix job result")
 	return cmd
 }
+
 func runCommand() *cobra.Command {
 	var opts qualitygate.RunOptions
 	cmd := &cobra.Command{Use: "run", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {

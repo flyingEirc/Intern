@@ -18,9 +18,11 @@ import (
 
 func (a *application) userCommand() *cobra.Command {
 	users := &cobra.Command{Use: "user", Short: "Manage control-plane users"}
-	create := &cobra.Command{Use: "create-admin", Short: "Create an administrator without stopping serve",
+	create := &cobra.Command{
+		Use: "create-admin", Short: "Create an administrator without stopping serve",
 		Long: "Read a password twice without echo from a terminal, or one line from stdin with --password-stdin. Never accepts a command-line password.",
-		Args: cobra.NoArgs, RunE: a.createAdmin}
+		Args: cobra.NoArgs, RunE: a.createAdmin,
+	}
 	create.Flags().String("username", "", "Administrator username (3–64 ASCII letters, digits, dots, underscores, hyphens)")
 	create.Flags().Bool("password-stdin", false, "Read one password line from stdin")
 	users.AddCommand(create)

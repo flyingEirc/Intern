@@ -46,6 +46,7 @@ func validateBinlog(ctx context.Context, path string, start int64, source, targe
 	}
 	return nil
 }
+
 func (v *binlogValidation) readEvents(ctx context.Context, file io.Reader) error {
 	p := replication.NewBinlogParser()
 	p.SetVerifyChecksum(true)
@@ -73,6 +74,7 @@ func (v *binlogValidation) readEvents(ctx context.Context, file io.Reader) error
 		v.offset += int64(h.EventSize)
 	}
 }
+
 func readEventHeader(r io.Reader, header []byte) (h replication.EventHeader, err error) {
 	n, err := io.ReadFull(r, header)
 	if errors.Is(err, io.EOF) && n == 0 {
@@ -89,6 +91,7 @@ func readEventHeader(r io.Reader, header []byte) (h replication.EventHeader, err
 	}
 	return h, nil
 }
+
 func (v *binlogValidation) inspect(event *replication.BinlogEvent) error {
 	if rotate, ok := event.Event.(*replication.RotateEvent); ok {
 		if string(rotate.NextLogName) != v.next || rotate.Position != 4 {
@@ -109,6 +112,7 @@ func (v *binlogValidation) inspect(event *replication.BinlogEvent) error {
 	}
 	return nil
 }
+
 func validateQuery(p *parser.Parser, query, schema, source, target string) error {
 	if source != target && schema == target {
 		return errors.New("renamed destination also occurs in source logs")
@@ -124,6 +128,7 @@ func validateQuery(p *parser.Parser, query, schema, source, target string) error
 	}
 	return nil
 }
+
 func validateStatement(stmt ast.StmtNode, schema, source, target string) error {
 	switch stmt.(type) {
 	case *ast.BeginStmt, *ast.CommitStmt, *ast.RollbackStmt:
@@ -146,6 +151,7 @@ func validateStatement(stmt ast.StmtNode, schema, source, target string) error {
 	}
 	return nil
 }
+
 func validateStatementKind(stmt ast.StmtNode, renamed bool) error {
 	switch stmt.(type) {
 	case *ast.CreateDatabaseStmt, *ast.DropDatabaseStmt, *ast.AlterDatabaseStmt:

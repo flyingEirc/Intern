@@ -51,6 +51,7 @@ func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) (
 	}
 	return meta.Manifest, nil
 }
+
 func readEnvelope(dir string, encrypted bool) (env envelope, b binding, retErr error) {
 	f, err := regularFile(filepath.Join(dir, "envelope.json"))
 	if err != nil {
@@ -70,6 +71,7 @@ func readEnvelope(dir string, encrypted bool) (env envelope, b binding, retErr e
 	b, err = readBinding(env.AAD, encrypted)
 	return env, b, err
 }
+
 func readBinding(aad []byte, encrypted bool) (b binding, err error) {
 	if err = json.Unmarshal(aad, &b); err != nil || b.Format != "intern-artifact-v1" {
 		return b, errors.New("unsupported artifact format/codec")
@@ -82,6 +84,7 @@ func readBinding(aad []byte, encrypted bool) (b binding, err error) {
 	}
 	return b, nil
 }
+
 func openMetadata(env envelope, b binding, keyFile string) (meta metadata, stream tink.StreamingAEAD, err error) {
 	encoded, stream, err := decryptMetadata(env, b.Cipher, keyFile)
 	if err != nil {
@@ -95,6 +98,7 @@ func openMetadata(env envelope, b binding, keyFile string) (meta metadata, strea
 	}
 	return meta, stream, nil
 }
+
 func decryptMetadata(env envelope, cipher, keyFile string) ([]byte, tink.StreamingAEAD, error) {
 	switch cipher {
 	case "none":
@@ -108,6 +112,7 @@ func decryptMetadata(env envelope, cipher, keyFile string) ([]byte, tink.Streami
 		return nil, nil, errors.New("unsupported artifact cipher")
 	}
 }
+
 func unwrapMetadata(env envelope, keyFile string) ([]byte, tink.StreamingAEAD, error) {
 	master, err := masterKey(keyFile)
 	if err != nil {
@@ -124,6 +129,7 @@ func unwrapMetadata(env envelope, keyFile string) ([]byte, tink.StreamingAEAD, e
 	stream, err := streamingaead.New(h)
 	return encoded, stream, err
 }
+
 func openPayload(ctx context.Context, path string, meta metadata) (result *os.File, retErr error) {
 	f, err := regularFile(path)
 	if err != nil {
@@ -147,6 +153,7 @@ func openPayload(ctx context.Context, path string, meta metadata) (result *os.Fi
 	}
 	return f, nil
 }
+
 func authenticate(ctx context.Context, input io.Reader, aad []byte, stream tink.StreamingAEAD, work string) (result *os.File, retErr error) {
 	f, err := os.CreateTemp(work, "intern-authenticated-*")
 	if err != nil {
@@ -171,6 +178,7 @@ func authenticate(ctx context.Context, input io.Reader, aad []byte, stream tink.
 	}
 	return f, nil
 }
+
 func decode(ctx context.Context, output io.Writer, input io.Reader, compression string, limit int64) error {
 	if compression == "zstd" {
 		decoder, err := zstd.NewReader(input, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
@@ -189,6 +197,7 @@ func decode(ctx context.Context, output io.Writer, input io.Reader, compression 
 	}
 	return ctx.Err()
 }
+
 func regularFile(path string) (*os.File, error) {
 	st, err := os.Lstat(path)
 	if err != nil {

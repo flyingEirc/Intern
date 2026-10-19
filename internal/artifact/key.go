@@ -26,7 +26,7 @@ func GenerateKey(path string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,7 @@ func GenerateKey(path string) (retErr error) {
 	}
 	return f.Sync()
 }
+
 func openKEK(path string) (*os.File, error) {
 	if path == "" {
 		return nil, errors.New("encryption requires a separately stored --key-file")
@@ -49,11 +50,12 @@ func openKEK(path string) (*os.File, error) {
 	if err != nil {
 		return nil, errors.New("cannot read key file")
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > 65536 {
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 || st.Size() > 65536 {
 		return nil, errors.New("key file must be a regular private file (chmod 600), not a symlink")
 	}
 	return fsutil.Open(path)
 }
+
 func loadKEK(path string) (h *keyset.Handle, retErr error) {
 	f, err := openKEK(path)
 	if err != nil {
@@ -69,6 +71,7 @@ func loadKEK(path string) (h *keyset.Handle, retErr error) {
 	}
 	return h, nil
 }
+
 func validateKEK(h *keyset.Handle) error {
 	material := insecurecleartextkeyset.KeysetMaterial(h)
 	if len(material.Key) == 0 {
@@ -85,6 +88,7 @@ func validateKEK(h *keyset.Handle) error {
 	}
 	return nil
 }
+
 func masterKey(path string) (tink.AEAD, error) {
 	h, err := loadKEK(path)
 	if err != nil {
@@ -92,6 +96,7 @@ func masterKey(path string) (tink.AEAD, error) {
 	}
 	return aead.New(h)
 }
+
 func KeyID(path string) (string, error) {
 	h, err := loadKEK(path)
 	if err != nil {
@@ -124,6 +129,7 @@ func ValidateKeyLocation(key string, directories ...string) error {
 	}
 	return nil
 }
+
 func canonicalPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {

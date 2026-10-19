@@ -115,21 +115,21 @@ func assertObject(t *testing.T, repo *Repository, name, contents string) {
 }
 
 func TestOpenRootPermissions(t *testing.T) {
-	for _, mode := range []fs.FileMode{0700, 0750, 0710, 0701, 0777, 0, os.ModeSticky | 0700} {
+	for _, mode := range []fs.FileMode{0o700, 0o750, 0o710, 0o701, 0o777, 0, os.ModeSticky | 0o700} {
 		t.Run(mode.String(), func(t *testing.T) {
 			root := t.TempDir()
 			if err := os.Chmod(root, mode); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { os.Chmod(root, 0700) })
+			t.Cleanup(func() { os.Chmod(root, 0o700) })
 			repo, err := Open(root)
 			if repo != nil {
 				repo.Close()
 			}
-			if mode == 0700 && err != nil {
+			if mode == 0o700 && err != nil {
 				t.Fatal(err)
 			}
-			if mode != 0700 && err == nil {
+			if mode != 0o700 && err == nil {
 				t.Fatalf("accepted root mode %v", mode)
 			}
 		})
@@ -138,10 +138,10 @@ func TestOpenRootPermissions(t *testing.T) {
 
 func TestOpenRejectsSymlinkToPrivateDirectory(t *testing.T) {
 	target := t.TempDir()
-	if err := os.Chmod(target, 0700); err != nil {
+	if err := os.Chmod(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(target, 0700) })
+	t.Cleanup(func() { os.Chmod(target, 0o700) })
 	link := filepath.Join(t.TempDir(), "root")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
@@ -158,10 +158,10 @@ func TestOpenRejectsSymlinkToPrivateDirectory(t *testing.T) {
 func TestPublishRejectsExistingWorldReadableParent(t *testing.T) {
 	repo, root := newRepository(t)
 	parent := filepath.Join(root, "parent")
-	if err := os.Mkdir(parent, 0755); err != nil {
+	if err := os.Mkdir(parent, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(parent, 0755); err != nil {
+	if err := os.Chmod(parent, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	staging := begin(t, repo, "parent/backup")
@@ -186,7 +186,7 @@ func TestOpenRejectsRelativeSymlinkAndFile(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(file, nil, 0600); err != nil {
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, root := range []string{"", "relative", link, file} {
@@ -217,13 +217,13 @@ func assertInvisible(t *testing.T, repo *Repository, name string) {
 
 func TestStagingPublishVisibilityAndPermissions(t *testing.T) {
 	repo, root := newRepository(t)
-	assertMode(t, root, 0700)
+	assertMode(t, root, 0o700)
 	staging := begin(t, repo, "inst/src/chain/0001-backup")
-	assertMode(t, filepath.Join(root, staging.pending), 0700)
+	assertMode(t, filepath.Join(root, staging.pending), 0o700)
 	name := staging.dir + "/payload.zst"
 	assertInvisible(t, repo, name)
 	sink := commitBytes(t, staging, "payload.zst", "private bytes")
-	assertMode(t, filepath.Join(root, staging.pending, "payload.zst"), 0600)
+	assertMode(t, filepath.Join(root, staging.pending, "payload.zst"), 0o600)
 	assertInvisible(t, repo, name)
 	if err := staging.Publish(context.Background()); err != nil {
 		t.Fatal(err)
@@ -247,9 +247,9 @@ func assertPublishedModes(t *testing.T, root, dir string) {
 	current := root
 	for part := range strings.SplitSeq(dir, "/") {
 		current = filepath.Join(current, part)
-		assertMode(t, current, 0700)
+		assertMode(t, current, 0o700)
 	}
-	assertMode(t, filepath.Join(current, "payload.zst"), 0600)
+	assertMode(t, filepath.Join(current, "payload.zst"), 0o600)
 }
 
 func assertList(t *testing.T, repo *Repository, prefix string, want []string) {
@@ -310,7 +310,7 @@ func TestRepositoryStaysPinnedAfterRename(t *testing.T) {
 	if err := os.Rename(root, moved); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(root, 0700); err != nil {
+	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	staging := begin(t, repo, "backup")
@@ -322,5 +322,5 @@ func TestRepositoryStaysPinnedAfterRename(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "backup")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("publication used unpinned root: %v", err)
 	}
-	assertMode(t, filepath.Join(moved, "backup"), 0700)
+	assertMode(t, filepath.Join(moved, "backup"), 0o700)
 }

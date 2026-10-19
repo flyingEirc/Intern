@@ -60,6 +60,7 @@ func Load() (Contract, error) {
 	}
 	return c, uniqueNames(profiles)
 }
+
 func uniqueNames(names []string) error {
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
@@ -70,6 +71,7 @@ func uniqueNames(names []string) error {
 	}
 	return nil
 }
+
 func (c Contract) Profile(id string) (Profile, error) {
 	for _, p := range c.Profiles {
 		if p.ID == id {

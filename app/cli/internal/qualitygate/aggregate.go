@@ -45,6 +45,7 @@ func VerifyDirectory(dir string, want Verification) (result Result, retErr error
 	defer fsutil.Close(&retErr, events)
 	return Verify(events, candidate, receipts, want)
 }
+
 func Aggregate(dir, source, platform string, jobs Jobs) ([]Result, error) {
 	if err := ValidateJobs(jobs); err != nil {
 		return nil, err

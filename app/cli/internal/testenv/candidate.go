@@ -56,6 +56,7 @@ func (s *Suite) buildCandidate(ctx context.Context) error {
 	s.Candidate.BinarySHA256 = fields[0]
 	return s.measureTools(ctx, probe)
 }
+
 func (s *Suite) measureTools(ctx context.Context, probe tc.Container) error {
 	for _, tool := range []string{"mysql", "mysqldump", "mysqlbinlog"} {
 		output, code, err := execContainer(ctx, probe, "10001", []string{tool, "--no-defaults", "--version"})
@@ -77,6 +78,7 @@ func boundedHost(config *container.HostConfig) {
 	config.Memory = 768 << 20
 	config.NanoCPUs = 2_000_000_000
 }
+
 func execContainer(ctx context.Context, c tc.Container, user string, args []string, extra ...tcexec.ProcessOption) (string, int, error) {
 	options := append([]tcexec.ProcessOption{tcexec.WithUser(user), tcexec.Multiplexed()}, extra...)
 	code, reader, err := c.Exec(ctx, args, options...)

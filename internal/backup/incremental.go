@@ -40,6 +40,7 @@ func (e *Engine) attachParent(ctx context.Context, s *session, info sourceInfo, 
 	m.Start = parent.End
 	return nil
 }
+
 func checkParentSource(ctx context.Context, s *session, info sourceInfo, parent Manifest) error {
 	if parent.SourceUUID != info.UUID || parent.Database != s.cfg.DB || parent.GTIDMode != info.GTID || parent.ServerVersion != info.Version {
 		return fmt.Errorf("%w: source identity/version/GTID mode changed", ErrNewBaseline)
@@ -56,6 +57,7 @@ func checkParentSource(ctx context.Context, s *session, info sourceInfo, parent 
 	}
 	return nil
 }
+
 func nextLog(a, b string) bool {
 	ai := strings.LastIndexByte(a, '.')
 	bi := strings.LastIndexByte(b, '.')
@@ -69,6 +71,7 @@ func nextLog(a, b string) bool {
 	bn, err := strconv.ParseUint(b[bi+1:], 10, 64)
 	return err == nil && an+1 == bn
 }
+
 func closedLogs(ctx context.Context, s *session, start Coordinate) ([]sourceLog, error) {
 	if _, err := s.conn.ExecContext(ctx, "FLUSH BINARY LOGS"); err != nil {
 		return nil, dbError("rotate binary logs (RELOAD required)", err)
@@ -95,13 +98,14 @@ func closedLogs(ctx context.Context, s *session, start Coordinate) ([]sourceLog,
 	}
 	return logs[first:], nil
 }
+
 func (e *Engine) archiveLogs(ctx context.Context, s *session, creds, work string, m *Manifest) error {
 	logs, err := closedLogs(ctx, s, m.Start)
 	if err != nil {
 		return err
 	}
 	spool := filepath.Join(work, "logs")
-	if err = os.Mkdir(spool, 0700); err != nil {
+	if err = os.Mkdir(spool, 0o700); err != nil {
 		return err
 	}
 	for i := range len(logs) - 1 {
@@ -122,6 +126,7 @@ func (e *Engine) archiveLogs(ctx context.Context, s *session, creds, work string
 	m.End = Coordinate{File: logs[len(logs)-1].Name, Position: 4}
 	return nil
 }
+
 func archiveLog(ctx context.Context, creds, spool string, log sourceLog, next string, start int64, database string) (File, error) {
 	if !nextLog(log.Name, next) {
 		return File{}, errors.New("source binary log sequence has a gap")
@@ -130,7 +135,7 @@ func archiveLog(ctx context.Context, creds, spool string, log sourceLog, next st
 		return File{}, err
 	}
 	path := filepath.Join(spool, log.Name)
-	if err := os.Chmod(path, 0600); err != nil {
+	if err := os.Chmod(path, 0o600); err != nil {
 		return File{}, err
 	}
 	f, err := fileDigest(path, log.Name)

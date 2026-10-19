@@ -218,16 +218,16 @@ func makeExistingTarget(t *testing.T, root, kind string) {
 	t.Helper()
 	name := filepath.Join(root, "backup")
 	if kind == "file" {
-		if err := os.WriteFile(name, []byte("original"), 0600); err != nil {
+		if err := os.WriteFile(name, []byte("original"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
-	if err := os.Mkdir(name, 0700); err != nil {
+	if err := os.Mkdir(name, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if kind == "populated directory" {
-		if err := os.WriteFile(filepath.Join(name, "payload"), []byte("original"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(name, "payload"), []byte("original"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -273,10 +273,10 @@ func TestBeginRejectsExistingTarget(t *testing.T) {
 func TestBeginRejectsNestedExistingFile(t *testing.T) {
 	repo, root := newRepository(t)
 	parent := filepath.Join(root, "parent")
-	if err := os.Mkdir(parent, 0700); err != nil {
+	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(parent, "backup"), []byte("original"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(parent, "backup"), []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	staging, err := repo.Begin("parent/backup")
@@ -294,7 +294,7 @@ func TestBeginRejectsNestedExistingFile(t *testing.T) {
 
 func TestBeginAllowsAbsentTarget(t *testing.T) {
 	repo, root := newRepository(t)
-	if err := os.Mkdir(filepath.Join(root, "parent"), 0700); err != nil {
+	if err := os.Mkdir(filepath.Join(root, "parent"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	staging := begin(t, repo, "parent/leaf")
@@ -383,7 +383,7 @@ func TestRestoreRenameFailureLeavesPublishedDirectory(t *testing.T) {
 	if err := renameExclusive(rootDir, staging.pending, parent, "backup"); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.root.Mkdir(staging.pending, 0700); err != nil {
+	if err := repo.root.Mkdir(staging.pending, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	cause := closedDirectorySyncError(t)

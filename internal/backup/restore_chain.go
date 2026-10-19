@@ -40,6 +40,7 @@ func (e *Engine) prepareChain(ctx context.Context, work, id string) ([]preparedB
 	}
 	return chain, total, nil
 }
+
 func (e *Engine) prepareMember(ctx context.Context, work, id string, limit int64) (b preparedBackup, n int64, retErr error) {
 	record, err := e.store.Get(ctx, id)
 	if err != nil {
@@ -49,7 +50,7 @@ func (e *Engine) prepareMember(ctx context.Context, work, id string, limit int64
 		return b, 0, err
 	}
 	b.directory = filepath.Join(work, id)
-	if err = os.Mkdir(b.directory, 0700); err != nil {
+	if err = os.Mkdir(b.directory, 0o700); err != nil {
 		return b, 0, err
 	}
 	path := filepath.Join(b.directory, "payload.tar")
@@ -62,6 +63,7 @@ func (e *Engine) prepareMember(ctx context.Context, work, id string, limit int64
 	}
 	return b, n, nil
 }
+
 func (e *Engine) validateArtifactPath(record catalog.Record) error {
 	if record.Path != filepath.Join(e.opts.Directory, record.ID) {
 		return errors.New("backup chain member is outside selected backup directory")
@@ -75,8 +77,9 @@ func (e *Engine) validateArtifactPath(record catalog.Record) error {
 	}
 	return nil
 }
+
 func (e *Engine) unpackMember(ctx context.Context, record catalog.Record, dir, work, path string, limit int64) (m Manifest, n int64, retErr error) {
-	out, err := fsutil.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	out, err := fsutil.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return m, 0, err
 	}
@@ -99,6 +102,7 @@ func (e *Engine) unpackMember(ctx context.Context, record catalog.Record, dir, w
 	n, err = extractTar(ctx, out, dir, m.Files, limit)
 	return m, n, err
 }
+
 func (e *Engine) manifestForRecord(metadata []byte, record catalog.Record) (Manifest, error) {
 	// SQLite is an index, not an alternative unauthenticated recovery manifest.
 	if string(metadata) != string(record.Manifest) {
@@ -113,6 +117,7 @@ func (e *Engine) manifestForRecord(metadata []byte, record catalog.Record) (Mani
 	}
 	return m, nil
 }
+
 func validateChain(chain []preparedBackup) error {
 	if len(chain) == 0 || chain[0].manifest.Kind != "logical-full" {
 		return errors.New("backup chain lacks a logical full baseline")
@@ -128,9 +133,11 @@ func validateChain(chain []preparedBackup) error {
 	}
 	return nil
 }
+
 func validChainLink(prev, m Manifest) bool {
 	return m.Kind == "binlog" && m.Parent == prev.ID && m.Start == prev.End && m.SourceUUID == prev.SourceUUID && m.Database == prev.Database && m.ServerVersion == prev.ServerVersion && m.GTIDMode == prev.GTIDMode
 }
+
 func validateLogSequence(m Manifest) error {
 	if m.Files[0].Name != m.Start.File || m.Start.Position > m.Files[0].Size || m.End.Position != 4 {
 		return errors.New("invalid incremental start/end range")
@@ -143,6 +150,7 @@ func validateLogSequence(m Manifest) error {
 	}
 	return nil
 }
+
 func logBoundary(m Manifest, index int) (int64, string) {
 	start := int64(4)
 	if index == 0 {
@@ -154,6 +162,7 @@ func logBoundary(m Manifest, index int) (int64, string) {
 	}
 	return start, next
 }
+
 func extractTar(ctx context.Context, r io.Reader, dir string, files []File, limit int64) (int64, error) {
 	tr := tar.NewReader(r)
 	total := int64(0)
@@ -173,6 +182,7 @@ func extractTar(ctx context.Context, r io.Reader, dir string, files []File, limi
 	}
 	return total, nil
 }
+
 func validateArchiveMember(meta File, seen map[string]bool, remaining int64) error {
 	if filepath.Base(meta.Name) != meta.Name || (meta.Name != "dump.sql" && !logName.MatchString(meta.Name)) {
 		return errors.New("unsafe or oversized artifact file manifest")
@@ -182,6 +192,7 @@ func validateArchiveMember(meta File, seen map[string]bool, remaining int64) err
 	}
 	return nil
 }
+
 func extractMember(ctx context.Context, tr *tar.Reader, dir string, meta File) (retErr error) {
 	h, err := tr.Next()
 	if err != nil {
@@ -190,7 +201,7 @@ func extractMember(ctx context.Context, tr *tar.Reader, dir string, meta File) (
 	if h.Typeflag != tar.TypeReg || h.Name != meta.Name || h.Size != meta.Size {
 		return errors.New("artifact tar member does not match manifest")
 	}
-	out, err := fsutil.OpenFile(filepath.Join(dir, meta.Name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	out, err := fsutil.OpenFile(filepath.Join(dir, meta.Name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

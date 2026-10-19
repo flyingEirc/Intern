@@ -34,7 +34,7 @@ func (c *Case) NewDatabase(alias string, profile qualitygate.Profile, gtid bool)
 		return nil, err
 	}
 	config := c.databaseConfig(gtid)
-	files := []tc.ContainerFile{{Reader: bytes.NewReader(c.CA.PEM), ContainerFilePath: "/tmp/intern-ca.pem", FileMode: 0600}, {Reader: bytes.NewReader(cert), ContainerFilePath: "/tmp/intern-cert.pem", FileMode: 0600}, {Reader: bytes.NewReader(key), ContainerFilePath: "/tmp/intern-key.pem", FileMode: 0600}, {Reader: strings.NewReader(config), ContainerFilePath: "/etc/mysql/conf.d/intern.cnf", FileMode: 0644}}
+	files := []tc.ContainerFile{{Reader: bytes.NewReader(c.CA.PEM), ContainerFilePath: "/tmp/intern-ca.pem", FileMode: 0o600}, {Reader: bytes.NewReader(cert), ContainerFilePath: "/tmp/intern-cert.pem", FileMode: 0o600}, {Reader: bytes.NewReader(key), ContainerFilePath: "/tmp/intern-key.pem", FileMode: 0o600}, {Reader: strings.NewReader(config), ContainerFilePath: "/etc/mysql/conf.d/intern.cnf", FileMode: 0o644}}
 	volume := c.prefix + "-" + alias + "-data"
 	ctr, err := mysql.Run(c.Ctx, profile.Image, mysql.WithUsername("root"), mysql.WithPassword(c.rootPassword), mysql.WithDatabase("fixture"), tc.WithEnv(map[string]string{"MYSQL_ROOT_HOST": "%"}), tc.WithFiles(files...), network.WithNetwork([]string{alias, "wrong-" + alias}, c.Network), tc.WithImagePlatform(c.Suite.Candidate.Platform), tc.WithMounts(tc.VolumeMount(volume, "/var/lib/mysql")), tc.WithEntrypoint("/bin/sh", "-c", "chown mysql:mysql /tmp/intern-ca.pem /tmp/intern-cert.pem /tmp/intern-key.pem; exec /usr/local/bin/docker-entrypoint.sh mysqld"), tc.WithCmd(), tc.WithHostConfigModifier(boundedHost), tc.WithWaitStrategy(wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(90*time.Second)))
 	if ctr != nil {
@@ -61,6 +61,7 @@ func (c *Case) NewDatabase(alias string, profile qualitygate.Profile, gtid bool)
 	}
 	return db, nil
 }
+
 func (c *Case) databaseConfig(gtid bool) string {
 	mode := "ON"
 	if !gtid {
@@ -68,6 +69,7 @@ func (c *Case) databaseConfig(gtid bool) string {
 	}
 	return fmt.Sprintf("[mysqld]\nserver-id=%d\nlog-bin=binlog\nbinlog_format=ROW\ngtid_mode=%s\nenforce_gtid_consistency=%s\nssl-ca=/tmp/intern-ca.pem\nssl-cert=/tmp/intern-cert.pem\nssl-key=/tmp/intern-key.pem\nrequire_secure_transport=ON\nevent_scheduler=OFF\ninnodb_buffer_pool_size=67108864\n", 100+len(c.Receipt.Instances), mode, mode)
 }
+
 func (c *Case) connectDatabase(db *Database) error {
 	host, err := db.Container.Host(c.Ctx)
 	if err != nil {
@@ -100,6 +102,7 @@ func (c *Case) connectDatabase(db *Database) error {
 	c.T.Cleanup(func() { c.removed(opened.Close(), "SQL observer") })
 	return nil
 }
+
 func (c *Case) waitDatabase(db *Database) error {
 	ctx, cancel := context.WithTimeout(c.Ctx, 30*time.Second)
 	defer cancel()
@@ -118,6 +121,7 @@ func (c *Case) waitDatabase(db *Database) error {
 		}
 	}
 }
+
 func (c *Case) provisionUsers(db *Database) error {
 	statements := []struct {
 		query string
@@ -138,6 +142,7 @@ func (c *Case) provisionUsers(db *Database) error {
 	}
 	return c.grantRestoreSchemas(db)
 }
+
 func (c *Case) grantRestoreSchemas(db *Database) error {
 	const grant = "GRANT CREATE, SELECT, INSERT, UPDATE, DELETE, ALTER, INDEX, DROP, CREATE VIEW, SHOW VIEW, TRIGGER, EVENT, CREATE ROUTINE, ALTER ROUTINE, EXECUTE, REFERENCES, LOCK TABLES ON "
 	statements := []string{
@@ -154,6 +159,7 @@ func (c *Case) grantRestoreSchemas(db *Database) error {
 	}
 	return nil
 }
+
 func (c *Case) recordDatabase(db *Database, gtid bool) error {
 	var mode, format string
 	var binlog int
@@ -175,11 +181,13 @@ func (c *Case) recordDatabase(db *Database, gtid bool) error {
 	c.Receipt.Instances = append(c.Receipt.Instances, qualitygate.Instance{Role: db.Alias, UUID: db.UUID, Version: db.Version, ImageID: inspected.Image})
 	return nil
 }
+
 func (c *Case) SQL(db *Database, query string, args ...any) {
 	c.T.Helper()
 	_, err := db.SQL.ExecContext(c.Ctx, query, args...)
 	c.Must(c.SafeError(err))
 }
+
 func (c *Case) Scalar(db *Database, query string, args ...any) string {
 	c.T.Helper()
 	var value string

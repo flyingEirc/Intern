@@ -32,6 +32,7 @@ func (c *Case) LastLog(db *Database) string {
 	c.Assert("binlog-observed", latest != "")
 	return latest
 }
+
 func (c *Case) StartCLI(command string) int {
 	c.T.Helper()
 	// Callers supply fixed test commands/config paths; no credentials or SQL are shell arguments.
@@ -44,6 +45,7 @@ func (c *Case) StartCLI(command string) int {
 	c.Assert("process-identifier", pid > 1)
 	return pid
 }
+
 func (c *Case) Signal(pid int, signal string) {
 	c.T.Helper()
 	if signal != "TERM" && signal != "KILL" {
@@ -55,11 +57,14 @@ func (c *Case) Signal(pid int, signal string) {
 		return code != 0, err
 	})
 }
+
 func (c *Case) ProcessLog() string { c.T.Helper(); return string(c.Read("/work/state/process.log")) }
+
 func (c *Case) Disconnect(db *Database) {
 	c.T.Helper()
 	c.Must(changeNetwork(c.Ctx, c.Network.Name, db.Container.GetContainerID(), false, db.Alias))
 }
+
 func (c *Case) Reconnect(db *Database) {
 	c.T.Helper()
 	c.Must(changeNetwork(c.Ctx, c.Network.Name, db.Container.GetContainerID(), true, db.Alias))
@@ -67,6 +72,7 @@ func (c *Case) Reconnect(db *Database) {
 	c.Must(c.connectDatabase(db))
 	c.Must(c.waitDatabase(db))
 }
+
 func changeNetwork(ctx context.Context, network, id string, connect bool, alias string) (retErr error) {
 	docker, err := tc.NewDockerClientWithOpts(ctx)
 	if err != nil {
@@ -80,6 +86,7 @@ func changeNetwork(ctx context.Context, network, id string, connect bool, alias 
 	_, err = docker.NetworkConnect(ctx, network, client.NetworkConnectOptions{Container: id, EndpointConfig: &networktypes.EndpointSettings{Aliases: []string{alias}}})
 	return err
 }
+
 func (c *Case) HoldWrites(db *Database) func() {
 	c.T.Helper()
 	conn, err := db.SQL.Conn(c.Ctx)
@@ -100,6 +107,7 @@ func (c *Case) HoldWrites(db *Database) func() {
 	c.Must(c.SafeError(err))
 	return release
 }
+
 func (c *Case) WaitForDump() {
 	c.T.Helper()
 	c.Await("mysqldump reaches real server and staging", func() (bool, error) {
@@ -112,6 +120,7 @@ func (c *Case) WaitForDump() {
 		return count > 0, c.SafeError(err)
 	})
 }
+
 func (c *Case) WaitStable(duration time.Duration, check func() bool) {
 	c.T.Helper()
 	timer := time.NewTimer(duration)

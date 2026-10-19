@@ -17,8 +17,13 @@ func TestRequestIDValidationAndEcho(t *testing.T) {
 		id    string
 		valid bool
 	}{
-		{"abc.ABC-123_", true}, {strings.Repeat("a", 64), true},
-		{"", false}, {strings.Repeat("a", 65), false}, {"spaces not allowed", false}, {"中文", false}, {"slash/id", false},
+		{"abc.ABC-123_", true},
+		{strings.Repeat("a", 64), true},
+		{"", false},
+		{strings.Repeat("a", 65), false},
+		{"spaces not allowed", false},
+		{"中文", false},
+		{"slash/id", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {

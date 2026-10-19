@@ -33,17 +33,20 @@ func TestMySQL(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) { t.Parallel(); c := suite.NewCase(t, scenario.name); scenario.run(c); c.Verified() })
 	}
 }
+
 func seedBasic(c *testenv.Case) {
 	c.SQL(c.Source, "CREATE DATABASE app CHARACTER SET utf8mb4 COLLATE utf8mb4_bin")
 	c.SQL(c.Source, "CREATE TABLE app.records(id INT PRIMARY KEY AUTO_INCREMENT,value VARCHAR(120) NOT NULL,UNIQUE KEY value_unique(value)) ENGINE=InnoDB")
 	c.SQL(c.Source, "INSERT INTO app.records VALUES(1,'baseline'),(2,'old'),(3,'delete')")
 }
+
 func rows(c *testenv.Case, db *testenv.Database, schema string) string {
 	c.T.Helper()
 	// Schema names below are fixed fixture identifiers, never values supplied to the product.
 	query := "SELECT COALESCE(GROUP_CONCAT(CONCAT(id,':',value) ORDER BY id SEPARATOR '|'),'') FROM `" + schema + "`.records"
 	return c.Scalar(db, query)
 }
+
 func fullObjects(c *testenv.Case) {
 	seedBasic(c)
 	c.Stage("schema-fixture")
@@ -67,6 +70,7 @@ func fullObjects(c *testenv.Case) {
 	c.Restore(full.ID, true, "--db", "app")
 	assertFullObjects(c)
 }
+
 func assertFullObjects(c *testenv.Case) {
 	c.Assert("baseline-rows", rows(c, c.Target, "app") == "1:baseline|2:old|3:delete")
 	c.Assert("typed-values", c.Scalar(c.Target, "SELECT CONCAT(CAST(amount AS CHAR),'|',IFNULL(nullable,'NULL'),'|',HEX(payload),'|',DATE_FORMAT(event_time,'%Y-%m-%d %H:%i:%s.%f'),'|',utf8_text) FROM app.typed WHERE id=1") == "123456789.123456|NULL|0001FEFF|2026-09-19 12:34:56.123456|备份Ωé")
@@ -81,6 +85,7 @@ func assertFullObjects(c *testenv.Case) {
 	c.Assert("foreign-key-enforced", err != nil)
 	c.Assert("source-unchanged", rows(c, c.Source, "app") == "1:baseline|2:old|3:delete")
 }
+
 func emptyDatabase(c *testenv.Case) {
 	c.SQL(c.Source, "CREATE DATABASE app")
 	full := c.Backup("full")

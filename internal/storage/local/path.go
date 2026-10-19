@@ -69,7 +69,7 @@ func (r *Repository) makeParents(dir string) error {
 			continue
 		}
 		current = path.Join(current, component)
-		err := r.root.Mkdir(current, 0700)
+		err := r.root.Mkdir(current, 0o700)
 		if err == nil {
 			if err = syncDirectory(r.root, path.Dir(current)); err != nil {
 				return err
@@ -89,7 +89,7 @@ func (r *Repository) privateDirectory(name string) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode() != os.ModeDir|0700 {
+	if info.Mode() != os.ModeDir|0o700 {
 		return fmt.Errorf("repository parent must be a directory with mode 0700: %w", fs.ErrPermission)
 	}
 	return nil

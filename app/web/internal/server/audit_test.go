@@ -45,8 +45,10 @@ func TestMutationAuditCoverageAndSecretScan(t *testing.T) {
 		t.Fatal(err)
 	}
 	all := string(encoded) + rawAudit(t, f.dir) + f.logs.String()
-	for _, secret := range []string{testPassword, changedPassword, "wrong-private-credential", "operator-private-credential", "$argon2id$", hash,
-		cookie.Value, renewed.Value, cookie.String(), renewed.String(), "private-authorization-marker"} {
+	for _, secret := range []string{
+		testPassword, changedPassword, "wrong-private-credential", "operator-private-credential", "$argon2id$", hash,
+		cookie.Value, renewed.Value, cookie.String(), renewed.String(), "private-authorization-marker",
+	} {
 		if strings.Contains(all, secret) {
 			t.Fatal("audit or log output contains an authentication secret")
 		}

@@ -107,9 +107,11 @@ func (s *Store) AuditLogs(ctx context.Context, before int64, limit int) ([]Audit
 	}
 	entries := make([]AuditLog, len(rows))
 	for i, row := range rows {
-		entry := AuditLog{ID: row.ID, TS: row.Ts, ActorType: row.ActorType, ActorID: row.ActorID,
+		entry := AuditLog{
+			ID: row.ID, TS: row.Ts, ActorType: row.ActorType, ActorID: row.ActorID,
 			ActorName: row.ActorName, Action: row.Action, ResourceType: row.ResourceType,
-			ResourceID: row.ResourceID, IP: row.Ip, Result: row.Result, RequestID: row.RequestID}
+			ResourceID: row.ResourceID, IP: row.Ip, Result: row.Result, RequestID: row.RequestID,
+		}
 		if row.Status.Valid {
 			status := row.Status.Int64
 			entry.Status = &status
@@ -141,8 +143,10 @@ func (s *Store) CreateAdmin(ctx context.Context, username, hash string) (_ User,
 	if err != nil {
 		return User{}, err
 	}
-	err = insertAudit(ctx, queries, AuditLog{ActorType: "system", Action: "users.create_admin",
-		ResourceType: "user", ResourceID: user.ID, Result: "success", Detail: AuditDetail{Role: "admin"}})
+	err = insertAudit(ctx, queries, AuditLog{
+		ActorType: "system", Action: "users.create_admin",
+		ResourceType: "user", ResourceID: user.ID, Result: "success", Detail: AuditDetail{Role: "admin"},
+	})
 	if err != nil {
 		return User{}, err
 	}

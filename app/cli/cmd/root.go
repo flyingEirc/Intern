@@ -26,6 +26,7 @@ func New(out, stderr io.Writer) *cobra.Command {
 	root.AddCommand(app.backupCommand(), app.restoreCommand(), app.keygenCommand(), app.scheduleCommand())
 	return root
 }
+
 func (a *application) emit(value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -38,6 +39,7 @@ func (a *application) emit(value any) error {
 	}
 	return err
 }
+
 func (a *application) withEngine(command *cobra.Command, fn func(*backup.Engine, configuration) error) (retErr error) {
 	c, err := a.config.load()
 	if err != nil {
@@ -61,6 +63,7 @@ const rootHelp = `Intern: MySQL 逻辑全量与日志增量备份（不是 XtraB
 需要安装同主次版本 mysqldump/mysqlbinlog/mysql；不要在全量期间执行 DDL。
 增量执行 FLUSH BINARY LOGS，要求轮转与复制读取权限；不会自动清理备份。
 只恢复到不同 server_uuid 的空目标库。恢复失败可能留下部分 SQL 副作用。`
+
 const rootExamples = `  intern keygen --key-file /secure/intern.key
   intern backup full --config ./backup.yaml
   intern backup incremental --config ./backup.yaml

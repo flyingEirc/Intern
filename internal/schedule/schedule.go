@@ -63,9 +63,11 @@ func Run(ctx context.Context, engine *backup.Engine, opts backup.Options, c Conf
 	r.nextIncremental = now.Truncate(c.IncrementalEvery).Add(c.IncrementalEvery)
 	return r.run(ctx)
 }
+
 func requiresBaseline(err error) bool {
 	return errors.Is(err, backup.ErrNoBaseline) || errors.Is(err, backup.ErrNewBaseline)
 }
+
 func (r *runner) bootstrap(ctx context.Context) error {
 	first, err := r.engine.Incremental(ctx, "")
 	if requiresBaseline(err) {
@@ -77,6 +79,7 @@ func (r *runner) bootstrap(ctx context.Context) error {
 	}
 	return r.emit(first)
 }
+
 func (r *runner) run(ctx context.Context) error {
 	for {
 		if err := r.waitNext(ctx); err != nil {
@@ -97,6 +100,7 @@ func (r *runner) run(ctx context.Context) error {
 		}
 	}
 }
+
 func (r *runner) waitNext(ctx context.Context) error {
 	next := r.nextIncremental
 	if r.nextFull.Before(next) {
@@ -111,6 +115,7 @@ func (r *runner) waitNext(ctx context.Context) error {
 		return nil
 	}
 }
+
 func (r *runner) backupDue(ctx context.Context, now time.Time) (backup.Result, error) {
 	if !now.Before(r.nextFull) {
 		scheduled := r.nextFull

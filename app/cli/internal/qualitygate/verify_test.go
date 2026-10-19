@@ -26,6 +26,7 @@ func fixture(t *testing.T) (Candidate, []Receipt, []byte, Verification) {
 	appendEvent(t, &events, Event{Action: "pass", Package: IntegrationPackage})
 	return candidate, receipts, events.Bytes(), Verification{SourceSHA: candidate.SourceSHA, Profile: p.ID, Platform: candidate.Platform, RequireClean: true}
 }
+
 func appendEvent(t *testing.T, b *bytes.Buffer, event Event) {
 	t.Helper()
 	data, err := json.Marshal(event)
@@ -35,6 +36,7 @@ func appendEvent(t *testing.T, b *bytes.Buffer, event Event) {
 	b.Write(data)
 	b.WriteByte('\n')
 }
+
 func TestGateRequiresCompleteExecutedEvidence(t *testing.T) {
 	candidate, receipts, events, want := fixture(t)
 	if result, err := Verify(bytes.NewReader(events), candidate, receipts, want); err != nil || result.Status != "passed" {
@@ -74,6 +76,7 @@ func TestGateRequiresCompleteExecutedEvidence(t *testing.T) {
 		})
 	}
 }
+
 func TestRequiredJobsDoNotTreatSkipOrCancelAsSuccess(t *testing.T) {
 	for _, state := range []string{"skipped", "cancelled", "failure", "", "neutral"} {
 		t.Run(state, func(t *testing.T) {

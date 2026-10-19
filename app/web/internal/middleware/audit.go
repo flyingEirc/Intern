@@ -196,10 +196,12 @@ func auditEntry(c *gin.Context) store.AuditLog {
 		action = "http.unmatched"
 	}
 	status := int64(c.Writer.Status())
-	entry := store.AuditLog{ActorType: "anonymous", ActorName: data.username, Action: action,
+	entry := store.AuditLog{
+		ActorType: "anonymous", ActorName: data.username, Action: action,
 		ResourceType: data.resourceType, ResourceID: data.resourceID, Detail: data.detail,
 		IP: c.ClientIP(), Status: &status, Result: auditResult(int(status)),
-		RequestID: c.Writer.Header().Get(render.RequestIDHeader)}
+		RequestID: c.Writer.Header().Get(render.RequestIDHeader),
+	}
 	if _, exists := c.Get(currentUserKey); exists {
 		user := CurrentUser(c)
 		entry.ActorType, entry.ActorID, entry.ActorName = "user", user.ID, user.Username

@@ -50,14 +50,14 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 }
 
 func lockDirectory(dir string) (*flock.Flock, error) {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	st, err := os.Lstat(dir)
 	if err != nil {
 		return nil, err
 	}
-	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
+	if !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("catalog directory must be private (chmod 700)")
 	}
 	lock := flock.New(filepath.Join(dir, ".intern.lock"))
@@ -72,7 +72,7 @@ func lockDirectory(dir string) (*flock.Flock, error) {
 }
 
 func prepareDatabaseFile(path string) error {
-	f, err := fsutil.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := fsutil.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func prepareDatabaseFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
 		return errors.New("catalog must be a private regular file")
 	}
 	return nil
@@ -178,6 +178,7 @@ func retryJob(ctx context.Context, q *catalogsql.Queries, r Record) error {
 	}
 	return nil
 }
+
 func (s *Store) Complete(ctx context.Context, id string, manifest []byte) error {
 	n, err := s.queries.CompleteJob(ctx, catalogsql.CompleteJobParams{ID: id, Manifest: manifest})
 	if err != nil {
@@ -188,10 +189,12 @@ func (s *Store) Complete(ctx context.Context, id string, manifest []byte) error 
 	}
 	return nil
 }
+
 func (s *Store) Fail(ctx context.Context, id string) error {
 	_, err := s.queries.FailJob(ctx, id)
 	return err
 }
+
 func convert(j catalogsql.Job, err error) (Record, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return Record{}, ErrNotFound
@@ -205,14 +208,17 @@ func convert(j catalogsql.Job, err error) (Record, error) {
 	}
 	return Record{ID: j.ID, Source: j.Source, Kind: j.Kind, Parent: j.Parent, Path: j.Path, Manifest: j.Manifest, CreatedAt: created, Status: j.Status}, nil
 }
+
 func (s *Store) Get(ctx context.Context, id string) (Record, error) {
 	j, err := s.queries.GetCompleted(ctx, id)
 	return convert(j, err)
 }
+
 func (s *Store) Latest(ctx context.Context, source string) (Record, error) {
 	j, err := s.queries.LatestCompleted(ctx, source)
 	return convert(j, err)
 }
+
 func convertAll(jobs []catalogsql.Job, err error) ([]Record, error) {
 	if err != nil {
 		return nil, err
@@ -227,10 +233,12 @@ func convertAll(jobs []catalogsql.Job, err error) ([]Record, error) {
 	}
 	return records, nil
 }
+
 func (s *Store) List(ctx context.Context) ([]Record, error) {
 	j, err := s.queries.ListCompleted(ctx)
 	return convertAll(j, err)
 }
+
 func (s *Store) Pending(ctx context.Context) ([]Record, error) {
 	j, err := s.queries.ListPending(ctx)
 	return convertAll(j, err)

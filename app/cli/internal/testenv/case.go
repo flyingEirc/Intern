@@ -64,6 +64,7 @@ func (s *Suite) NewCase(t *testing.T, id string) *Case {
 	c.Stage("ready")
 	return c
 }
+
 func randomSecret() string {
 	var data [24]byte
 	if _, err := rand.Read(data[:]); err != nil {
@@ -71,12 +72,14 @@ func randomSecret() string {
 	}
 	return hex.EncodeToString(data[:])
 }
+
 func (c *Case) Must(err error) {
 	c.T.Helper()
 	if err != nil {
 		c.T.Fatal(c.Redact(err.Error()))
 	}
 }
+
 func (c *Case) Redact(message string) string {
 	for _, secret := range []string{c.rootPassword, c.backupPassword, c.restorePassword} {
 		message = strings.ReplaceAll(message, secret, "[REDACTED]")
@@ -104,6 +107,7 @@ func (c *Case) removed(err error, role string) {
 	defer c.mu.Unlock()
 	c.Receipt.ResourcesRemoved++
 }
+
 func (c *Case) ownNetwork() {
 	if c.Network == nil {
 		return
@@ -115,6 +119,7 @@ func (c *Case) ownNetwork() {
 		c.removed(c.Network.Remove(ctx), "network")
 	})
 }
+
 func (c *Case) ownContainer(ctr tc.Container, role string, volumes ...string) {
 	if ctr == nil {
 		return
@@ -126,6 +131,7 @@ func (c *Case) ownContainer(ctr tc.Container, role string, volumes ...string) {
 		c.removed(tc.TerminateContainer(ctr, tc.StopContext(ctx), tc.StopTimeout(5*time.Second), tc.RemoveVolumes(volumes...)), role)
 	})
 }
+
 func (c *Case) finish() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,18 +148,21 @@ func (c *Case) finish() {
 		c.T.Errorf("write case receipt: %v", err)
 	}
 }
+
 func (c *Case) StopDatabase(db *Database) {
 	c.T.Helper()
 	c.Must(db.SQL.Close())
 	timeout := 5 * time.Second
 	c.Must(db.Container.Stop(c.Ctx, &timeout))
 }
+
 func (c *Case) RestartDatabase(db *Database) {
 	c.T.Helper()
 	c.Must(db.Container.Start(c.Ctx))
 	c.Must(c.connectDatabase(db))
 	c.Must(c.waitDatabase(db))
 }
+
 func (c *Case) Await(description string, check func() (bool, error)) {
 	c.T.Helper()
 	ctx, cancel := context.WithTimeout(c.Ctx, 90*time.Second)
@@ -173,6 +182,7 @@ func (c *Case) Await(description string, check func() (bool, error)) {
 		}
 	}
 }
+
 func (c *Case) SafeError(err error) error {
 	if err == nil {
 		return nil

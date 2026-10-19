@@ -27,6 +27,7 @@ func codecMatrix(c *testenv.Case) {
 		c.Assert("codec-"+variant.name, rows(c, c.Target, "restored") == "1:baseline|2:old|3:delete")
 	}
 }
+
 func checkpointChain(c *testenv.Case) {
 	seedBasic(c)
 	full := c.Backup("full")
@@ -48,6 +49,7 @@ func checkpointChain(c *testenv.Case) {
 	c.Restore(first.ID, true)
 	c.Assert("restored-S1", rows(c, c.Target, "restored") == "1:baseline|2:updated|4:first")
 }
+
 func recoveryGuards(c *testenv.Case) {
 	seedBasic(c)
 	full := c.Backup("full")
@@ -95,6 +97,7 @@ func recoveryGuards(c *testenv.Case) {
 	c.Restore(increment.ID, true)
 	refuseRestore(increment.ID, "duplicate")
 }
+
 func sourceDiscontinuity(c *testenv.Case) {
 	seedBasic(c)
 	full := c.Backup("full")

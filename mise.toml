@@ -46,7 +46,7 @@ description = "Run the configured golangci-lint checks"
 run = "golangci-lint run ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks.fmt]
-description = "Format Go imports with the project configuration"
+description = "Format Go source and imports with the project configuration"
 run = "golangci-lint fmt ./internal/... ./app/cli/... ./app/web/..."
 
 [tasks.check]

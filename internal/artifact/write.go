@@ -51,6 +51,7 @@ func Write(ctx context.Context, dir string, payload io.Reader, manifest []byte, 
 	}
 	return saveEnvelope(dir, seal.env)
 }
+
 func newSealer(opts Options, manifest []byte) (*sealer, error) {
 	seal := &sealer{env: envelope{Version: 1}, binding: binding{Format: "intern-artifact-v1", Compression: "none", Cipher: "none", ManifestHash: digest(manifest), KeysetHash: digest(nil)}}
 	if opts.Compress {
@@ -68,6 +69,7 @@ func newSealer(opts Options, manifest []byte) (*sealer, error) {
 	seal.env.AAD = aad
 	return seal, nil
 }
+
 func (s *sealer) initializeEncryption(path string) error {
 	kek, err := loadKEK(path)
 	if err != nil {
@@ -95,8 +97,9 @@ func (s *sealer) initializeEncryption(path string) error {
 	s.binding.KeyID = fmt.Sprintf("%08x", kek.KeysetInfo().PrimaryKeyId)
 	return nil
 }
+
 func (s *sealer) writePayload(ctx context.Context, dir string, payload io.Reader, compress bool) (meta metadata, retErr error) {
-	f, err := fsutil.OpenFile(filepath.Join(dir, "payload.bin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := fsutil.OpenFile(filepath.Join(dir, "payload.bin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return meta, err
 	}
@@ -111,6 +114,7 @@ func (s *sealer) writePayload(ctx context.Context, dir string, payload io.Reader
 	}
 	return metadata{Size: counted.n, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
 }
+
 func (s *sealer) encode(ctx context.Context, w io.Writer, payload io.Reader, compress bool) (retErr error) {
 	if s.stream != nil {
 		encrypted, err := s.stream.NewEncryptingWriter(w, s.env.AAD)
@@ -132,6 +136,7 @@ func (s *sealer) encode(ctx context.Context, w io.Writer, payload io.Reader, com
 	_, err := io.Copy(w, &contextReader{ctx: ctx, r: payload})
 	return errors.Join(err, ctx.Err())
 }
+
 func (s *sealer) sealMetadata(meta metadata) error {
 	encoded, err := json.Marshal(meta)
 	if err != nil {
@@ -146,12 +151,13 @@ func (s *sealer) sealMetadata(meta metadata) error {
 	s.env.Metadata = encoded
 	return nil
 }
+
 func saveEnvelope(dir string, env envelope) (retErr error) {
 	encoded, err := json.Marshal(env)
 	if err != nil {
 		return err
 	}
-	f, err := fsutil.OpenFile(filepath.Join(dir, "envelope.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := fsutil.OpenFile(filepath.Join(dir, "envelope.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

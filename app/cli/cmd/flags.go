@@ -38,6 +38,7 @@ func newConfigLoader(root *cobra.Command, stderr io.Writer) *configLoader {
 	}
 	return loader
 }
+
 func connectionFlags(flags *pflag.FlagSet) {
 	flags.String("config", "", "YAML 配置路径（或 INTERN_CONFIG）")
 	flags.String("host", "127.0.0.1", "MySQL 主机")
@@ -51,6 +52,7 @@ func connectionFlags(flags *pflag.FlagSet) {
 	flags.String("tls-mode", "", "VERIFY_IDENTITY（TCP 默认）或显式 DISABLED（socket 默认）")
 	flags.String("tls-ca", "", "VERIFY_IDENTITY 的 CA PEM 路径")
 }
+
 func backupFlags(flags *pflag.FlagSet, home, configDir string) {
 	flags.String("directory", filepath.Join(home, "intern-backups"), "备份目录，要求 chmod 700")
 	flags.String("state-directory", filepath.Join(configDir, "intern", "state"), "独立元数据目录，要求 chmod 700；需随备份另行保护")
@@ -60,6 +62,7 @@ func backupFlags(flags *pflag.FlagSet, home, configDir string) {
 	flags.String("key-file", "", "独立 KEK 文件（chmod 600），不可放入备份或元数据目录")
 	flags.Int64("max-restore-bytes", 100<<30, "恢复展开大小上限（字节）；恢复前需保留足够暂存磁盘")
 }
+
 func scheduleFlags(flags *pflag.FlagSet) {
 	flags.String("full-at", "02:00", "每天全量时间 HH:MM")
 	flags.Duration("incremental-every", 15*time.Minute, "增量间隔，如 30s、15m、2h")

@@ -33,7 +33,7 @@ func Run(ctx context.Context, opts RunOptions, stdout, stderr io.Writer) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	events, err := fsutil.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	events, err := fsutil.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return Result{}, err
 	}
@@ -53,6 +53,7 @@ func Run(ctx context.Context, opts RunOptions, stdout, stderr io.Writer) (Result
 	}
 	return verifyRun(dir, opts, runErr, closeErr)
 }
+
 func verifyRun(dir string, opts RunOptions, runErr, closeErr error) (Result, error) {
 	var candidate Candidate
 	if err := ReadJSON(filepath.Join(dir, "candidate.json"), &candidate); err != nil {
@@ -67,6 +68,7 @@ func verifyRun(dir string, opts RunOptions, runErr, closeErr error) (Result, err
 	result, verifyErr := VerifyDirectory(dir, Verification{SourceSHA: opts.SourceSHA, Profile: opts.Profile, Platform: opts.Platform, RequireClean: opts.CI})
 	return result, errors.Join(runErr, closeErr, verifyErr)
 }
+
 func newReportDirectory(root, profile string) (string, error) {
 	if root == "" {
 		root = ".cache/quality"
@@ -75,11 +77,12 @@ func newReportDirectory(root, profile string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = os.MkdirAll(abs, 0700); err != nil {
+	if err = os.MkdirAll(abs, 0o700); err != nil {
 		return "", err
 	}
 	return os.MkdirTemp(abs, profile+"-")
 }
+
 func containerEnvironment(ctx context.Context, opts RunOptions, dir string) ([]string, error) {
 	overrides := map[string]string{"INTERN_TEST_PROFILE": opts.Profile, "INTERN_TEST_REPORT_DIR": dir, "INTERN_TEST_PLATFORM": opts.Platform, "INTERN_TEST_SOURCE_SHA": opts.SourceSHA}
 	if os.Getenv("DOCKER_HOST") == "" {

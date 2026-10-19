@@ -14,6 +14,7 @@ func requireNoError(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
 func requireStarted(t *testing.T, s *Store, r Record, want bool) {
 	t.Helper()
 	started, err := s.Begin(context.Background(), r)
@@ -22,6 +23,7 @@ func requireStarted(t *testing.T, s *Store, r Record, want bool) {
 		t.Fatalf("request start=%t, want %t", started, want)
 	}
 }
+
 func TestPublicationSurvivesReopenAndRejectsConcurrentOwner(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "state")
@@ -45,6 +47,7 @@ func TestPublicationSurvivesReopenAndRejectsConcurrentOwner(t *testing.T) {
 	checkPublicationIdempotency(t, s, r)
 	checkRestoreIsNotParent(t, s, r)
 }
+
 func checkInterruptedRequest(t *testing.T, s *Store, r Record) {
 	t.Helper()
 	ctx := context.Background()
@@ -59,6 +62,7 @@ func checkInterruptedRequest(t *testing.T, s *Store, r Record) {
 	requireNoError(t, s.Fail(ctx, r.ID))
 	requireStarted(t, s, r, true)
 }
+
 func checkPublicationIdempotency(t *testing.T, s *Store, r Record) {
 	t.Helper()
 	ctx := context.Background()
@@ -74,6 +78,7 @@ func checkPublicationIdempotency(t *testing.T, s *Store, r Record) {
 		t.Fatalf("published artifact unavailable: %v", got)
 	}
 }
+
 func checkRestoreIsNotParent(t *testing.T, s *Store, r Record) {
 	t.Helper()
 	ctx := context.Background()

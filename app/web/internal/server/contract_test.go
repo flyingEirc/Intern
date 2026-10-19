@@ -73,8 +73,10 @@ func (client *contractClient) roundTripRequest(req *http.Request, invalidRequest
 	route, params, routeErr := client.router.FindRoute(req)
 	var input *openapi3filter.RequestValidationInput
 	if routeErr == nil {
-		input = &openapi3filter.RequestValidationInput{Request: req, Route: route, PathParams: params,
-			Options: &openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc}}
+		input = &openapi3filter.RequestValidationInput{
+			Request: req, Route: route, PathParams: params,
+			Options: &openapi3filter.Options{AuthenticationFunc: openapi3filter.NoopAuthenticationFunc},
+		}
 		if err := openapi3filter.ValidateRequest(req.Context(), input); (err != nil) != invalidRequest {
 			return nil, fmt.Errorf("request contract (invalid expected=%t): %w", invalidRequest, err)
 		}

@@ -24,7 +24,7 @@ func openTestStore(t *testing.T, dir string) *Store {
 func privateTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -48,7 +48,7 @@ func TestPragmasAndPermissions(t *testing.T) {
 	if got := s.db.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("max connections = %d", got)
 	}
-	for path, want := range map[string]os.FileMode{dir: 0700, filepath.Join(dir, "intern.db"): 0600, filepath.Join(dir, ".intern-web.lock"): 0600} {
+	for path, want := range map[string]os.FileMode{dir: 0o700, filepath.Join(dir, "intern.db"): 0o600, filepath.Join(dir, ".intern-web.lock"): 0o600} {
 		st, err := os.Lstat(path)
 		if err != nil || st.Mode().Perm() != want {
 			t.Fatalf("mode of %s: %v, %v; want %o", path, st, err, want)
@@ -116,7 +116,7 @@ func TestStoreRejectsUnsafePaths(t *testing.T) {
 		setup func(*testing.T, string) string
 	}{
 		{"relative", func(_ *testing.T, _ string) string { return "relative" }},
-		{"wide directory", func(t *testing.T, dir string) string { os.Chmod(dir, 0755); return dir }},
+		{"wide directory", func(t *testing.T, dir string) string { os.Chmod(dir, 0o755); return dir }},
 		{"symlink directory", func(t *testing.T, dir string) string {
 			link := filepath.Join(t.TempDir(), "link")
 			if err := os.Symlink(dir, link); err != nil {
@@ -125,19 +125,19 @@ func TestStoreRejectsUnsafePaths(t *testing.T) {
 			return link
 		}},
 		{"wide database", func(t *testing.T, dir string) string {
-			os.WriteFile(filepath.Join(dir, "intern.db"), nil, 0644)
+			os.WriteFile(filepath.Join(dir, "intern.db"), nil, 0o644)
 			return dir
 		}},
-		{"database directory", func(t *testing.T, dir string) string { os.Mkdir(filepath.Join(dir, "intern.db"), 0700); return dir }},
+		{"database directory", func(t *testing.T, dir string) string { os.Mkdir(filepath.Join(dir, "intern.db"), 0o700); return dir }},
 		{"symlink database", func(t *testing.T, dir string) string {
 			target := filepath.Join(t.TempDir(), "other.db")
-			os.WriteFile(target, nil, 0600)
+			os.WriteFile(target, nil, 0o600)
 			os.Symlink(target, filepath.Join(dir, "intern.db"))
 			return dir
 		}},
 		{"symlink lock", func(t *testing.T, dir string) string {
 			target := filepath.Join(t.TempDir(), "other.lock")
-			os.WriteFile(target, nil, 0600)
+			os.WriteFile(target, nil, 0o600)
 			os.Symlink(target, filepath.Join(dir, ".intern-web.lock"))
 			return dir
 		}},
@@ -156,7 +156,7 @@ func TestStoreRejectsUnsafePaths(t *testing.T) {
 func TestMigrationFailureAndFutureVersion(t *testing.T) {
 	t.Run("corrupt", func(t *testing.T) {
 		dir := privateTempDir(t)
-		os.WriteFile(filepath.Join(dir, "intern.db"), []byte("not a database"), 0600)
+		os.WriteFile(filepath.Join(dir, "intern.db"), []byte("not a database"), 0o600)
 		if _, err := Open(t.Context(), dir); err == nil {
 			t.Fatal("corrupt database accepted")
 		}

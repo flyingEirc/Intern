@@ -61,7 +61,7 @@ func TestSymlinksCannotEscapeOrExposePending(t *testing.T) {
 	repo, root := newRepository(t)
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "secret")
-	if err := os.WriteFile(secret, []byte("unchanged"), 0600); err != nil {
+	if err := os.WriteFile(secret, []byte("unchanged"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
@@ -131,10 +131,10 @@ func TestListOmitsNestedPendingAndSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending := filepath.Join(root, "backup", ".pending-hidden")
-	if err := os.Mkdir(pending, 0700); err != nil {
+	if err := os.Mkdir(pending, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(pending, "hidden"), []byte("private"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(pending, "hidden"), []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("payload", filepath.Join(root, "backup", "alias")); err != nil {
@@ -152,10 +152,10 @@ func TestListSkipsPendingCaseVariants(t *testing.T) {
 	}
 	for _, name := range []string{".PENDING-x", ".Pending-x"} {
 		dir := filepath.Join(root, "backup", name)
-		if err := os.Mkdir(dir, 0700); err != nil {
+		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "hidden"), []byte("private"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "hidden"), []byte("private"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		assertList(t, repo, "backup", []string{"backup/payload"})

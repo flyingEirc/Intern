@@ -64,6 +64,8 @@
 | 所有锁定 profile 的真实容器门禁 | `mise run test:containers` |
 | 单个 profile 的真实容器门禁 | `mise run test:container --profile mysql-9.7.1` |
 
+Go 格式统一由 [.golangci.yml](../../.golangci.yml) 中的 `gci`（import 分组）与 `gofumpt`（默认格式规则）维护：`mise run fmt` 自动修复，`mise run lint` 检查，覆盖 internal、CLI 与 Web。多行顶层声明（含函数/方法）之间必须留空行；连续单行函数不强制分隔。未启用 gofumpt 额外规则；`whitespace` 不负责声明间的空行检查。启用与验证记录见 [#34](https://github.com/flyingEirc/Intern/issues/34)。
+
 `run` 与两个容器入口直接转发参数到实际程序，例如 `mise run run backup full --config /secure/source.yaml`。单 profile 默认 `mysql-9.7.1`，可用 `--profile` 或 `PROFILE=... mise run test:container` 指定；CLI flag 优先。帮助命令不会运行真实恢复场景，门禁是否通过仍须提供实际测试证据。
 
 Web 默认只监听 `127.0.0.1:8080`。登录 Cookie 固定带 `Secure`；非回环监听必须配置内置 TLS（`--tls-cert-file` / `--tls-key-file`，最低 TLS 1.2），或同时设置 `--tls-terminated-by-proxy` 与 `--trusted-proxies`，显式声明前置 HTTPS 代理。仅配置受信代理 IP 不代表已启用 HTTPS。代理模式的后端链路仍是明文，必须由网络/防火墙隔离直连访问；默认不信任任何 `X-Forwarded-For`。回环 HTTP 仅供本地开发使用。

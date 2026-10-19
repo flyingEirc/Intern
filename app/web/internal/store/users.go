@@ -37,8 +37,10 @@ type UserChanges struct {
 }
 
 func userFromRow(row storesql.User) User {
-	return User{ID: row.ID, Username: row.Username, Role: row.Role, Disabled: row.Disabled != 0,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, PasswordHash: row.PasswordHash, SessionEpoch: row.SessionEpoch}
+	return User{
+		ID: row.ID, Username: row.Username, Role: row.Role, Disabled: row.Disabled != 0,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, PasswordHash: row.PasswordHash, SessionEpoch: row.SessionEpoch,
+	}
 }
 
 func userError(err error) error {

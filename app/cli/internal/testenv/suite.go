@@ -44,12 +44,14 @@ func NewSuite(t *testing.T) *Suite {
 	must(t, s.writeJSON("candidate.json", s.Candidate))
 	return s
 }
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
 }
+
 func (s *Suite) loadSettings() error {
 	var err error
 	s.Contract, err = qualitygate.Load()
@@ -86,8 +88,9 @@ func (s *Suite) loadSettings() error {
 	s.slots = make(chan struct{}, parallel)
 	return nil
 }
+
 func prepareReportDir(dir string) error {
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(dir)
@@ -99,8 +102,9 @@ func prepareReportDir(dir string) error {
 			return errors.New("report directory is not fresh")
 		}
 	}
-	return os.Mkdir(filepath.Join(dir, "receipts"), 0700)
+	return os.Mkdir(filepath.Join(dir, "receipts"), 0o700)
 }
+
 func (s *Suite) preflight(ctx context.Context) (retErr error) {
 	if os.Getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" {
 		return errors.New("quality gate requires Ryuk cleanup")
@@ -128,6 +132,7 @@ func (s *Suite) preflight(ctx context.Context) (retErr error) {
 	s.Candidate = qualitygate.Candidate{FormatVersion: 1, SourceSHA: source, SourceDirty: dirty, Profile: s.Profile.ID, Platform: platform, HarnessPlatform: runtime.GOOS + "/" + runtime.GOARCH, GoVersion: runtime.Version(), RuntimeVersion: info.Info.ServerVersion, TestcontainersVersion: s.Contract.TestcontainersVersion, BuilderImage: s.Contract.BuilderImage, DatabaseImage: s.Profile.Image, ToolVersions: map[string]string{}, CIURL: ciURL()}
 	return nil
 }
+
 func nativePlatform(osType, architecture string) (string, error) {
 	arch := normalizeArch(architecture)
 	if osType != "linux" || arch == "" {
@@ -139,6 +144,7 @@ func nativePlatform(osType, architecture string) (string, error) {
 	}
 	return platform, nil
 }
+
 func normalizeArch(arch string) string {
 	switch arch {
 	case "amd64", "x86_64":
@@ -149,6 +155,7 @@ func normalizeArch(arch string) string {
 		return ""
 	}
 }
+
 func sourceIdentity(ctx context.Context, root string) (string, bool, error) {
 	head, err := gitOutput(ctx, root, "rev-parse", "HEAD")
 	if err != nil {
@@ -157,6 +164,7 @@ func sourceIdentity(ctx context.Context, root string) (string, bool, error) {
 	status, err := gitOutput(ctx, root, "status", "--porcelain", "--untracked-files=normal", "--", ".")
 	return strings.TrimSpace(head), strings.TrimSpace(status) != "", err
 }
+
 func gitOutput(ctx context.Context, root string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git")
 	cmd.Dir = root
@@ -164,19 +172,21 @@ func gitOutput(ctx context.Context, root string, args ...string) (string, error)
 	out, err := cmd.Output()
 	return string(out), err
 }
+
 func ciURL() string {
 	if os.Getenv("GITHUB_RUN_ID") == "" {
 		return ""
 	}
 	return os.Getenv("GITHUB_SERVER_URL") + "/" + os.Getenv("GITHUB_REPOSITORY") + "/actions/runs/" + os.Getenv("GITHUB_RUN_ID")
 }
+
 func (s *Suite) writeJSON(name string, value any) (retErr error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(s.ReportDir, name)
-	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}

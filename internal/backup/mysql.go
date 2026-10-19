@@ -24,9 +24,11 @@ import (
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
-var databaseName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_$-]{0,63}$`)
-var logName = regexp.MustCompile(`^[a-zA-Z0-9_-]+\.[0-9]{6,}$`)
-var versionPattern = regexp.MustCompile(`\b([89])\.([0-9]+)\.([0-9]+)\b`)
+var (
+	databaseName   = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_$-]{0,63}$`)
+	logName        = regexp.MustCompile(`^[a-zA-Z0-9_-]+\.[0-9]{6,}$`)
+	versionPattern = regexp.MustCompile(`\b([89])\.([0-9]+)\.([0-9]+)\b`)
+)
 
 type sourceInfo struct {
 	UUID, Version, GTID, ObservedGTID, Charset, Collation string
@@ -62,6 +64,7 @@ func normalizeConnection(c Connection) (Connection, error) {
 	}
 	return c, nil
 }
+
 func validateDatabase(c Connection) error {
 	if c.Username == "" {
 		return errors.New("database username is required")
@@ -75,6 +78,7 @@ func validateDatabase(c Connection) error {
 	}
 	return nil
 }
+
 func resolvePassword(c *Connection) error {
 	if c.PasswordEnv == "" || c.Password != "" {
 		return nil
@@ -86,6 +90,7 @@ func resolvePassword(c *Connection) error {
 	c.Password = password
 	return nil
 }
+
 func normalizeTransport(c *Connection) error {
 	if c.TLSMode == "" {
 		c.TLSMode = "VERIFY_IDENTITY"
@@ -163,6 +168,7 @@ func connectionTLS(c Connection) (cfg *tls.Config, retErr error) {
 	cfg.RootCAs = roots
 	return cfg, nil
 }
+
 func dbError(operation string, err error) error {
 	var me *mysql.MySQLError
 	if errors.As(err, &me) {
@@ -173,6 +179,7 @@ func dbError(operation string, err error) error {
 	}
 	return fmt.Errorf("MySQL %s failed: connection or protocol error", operation)
 }
+
 func (s *session) lock(ctx context.Context, role string) error {
 	sum := sha256.Sum256([]byte("intern:" + role + ":" + strings.ToLower(s.cfg.DB)))
 	var acquired sql.NullInt64
@@ -184,6 +191,7 @@ func (s *session) lock(ctx context.Context, role string) error {
 	}
 	return nil
 }
+
 func (s *session) info(ctx context.Context, source bool) (sourceInfo, error) {
 	var info sourceInfo
 	if err := s.conn.QueryRowContext(ctx, "SELECT @@server_uuid, @@version, @@global.gtid_mode, @@global.gtid_executed").Scan(&info.UUID, &info.Version, &info.GTID, &info.ObservedGTID); err != nil {
@@ -212,6 +220,7 @@ func (s *session) info(ctx context.Context, source bool) (sourceInfo, error) {
 	info.SchemaObjects = count > 0
 	return info, nil
 }
+
 func validateServerVersion(version string) error {
 	parts := versionPattern.FindStringSubmatch(version)
 	if len(parts) == 0 || (parts[1] == "8" && parts[2] != "4") {
@@ -247,6 +256,7 @@ func (s *session) checkBinlogMode(ctx context.Context) (retErr error) {
 	}
 	return rows.Err()
 }
+
 func (s *session) checkTableScope(ctx context.Context) error {
 	var count int
 	if err := s.conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE' AND ENGINE <> 'InnoDB'", s.cfg.DB).Scan(&count); err != nil {
@@ -268,6 +278,7 @@ func optionQuote(s string) string {
 	r := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\r", "\\r", "\t", "\\t", "\b", "\\b")
 	return "\"" + r.Replace(s) + "\""
 }
+
 func credentials(dir string, c Connection) (string, error) {
 	// MySQL's Unix transport still requires the client host to be localhost.
 	if c.Socket != "" {
@@ -288,11 +299,12 @@ func credentials(dir string, c Connection) (string, error) {
 		b.WriteString(kv[0] + "=" + optionQuote(kv[1]) + "\n")
 	}
 	path := filepath.Join(dir, "client.cnf")
-	if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil
 }
+
 func officialCommand(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
 	var cmd *exec.Cmd
 	switch name {
@@ -309,6 +321,7 @@ func officialCommand(ctx context.Context, name string, args ...string) (*exec.Cm
 	cmd.Args = append(cmd.Args, args...)
 	return cmd, nil
 }
+
 func toolCommand(ctx context.Context, name, credentialFile string, args ...string) (*exec.Cmd, error) {
 	prefix := make([]string, 0, len(args)+2)
 	if credentialFile != "" {
@@ -329,6 +342,7 @@ func toolCommand(ctx context.Context, name, credentialFile string, args ...strin
 	cmd.WaitDelay = 5 * time.Second
 	return cmd, nil
 }
+
 func runTool(ctx context.Context, name, creds string, input io.Reader, output io.Writer, args ...string) error {
 	cmd, err := toolCommand(ctx, name, creds, args...)
 	if err != nil {
@@ -350,6 +364,7 @@ func runTool(ctx context.Context, name, creds string, input io.Reader, output io
 	}
 	return nil
 }
+
 func toolVersion(ctx context.Context, name, server string) (string, error) {
 	cmd, err := officialCommand(ctx, name, "--no-defaults", "--version")
 	if err != nil {

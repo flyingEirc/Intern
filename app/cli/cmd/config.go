@@ -31,6 +31,7 @@ type configuration struct {
 func (c configuration) options() backup.Options {
 	return backup.Options{Connection: c.Connection, Directory: c.Backup.Directory, StateDirectory: c.Backup.StateDirectory, Project: c.Backup.Project, Compress: c.Backup.Compress, Encrypt: c.Backup.Encrypt, KeyFile: c.Backup.KeyFile, MaxRestoreBytes: c.Backup.MaxRestoreBytes}
 }
+
 func (l *configLoader) load() (configuration, error) {
 	var c configuration
 	if l.initErr != nil {
@@ -62,6 +63,7 @@ func (l *configLoader) load() (configuration, error) {
 	}
 	return c, nil
 }
+
 func (l *configLoader) readConfig(path string) (retErr error) {
 	f, err := fsutil.Open(path)
 	if err != nil {
@@ -79,11 +81,12 @@ func (l *configLoader) readConfig(path string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
 		return errors.New("YAML containing connection.password must be a regular private file (chmod 600); password_env is recommended")
 	}
 	return nil
 }
+
 func (l *configLoader) selectPasswordSource(c *backup.Connection) error {
 	_, envPassword := os.LookupEnv("INTERN_CONNECTION_PASSWORD")
 	_, envReference := os.LookupEnv("INTERN_CONNECTION_PASSWORD_ENV")
@@ -103,6 +106,7 @@ func (l *configLoader) selectPasswordSource(c *backup.Connection) error {
 	}
 	return nil
 }
+
 func promptPassword(stderr io.Writer) (string, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return "", errors.New("password prompt requires a terminal; use password_env for automation")

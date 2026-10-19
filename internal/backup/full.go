@@ -29,6 +29,7 @@ func syncDirectory(path string) error {
 	}
 	return errors.Join(f.Sync(), f.Close())
 }
+
 func fileDigest(path, name string) (meta File, retErr error) {
 	f, err := fsutil.Open(path)
 	if err != nil {
@@ -42,6 +43,7 @@ func fileDigest(path, name string) (meta File, retErr error) {
 	}
 	return File{Name: name, Size: n, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
 }
+
 func (e *Engine) dump(ctx context.Context, s *session, creds, work string, m *Manifest) error {
 	path := filepath.Join(work, "dump.sql")
 	if err := runDump(ctx, s, creds, path); err != nil {
@@ -60,8 +62,9 @@ func (e *Engine) dump(ctx context.Context, s *session, creds, work string, m *Ma
 	m.Files = []File{digest}
 	return nil
 }
+
 func runDump(ctx context.Context, s *session, creds, path string) (retErr error) {
-	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
@@ -69,6 +72,7 @@ func runDump(ctx context.Context, s *session, creds, path string) (retErr error)
 	// A single DB argument omits CREATE DATABASE/USE, allowing a selected target DB.
 	return runTool(ctx, "mysqldump", creds, nil, f, "--single-transaction", "--source-data=2", "--quick", "--routines", "--events", "--triggers", "--hex-blob", "--no-tablespaces", "--set-gtid-purged=OFF", "--default-character-set=utf8mb4", s.cfg.DB)
 }
+
 func readSnapshotCoordinate(path string) (coordinate Coordinate, retErr error) {
 	f, err := fsutil.Open(path)
 	if err != nil {
@@ -90,6 +94,7 @@ func readSnapshotCoordinate(path string) (coordinate Coordinate, retErr error) {
 	}
 	return coordinate, errors.Join(errors.New("mysqldump did not provide a coordinated snapshot binlog position"), scanner.Err())
 }
+
 func writeTar(ctx context.Context, w io.Writer, dir string, files []File) (retErr error) {
 	tw := tar.NewWriter(w)
 	defer fsutil.Close(&retErr, tw)
@@ -97,7 +102,7 @@ func writeTar(ctx context.Context, w io.Writer, dir string, files []File) (retEr
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: meta.Name, Mode: 0600, Size: meta.Size, Typeflag: tar.TypeReg}); err != nil {
+		if err := tw.WriteHeader(&tar.Header{Name: meta.Name, Mode: 0o600, Size: meta.Size, Typeflag: tar.TypeReg}); err != nil {
 			return err
 		}
 		if err := copyFile(ctx, tw, filepath.Join(dir, meta.Name)); err != nil {
@@ -106,6 +111,7 @@ func writeTar(ctx context.Context, w io.Writer, dir string, files []File) (retEr
 	}
 	return nil
 }
+
 func copyFile(ctx context.Context, w io.Writer, path string) (retErr error) {
 	f, err := fsutil.Open(path)
 	if err != nil {

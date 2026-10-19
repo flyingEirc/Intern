@@ -24,6 +24,7 @@ func (a *application) backupCommand() *cobra.Command {
 	}})
 	return command
 }
+
 func (a *application) createBackupCommand(kind, description string) *cobra.Command {
 	return &cobra.Command{Use: kind, Short: description, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		return a.withEngine(cmd, func(e *backup.Engine, _ configuration) error {
@@ -41,6 +42,7 @@ func (a *application) createBackupCommand(kind, description string) *cobra.Comma
 		})
 	}}
 }
+
 func (a *application) restoreCommand() *cobra.Command {
 	var backupID string
 	var execute bool
@@ -60,6 +62,7 @@ func (a *application) restoreCommand() *cobra.Command {
 	}
 	return command
 }
+
 func (a *application) keygenCommand() *cobra.Command {
 	return &cobra.Command{Use: "keygen", Short: "创建随机 AES-128 KEK；请独立备份密钥，丢失后无法恢复加密备份", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		c, err := a.config.load()
@@ -79,6 +82,7 @@ func (a *application) keygenCommand() *cobra.Command {
 		return a.emit(map[string]string{"key_file": c.Backup.KeyFile, "key_id": id, "algorithm": "aes-128-gcm"})
 	}}
 }
+
 func (a *application) scheduleCommand() *cobra.Command {
 	command := &cobra.Command{Use: "schedule", Short: "配置每日全量与间隔增量的前台常驻调度"}
 	command.AddCommand(&cobra.Command{Use: "run", Short: "前台运行；首次建立全量基线，退出即停止调度", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {

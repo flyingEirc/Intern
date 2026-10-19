@@ -44,9 +44,11 @@ func newAuthority() (*authority, error) {
 	pool.AddCert(parsed)
 	return &authority{certificate: parsed, key: key, PEM: encoded, pool: pool}, nil
 }
+
 func serialNumber() (*big.Int, error) {
 	return rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 }
+
 func (a *authority) server(alias string) (cert, key []byte, err error) {
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -67,6 +69,7 @@ func (a *authority) server(alias string) (cert, key []byte, err error) {
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER}), nil
 }
+
 func (a *authority) client(alias string) *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: a.pool, ServerName: alias}
 }

@@ -14,7 +14,7 @@ import (
 
 func TestPublishedEncryptionModeCannotBeDowngraded(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifact")
-	if err := os.Mkdir(dir, 0700); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := Write(context.Background(), dir, bytes.NewBufferString("replacement"), []byte("known manifest"), Options{}); err != nil {
@@ -36,7 +36,7 @@ func TestRetainedKEKDecryptsOldBackupAfterPrimaryRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(root, "artifact")
-	if err := os.Mkdir(dir, 0700); err != nil {
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := Write(context.Background(), dir, bytes.NewBufferString("before rotation"), []byte("manifest"), Options{Encrypt: true, KeyFile: key}); err != nil {
@@ -73,7 +73,7 @@ func rotateKEK(t *testing.T, path string) {
 	requireNoError(t, manager.SetPrimary(id))
 	rotated, err := manager.Handle()
 	requireNoError(t, err)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
 	requireNoError(t, err)
 	defer f.Close()
 	requireNoError(t, insecurecleartextkeyset.Write(rotated, keyset.NewJSONWriter(f)))

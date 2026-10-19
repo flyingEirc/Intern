@@ -17,23 +17,27 @@ import (
 
 const IntegrationPackage = "github.com/flyingEirc/Intern/app/cli/integration"
 
-var checksum = regexp.MustCompile(`^[a-f0-9]{64}$`)
-var sourceID = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+var (
+	checksum = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	sourceID = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+)
 
 type Verification struct {
 	SourceSHA, Profile, Platform string
 	RequireClean                 bool
 }
-type Event struct{ Action, Package, Test, Output string }
-type Result struct {
-	Status       string `json:"status"`
-	SourceSHA    string `json:"source_sha"`
-	Profile      string `json:"profile"`
-	Platform     string `json:"platform"`
-	Cases        int    `json:"cases"`
-	BinarySHA256 string `json:"binary_sha256"`
-	ImageID      string `json:"candidate_image_id"`
-}
+type (
+	Event  struct{ Action, Package, Test, Output string }
+	Result struct {
+		Status       string `json:"status"`
+		SourceSHA    string `json:"source_sha"`
+		Profile      string `json:"profile"`
+		Platform     string `json:"platform"`
+		Cases        int    `json:"cases"`
+		BinarySHA256 string `json:"binary_sha256"`
+		ImageID      string `json:"candidate_image_id"`
+	}
+)
 
 func Verify(events io.Reader, candidate Candidate, receipts []Receipt, want Verification) (Result, error) {
 	contract, err := Load()
@@ -52,6 +56,7 @@ func Verify(events io.Reader, candidate Candidate, receipts []Receipt, want Veri
 	}
 	return Result{Status: "passed", SourceSHA: want.SourceSHA, Profile: want.Profile, Platform: want.Platform, Cases: len(contract.Cases), BinarySHA256: candidate.BinarySHA256, ImageID: candidate.ImageID}, nil
 }
+
 func validateCandidate(c Contract, got Candidate, want Verification) error {
 	profile, err := c.Profile(want.Profile)
 	if err != nil {
@@ -68,6 +73,7 @@ func validateCandidate(c Contract, got Candidate, want Verification) error {
 	}
 	return validateToolchain(c, profile, got)
 }
+
 func validateToolchain(c Contract, p Profile, got Candidate) error {
 	if got.BuilderImage != c.BuilderImage || got.DatabaseImage != p.Image || got.TestcontainersVersion != c.TestcontainersVersion {
 		return errors.New("candidate toolchain differs from locked contract")
@@ -82,9 +88,11 @@ func validateToolchain(c Contract, p Profile, got Candidate) error {
 	}
 	return nil
 }
+
 func validImageID(id string) bool {
 	return strings.HasPrefix(id, "sha256:") && checksum.MatchString(strings.TrimPrefix(id, "sha256:"))
 }
+
 func readEvents(r io.Reader) (map[string]bool, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 4096), 4<<20)
@@ -109,6 +117,7 @@ func readEvents(r io.Reader) (map[string]bool, error) {
 	}
 	return passed, nil
 }
+
 func consumeEvent(event Event, passed map[string]bool) (bool, error) {
 	if event.Package == IntegrationPackage && strings.Contains(event.Output, "(cached)") {
 		return false, errors.New("cached integration results cannot satisfy the gate")
@@ -125,6 +134,7 @@ func consumeEvent(event Event, passed map[string]bool) (bool, error) {
 	passed[event.Test] = true
 	return false, nil
 }
+
 func validateReceipts(c Contract, candidate Candidate, receipts []Receipt, passed map[string]bool) error {
 	seen := map[string]bool{}
 	for _, r := range receipts {
@@ -148,6 +158,7 @@ func validateReceipts(c Contract, candidate Candidate, receipts []Receipt, passe
 	}
 	return nil
 }
+
 func validateReceipt(c Candidate, r Receipt) error {
 	if !matchesCandidate(c, r) {
 		return errors.New("scenario belongs to another source, matrix or candidate")
@@ -160,12 +171,15 @@ func validateReceipt(c Candidate, r Receipt) error {
 	}
 	return validateInstances(r.Instances)
 }
+
 func matchesCandidate(c Candidate, r Receipt) bool {
 	return r.FormatVersion == 1 && r.SourceSHA == c.SourceSHA && r.Profile == c.Profile && r.Platform == c.Platform && r.CandidateImageID == c.ImageID && r.BinarySHA256 == c.BinarySHA256
 }
+
 func completedReceipt(r Receipt) bool {
 	return r.Status == "passed" && r.Stage == "verified" && !r.StartedAt.IsZero() && !r.FinishedAt.Before(r.StartedAt) && r.CleanupComplete && r.ResourcesCreated >= 4 && r.ResourcesCreated == r.ResourcesRemoved
 }
+
 func validateInstances(instances []Instance) error {
 	identities := map[string]bool{}
 	for _, i := range instances {
@@ -179,6 +193,7 @@ func validateInstances(instances []Instance) error {
 	}
 	return nil
 }
+
 func ReadJSON(path string, dst any) (retErr error) {
 	f, err := fsutil.Open(path)
 	if err != nil {
@@ -194,6 +209,7 @@ func ReadJSON(path string, dst any) (retErr error) {
 	}
 	return json.Unmarshal(data, dst)
 }
+
 func ReadReceipts(dir string) ([]Receipt, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {

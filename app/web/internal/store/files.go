@@ -19,7 +19,7 @@ func checkDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
+	if !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
 		return errors.New("metadata directory must be a non-symlink private directory (chmod 700)")
 	}
 	return nil
@@ -30,7 +30,7 @@ func checkFile(path string) error {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
+	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("metadata file %q must be a non-symlink private regular file (chmod 600)", filepath.Base(path))
 	}
 	return nil
@@ -47,7 +47,7 @@ func lockDirectory(dir string) (*flock.Flock, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, errors.New("metadata directory must be an absolute path")
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	if err := checkDirectory(dir); err != nil {
@@ -72,7 +72,7 @@ func prepareDatabaseFile(path string) error {
 	if err := checkFileIfExists(path); err != nil {
 		return err
 	}
-	f, err := fsutil.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	f, err := fsutil.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}

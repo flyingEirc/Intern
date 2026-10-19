@@ -37,7 +37,7 @@ func (e *Engine) Restore(ctx context.Context, request RestoreRequest) (plan Rest
 		return plan, err
 	}
 	defer e.finishRestore(id, work, &plan, &retErr)
-	if err = os.Mkdir(work, 0700); err != nil {
+	if err = os.Mkdir(work, 0o700); err != nil {
 		return plan, err
 	}
 	chain, expanded, err := e.prepareChain(ctx, work, request.BackupID)
@@ -60,6 +60,7 @@ func (e *Engine) Restore(ctx context.Context, request RestoreRequest) (plan Rest
 	plan.Executed = true
 	return plan, nil
 }
+
 func openRestoreTarget(ctx context.Context, c Connection) (target *session, info sourceInfo, retErr error) {
 	s, err := connect(ctx, c)
 	if err != nil {
@@ -79,6 +80,7 @@ func openRestoreTarget(ctx context.Context, c Connection) (target *session, info
 	}
 	return s, info, nil
 }
+
 func (e *Engine) beginRestore(ctx context.Context, target *session, info sourceInfo) (string, string, error) {
 	id := requestID("restore", "restore", "")
 	work := filepath.Join(e.opts.StateDirectory, "work-"+id)
@@ -86,6 +88,7 @@ func (e *Engine) beginRestore(ctx context.Context, target *session, info sourceI
 	_, err := e.store.Begin(ctx, catalog.Record{ID: id, Source: "restore:" + info.UUID + ":" + target.cfg.DB, Kind: "restore", Path: filepath.Join(e.opts.Directory, id), CreatedAt: time.Now().UTC()})
 	return id, work, err
 }
+
 func (e *Engine) finishRestore(id, work string, plan *RestorePlan, retErr *error) {
 	*retErr = errors.Join(*retErr, os.RemoveAll(work))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -100,6 +103,7 @@ func (e *Engine) finishRestore(id, work string, plan *RestorePlan, retErr *error
 	}
 	*retErr = errors.Join(*retErr, err)
 }
+
 func restorePlan(id string, target *session, info sourceInfo, chain []preparedBackup, expanded int64) RestorePlan {
 	base := chain[0].manifest
 	last := chain[len(chain)-1].manifest
@@ -109,6 +113,7 @@ func restorePlan(id string, target *session, info sourceInfo, chain []preparedBa
 	}
 	return plan
 }
+
 func validateRestoreTarget(ctx context.Context, target *session, info sourceInfo, chain []preparedBackup) error {
 	if err := validateTargetIdentity(info, target.cfg.DB, chain[0].manifest, len(chain) > 1); err != nil {
 		return err
@@ -125,6 +130,7 @@ func validateRestoreTarget(ctx context.Context, target *session, info sourceInfo
 	}
 	return nil
 }
+
 func validateTargetIdentity(info sourceInfo, db string, base Manifest, hasLogs bool) error {
 	if hasLogs && base.GTIDMode != info.GTID {
 		return errors.New("source and restore target GTID modes must match for binlog replay")
@@ -140,11 +146,13 @@ func validateTargetIdentity(info sourceInfo, db string, base Manifest, hasLogs b
 	}
 	return nil
 }
+
 func sameVersion(a, b string) bool {
 	x := versionPattern.FindStringSubmatch(a)
 	y := versionPattern.FindStringSubmatch(b)
 	return len(x) > 0 && len(y) > 0 && x[1] == y[1] && x[2] == y[2]
 }
+
 func validateReplay(ctx context.Context, target *session, chain []preparedBackup) error {
 	if len(chain) == 1 {
 		return nil
@@ -168,6 +176,7 @@ func validateReplay(ctx context.Context, target *session, chain []preparedBackup
 	}
 	return nil
 }
+
 func validateArchivedBackup(ctx context.Context, b preparedBackup, source, target string) error {
 	for j, file := range b.manifest.Files {
 		start, next := logBoundary(b.manifest, j)
@@ -181,6 +190,7 @@ func validateArchivedBackup(ctx context.Context, b preparedBackup, source, targe
 	}
 	return nil
 }
+
 func executeRestore(ctx context.Context, target *session, chain []preparedBackup, work string) error {
 	creds, err := credentials(work, target.cfg)
 	if err != nil {
@@ -204,6 +214,7 @@ func executeRestore(ctx context.Context, target *session, chain []preparedBackup
 	}
 	return nil
 }
+
 func writeRecoverySQL(ctx context.Context, w io.Writer, chain []preparedBackup, targetDB, work string) error {
 	if err := copyFile(ctx, w, filepath.Join(chain[0].directory, "dump.sql")); err != nil {
 		return err

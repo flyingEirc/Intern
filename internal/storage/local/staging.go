@@ -65,7 +65,7 @@ func (r *Repository) Begin(dir string) (*Staging, error) {
 		return nil, err
 	}
 	pending := ".pending-" + rand.Text()
-	if err := r.root.Mkdir(pending, 0700); err != nil {
+	if err := r.root.Mkdir(pending, 0o700); err != nil {
 		return nil, err
 	}
 	return &Staging{repo: r, dir: dir, pending: pending}, nil
@@ -84,7 +84,7 @@ func (s *Staging) Create(name string) (pipeline.Sink, error) {
 	if s.state != stagingOpen {
 		return nil, fs.ErrClosed
 	}
-	file, err := s.repo.root.OpenFile(path.Join(s.pending, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := s.repo.root.OpenFile(path.Join(s.pending, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}

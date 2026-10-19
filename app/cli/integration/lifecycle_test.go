@@ -40,6 +40,7 @@ func scheduler(c *testenv.Case) {
 	c.Assert("daily-interval-and-stop", countKind(scheduleEvents(c), "logical-full") == 2)
 	schedulerRebaseline(c, command)
 }
+
 func schedulerRebaseline(c *testenv.Case, command string) {
 	c.SQL(c.Source, "USE fixture; ALTER TABLE app.records ADD COLUMN marker INT NOT NULL DEFAULT 17")
 	pid := c.StartCLI(command)
@@ -55,6 +56,7 @@ func schedulerRebaseline(c *testenv.Case, command string) {
 	c.Restore(full.ID, true)
 	c.Assert("rebaseline-recovers-ddl", c.Scalar(c.Target, "SELECT marker FROM restored.records WHERE id=1") == "17")
 }
+
 func scheduleEvents(c *testenv.Case) []backup.Result {
 	events := []backup.Result{}
 	for _, line := range strings.Split(c.ProcessLog(), "\n") {
@@ -68,6 +70,7 @@ func scheduleEvents(c *testenv.Case) []backup.Result {
 	}
 	return events
 }
+
 func countKind(events []backup.Result, kind string) int {
 	count := 0
 	for _, event := range events {
@@ -77,6 +80,7 @@ func countKind(events []backup.Result, kind string) int {
 	}
 	return count
 }
+
 func lifecycle(c *testenv.Case) {
 	seedBasic(c)
 	full := c.Backup("full")

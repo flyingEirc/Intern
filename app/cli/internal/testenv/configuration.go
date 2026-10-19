@@ -24,6 +24,7 @@ func (c *Case) ConfigurationChecks() {
 	c.Refuse("public-password-config", "backup", "full", "--config", "/run/secrets/source.yaml")
 	c.Root("chmod", "0600", "/run/secrets/source.yaml")
 }
+
 func (c *Case) CLIWithEnvironment(id string, environment []string, args ...string) {
 	c.T.Helper()
 	argv := append([]string{"timeout", "--signal=TERM", "--kill-after=5s", "90s", "/usr/local/bin/intern"}, args...)

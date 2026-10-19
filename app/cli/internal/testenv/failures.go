@@ -17,6 +17,7 @@ func (c *Case) CopyUntrustedCA(path string) {
 	c.Must(err)
 	c.Copy(path, wrong.PEM)
 }
+
 func (c *Case) FailedStartup() {
 	c.T.Helper()
 	volume := c.prefix + "-failed-data"

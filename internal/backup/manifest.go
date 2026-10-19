@@ -14,6 +14,7 @@ var artifactID = regexp.MustCompile(`^[a-f0-9]{32}$`)
 func sourceKey(project string, info sourceInfo, db string) string {
 	return project + ":" + info.UUID + ":" + db
 }
+
 func requestID(source, kind, request string) string {
 	if request == "" {
 		var b [16]byte
@@ -25,9 +26,11 @@ func requestID(source, kind, request string) string {
 	sum := sha256.Sum256([]byte(source + "\x00" + kind + "\x00" + request))
 	return hex.EncodeToString(sum[:16])
 }
+
 func result(m Manifest, path string) Result {
 	return Result{ID: m.ID, Kind: m.Kind, Directory: path, Parent: m.Parent, CreatedAt: m.CreatedAt, End: m.End}
 }
+
 func parseManifest(data []byte) (Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -44,6 +47,7 @@ func parseManifest(data []byte) (Manifest, error) {
 	}
 	return m, validateManifestKind(m)
 }
+
 func validateManifestIdentity(m Manifest) error {
 	if m.Version != 1 || !artifactID.MatchString(m.ID) || m.Project == "" || m.SourceUUID == "" || !databaseName.MatchString(m.Database) || len(m.Files) == 0 {
 		return errors.New("unsupported or incomplete backup manifest")
@@ -64,6 +68,7 @@ func validateManifestKind(m Manifest) error {
 	}
 	return nil
 }
+
 func validateFullManifest(m Manifest) error {
 	if m.Parent != "" || len(m.Files) != 1 || m.Files[0].Name != "dump.sql" || m.Start != m.End {
 		return errors.New("invalid logical baseline manifest")

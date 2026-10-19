@@ -8,6 +8,9 @@ formatters:
   # 启用的代码格式化器
   enable:
     - gci # 自动整理、排序 Go import，并按规则进行分组
+    # 多行顶层声明（含函数/方法）之间补空行，并应用其他默认格式规则；不启用额外规则
+    # 连续单行函数不强制分隔；mise run fmt 自动修复，mise run lint 检查
+    - gofumpt
 
   # 格式化器参数
   settings:
@@ -42,7 +45,7 @@ linters:
     # =========================
     - godot # 检查注释结尾是否有句号等规范问题
     - misspell # 检查英文单词拼写错误，例如 recieve -> receive
-    - whitespace # 检查多余空行、无意义换行等空白格式问题
+    - whitespace # 检查函数体等位置的多余空行；声明之间的空行由 gofumpt 负责
 
     # =========================
     # 安全
