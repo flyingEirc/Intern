@@ -21,7 +21,7 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线；阶段 B 后端基础已有实现：服务与迁移命令、SQLite 元数据、会话鉴权、三角色、审计与 OpenAPI 契约（[#12](https://github.com/flyingEirc/Intern/issues/12)）。XtraBackup、FTP 复制、恢复业务与部署仍属后续阶段；前端暂缓，Web 产品未交付。 |
+| `app/web/` | 当前产品主线；阶段 B 后端基础已随 [PR #26](https://github.com/flyingEirc/Intern/pull/26) 合入并闭环（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）。阶段 C 的 XtraBackup、FTP 复制与业务 API 已拆分为 [#27–#32](https://github.com/flyingEirc/Intern/issues/13)，仅完成准备、未开始实现；恢复与部署仍属后续阶段，前端暂缓，Web 产品未交付。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
