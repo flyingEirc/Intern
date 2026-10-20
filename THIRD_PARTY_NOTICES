@@ -24,3 +24,14 @@ code offer. Before external distribution, provide the corresponding source or
 other GPL-compliant source provision, and all required third-party notices for
 the chosen exact versions. A link alone is not claimed to satisfy every
 redistribution obligation. See docs/roadmap/数据库备份与恢复-2026-10-17.md, sections 10 and 15.
+
+Physical runner admission and verification (P2, issue #27):
+github.com/hashicorp/go-version v1.9.0 is used under MPL-2.0; its upstream
+LICENSE is retained by the Go module distribution:
+https://github.com/hashicorp/go-version/blob/v1.9.0/LICENSE
+The real-component harness reuses testcontainers-go v0.44.0 (MIT).
+It executes the unmodified percona/percona-xtrabackup:8.4.0-7 image pinned
+in internal/physical/compat.json. Percona XtraBackup is GPLv2 software:
+https://github.com/percona/percona-xtrabackup
+These tests do not publish an Intern runtime image or fulfill the separate
+D1 redistribution/source-provision acceptance requirement.

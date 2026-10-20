@@ -116,9 +116,28 @@ jobs:
             .cache/quality/${{ matrix.profile }}/events.jsonl
             .cache/quality/${{ matrix.profile }}/receipts/*.json
 
+  container-physical:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native physical runner and source preflight
+        run: go test -v -tags=integration -count=1 -timeout=12m ./app/web/integration -run '^TestP2NativeContainers$'
+
   quality-gate:
     name: quality-gate
-    needs: [scope, quality-fast, container-mysql]
+    needs: [scope, quality-fast, container-mysql, container-physical]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -129,12 +148,13 @@ jobs:
           REQUIRED: ${{ needs.scope.outputs.required }}
           FAST: ${{ needs.quality-fast.result }}
           CONTAINERS: ${{ needs.container-mysql.result }}
+          PHYSICAL: ${{ needs.container-physical.result }}
         working-directory: .
         run: |
           test "$SCOPE" = success
           case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
