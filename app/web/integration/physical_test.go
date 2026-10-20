@@ -79,6 +79,9 @@ func TestP2NativeContainers(t *testing.T) {
 	cfg.User = "root"
 	cfg.Passwd = password
 	cfg.Timeout = 5 * time.Second
+	// Account DDL cannot use server-side prepared placeholders; the driver
+	// safely quotes fixture secrets, matching the existing CLI test harness.
+	cfg.InterpolateParams = true
 	connector, err := driver.NewConnector(cfg)
 	require(t, err)
 	db := sql.OpenDB(connector)
