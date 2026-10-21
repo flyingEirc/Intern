@@ -10,7 +10,7 @@ import (
 
 const testCheckpoints = "backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 100\nlast_lsn = 110\nflushed_lsn = 100\nredo_memory = 0\nredo_frames = 0\n"
 
-const testInfo = "uuid = 12345678-1234-1234-1234-123456789abc\nname = \ntool_name = xtrabackup\ntool_command = --defaults-file=/private/client.cnf --backup\ntool_version = 8.4.0-7\nibbackup_version = 8.4.0-7\nserver_version = 8.4.11\nstart_time = 2026-10-20 12:00:00\nend_time = 2026-10-20 12:00:01\nlock_time = 0\nbinlog_pos = filename 'binlog.000001', position '123'\ninnodb_from_lsn = 0\ninnodb_to_lsn = 100\npartial = N\nincremental = N\nformat = xbstream\ncompressed = N\nencrypted = N\n"
+const testInfo = "uuid = 12345678-1234-1234-1234-123456789abc\nname = \ntool_name = xtrabackup\ntool_command = --defaults-file=/private/client.cnf --backup\ntool_version = 8.4.0-7\nibbackup_version = 8.4.0-7\nserver_version = 8.4.11\nserver_flavor = MySQL Community Server - GPL\nstart_time = 2026-10-20 12:00:00\nend_time = 2026-10-20 12:00:01\nlock_time = 0\nbinlog_pos = filename 'binlog.000001', position '123'\ninnodb_from_lsn = 0\ninnodb_to_lsn = 100\npartial = N\nincremental = N\nformat = xbstream\ncompressed = N\nencrypted = N\nlock_ddl_type = OFF\nbackup_size = 1234\n"
 
 func TestMetadataExactBytes(t *testing.T) {
 	dir := t.TempDir()
@@ -22,7 +22,7 @@ func TestMetadataExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(cp, result.CheckpointsRaw) || !bytes.Equal(info, result.InfoRaw) || result.Checkpoints.ToLSN != 100 || result.Info.ToolVersion != "8.4.0-7" {
+	if !bytes.Equal(cp, result.CheckpointsRaw) || !bytes.Equal(info, result.InfoRaw) || result.Checkpoints.ToLSN != 100 || result.Info.ToolVersion != "8.4.0-7" || result.Info.UUID != "12345678-1234-1234-1234-123456789abc" || result.Info.Fields["server_flavor"] != "MySQL Community Server - GPL" || result.Info.Fields["lock_ddl_type"] != "OFF" || result.Info.Fields["backup_size"] != "1234" {
 		t.Fatalf("metadata bytes or parsed fields changed: %#v", result)
 	}
 }
@@ -64,6 +64,60 @@ func TestInfoBoundaries(t *testing.T) {
 				t.Fatal("malformed info accepted")
 			}
 		})
+	}
+}
+
+func TestInfoRejectsSignedLSNsAndSizes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{name: "lsn-sign", raw: strings.Replace(testInfo, "innodb_to_lsn = 100", "innodb_to_lsn = -1", 1)},
+		{name: "from-sign", raw: strings.Replace(testInfo, "innodb_from_lsn = 0", "innodb_from_lsn = -1", 1)},
+		{name: "lock-plus", raw: strings.Replace(testInfo, "lock_time = 0", "lock_time = +1", 1)},
+		{name: "lock-overflow", raw: strings.Replace(testInfo, "lock_time = 0", "lock_time = 9223372036854775808", 1)},
+		{name: "lock-underflow", raw: strings.Replace(testInfo, "lock_time = 0", "lock_time = -9223372036854775809", 1)},
+		{name: "lock-junk", raw: strings.Replace(testInfo, "lock_time = 0", "lock_time = -1x", 1)},
+		{name: "size-sign", raw: strings.Replace(testInfo, "backup_size = 1234", "backup_size = -1", 1)},
+		{name: "size-plus", raw: strings.Replace(testInfo, "backup_size = 1234", "backup_size = +1", 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseInfo([]byte(tc.raw)); err == nil {
+				t.Fatal("malformed info accepted")
+			}
+		})
+	}
+}
+
+func TestSignedLockTimeIsInformational(t *testing.T) {
+	for _, lock := range []string{"-9223372036854775808", "9223372036854775807"} {
+		raw := strings.Replace(testInfo, "lock_time = 0", "lock_time = "+lock, 1)
+		info, err := ParseInfo([]byte(raw))
+		if err != nil {
+			t.Fatalf("lock_time %s: %v", lock, err)
+		}
+		if info.Fields["lock_time"] != lock || info.FromLSN != 0 || info.ToLSN != 100 || info.UUID != "12345678-1234-1234-1234-123456789abc" {
+			t.Fatalf("lock_time %s changed the backup interval or identity: %#v", lock, info)
+		}
+	}
+}
+
+func TestMetadataPreservesSignedLockTime(t *testing.T) {
+	dir := t.TempDir()
+	raw := strings.Replace(testInfo, "lock_time = 0", "lock_time = -7", 1)
+	if err := os.WriteFile(filepath.Join(dir, "xtrabackup_checkpoints"), []byte(testCheckpoints), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "xtrabackup_info"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ReadMetadata(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.InfoRaw) != raw || result.Info.Fields["lock_time"] != "-7" || result.Checkpoints.FromLSN != 0 || result.Checkpoints.ToLSN != 100 {
+		t.Fatal("negative lock_time was not preserved beside the unsigned LSN interval")
 	}
 }
 

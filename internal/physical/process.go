@@ -11,6 +11,14 @@ import (
 
 const diagnosticLimit = 32 * 1024
 
+// defaultsFileArgument selects the anonymous option-file descriptor, not a secret.
+// Linux supervision inherits that descriptor as fd 4.
+const defaultsFileArgument = "--defaults-file=/proc/self/fd/4"
+
+// errSupervisorEncoding is the explicit limit for non-UTF-8 paths and arguments.
+// Other supervisor failures stay opaque so tool paths and credentials are not echoed.
+var errSupervisorEncoding = errors.New("physical: supervisor configuration requires UTF-8 paths and arguments")
+
 // boundedOutput never exposes tool diagnostics in returned errors. Native output
 // can contain credentials, SQL or DSNs; only the completion predicate is public.
 type boundedOutput struct {
@@ -63,9 +71,12 @@ type processSpec struct {
 	args    []string
 	dir     string
 	cleanup string
-	stdin   io.Reader
-	stdout  io.Writer
-	stderr  io.Writer
+	// credential, when set, is the private defaults-file body. Linux passes it
+	// through an anonymous 0600 descriptor and does not create a directory entry.
+	credential []byte
+	stdin      io.Reader
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 func runProcess(ctx context.Context, spec processSpec) error {
@@ -79,6 +90,9 @@ func runProcess(ctx context.Context, spec processSpec) error {
 		return processCancellation{cause: errors.Join(cause, ctx.Err())}
 	}
 	if err != nil {
+		if errors.Is(err, errSupervisorEncoding) {
+			return errSupervisorEncoding
+		}
 		// Do not wrap exec/path errors: their text may contain secrets.
 		return errors.New("physical: native tool failed to start, finish, or drain its pipes")
 	}

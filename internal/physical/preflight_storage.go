@@ -32,7 +32,7 @@ func preflightStorageRoots(opts PreflightOptions) ([2]string, error) {
 	var roots [2]string
 	data, err := canonicalDirectory(opts.Connection.DataDir)
 	if err != nil {
-		return roots, preflightFailure("volume", "datadir_unreadable", "Cannot resolve the mounted data directory.")
+		return roots, preflightFailure("capacity", "datadir_unreadable", "Cannot resolve the mounted data directory.")
 	}
 	for index, path := range []string{opts.WorkRoot, opts.BackupRoot} {
 		root, err := canonicalDirectory(path)

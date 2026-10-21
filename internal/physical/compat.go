@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"regexp"
 	"slices"
+	"strings"
 	"sync"
 
 	version "github.com/hashicorp/go-version"
@@ -35,16 +36,52 @@ func CompatibilityMatrix() ([]CompatibilityEntry, error) {
 }
 
 var compatibilityEntries = sync.OnceValues(func() ([]CompatibilityEntry, error) {
+	return parseCompatibilityMatrix(compatibilityJSON)
+})
+
+func parseCompatibilityMatrix(raw []byte) ([]CompatibilityEntry, error) {
 	var entries []CompatibilityEntry
-	if err := json.Unmarshal(compatibilityJSON, &entries); err != nil {
-		return nil, preflightFailure("compatibility", "matrix_invalid", "The embedded compatibility matrix is invalid; reinstall the application.")
+	if err := json.Unmarshal(raw, &entries, json.RejectUnknownMembers(true)); err != nil {
+		return nil, invalidCompatibilityMatrix()
+	}
+	if len(entries) == 0 {
+		return nil, invalidCompatibilityMatrix()
+	}
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		key := entry.Distribution + ":" + entry.ServerVersion + ":" + entry.ToolVersion + ":" + entry.Platform
+		if !validCompatibilityEntry(entry) || seen[key] {
+			return nil, invalidCompatibilityMatrix()
+		}
+		seen[key] = true
 	}
 	return entries, nil
-})
+}
+
+func validCompatibilityEntry(entry CompatibilityEntry) bool {
+	validStatus := entry.Status == "candidate" || entry.Status == "verified"
+	return validStatus && entry.Verified == (entry.Status == "verified") &&
+		entry.Distribution == "mysql-community" && entry.Platform == "linux/amd64" &&
+		serverReleasePattern.MatchString(entry.ServerVersion) && toolReleasePattern.MatchString(entry.ToolVersion) &&
+		strings.HasPrefix(entry.EvidenceIssue, "https://github.com/flyingEirc/Intern/issues/") &&
+		validImagePins(entry)
+}
+
+func validImagePins(entry CompatibilityEntry) bool {
+	return imagePinPattern.MatchString(entry.MySQLImage) &&
+		imagePinPattern.MatchString(entry.PXBImage) &&
+		digestPattern.MatchString(entry.PXBAMD64Manifest)
+}
+
+func invalidCompatibilityMatrix() error {
+	return preflightFailure("compatibility", "matrix_invalid", "The embedded compatibility matrix is invalid; reinstall the application.")
+}
 
 var (
 	serverReleasePattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	toolReleasePattern   = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([1-9][0-9]*)$`)
+	imagePinPattern      = regexp.MustCompile(`^[^ \r\n]+@sha256:[0-9a-f]{64}$`)
+	digestPattern        = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 )
 
 // CheckCompatibility admits only exact pinned versions on the stated platform.

@@ -3,6 +3,7 @@ package physical
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -26,20 +27,53 @@ func ParseToolVersion(raw string) (ToolVersion, error) {
 	return ToolVersion{Version: matches[0][1], Raw: raw}, nil
 }
 
-// ProbeVersion invokes an explicit binary with --version and a bounded watchdog.
+// ProbeVersion runs the configured xtrabackup with isolated defaults.
+// The binary base name must be xtrabackup, and the banner must be that executable's own version line.
 func ProbeVersion(ctx context.Context, binary string) (ToolVersion, error) {
-	if binary == "" {
-		return ToolVersion{}, errors.New("physical: xtrabackup binary is required")
+	if err := validateXtrabackupBinary(binary); err != nil {
+		return ToolVersion{}, err
 	}
 	ctx, cancel := toolContext(ctx, 10*time.Second)
 	defer cancel()
 	var output boundedOutput
-	err := runProcess(ctx, processSpec{binary: binary, args: []string{"--version"}, stdout: &output, stderr: &output})
+	err := runProcess(ctx, processSpec{
+		binary: binary, args: []string{"--no-defaults", "--no-login-paths", "--version"}, stdout: &output, stderr: &output,
+	})
 	if err != nil {
 		return ToolVersion{}, err
 	}
 	if output.truncated {
 		return ToolVersion{}, errors.New("physical: version output exceeded diagnostic limit")
 	}
-	return ParseToolVersion(string(output.data))
+	raw := string(output.data)
+	version, err := ParseToolVersion(raw)
+	if err != nil {
+		return ToolVersion{}, err
+	}
+	if !versionBannerAnchored(raw, binary) {
+		return ToolVersion{}, errors.New("physical: unsupported or ambiguous xtrabackup version output")
+	}
+	return version, nil
+}
+
+func validateXtrabackupBinary(binary string) error {
+	if filepath.Base(binary) != "xtrabackup" || strings.ContainsAny(binary, "\x00\r\n") {
+		return errors.New("physical: xtrabackup binary is required")
+	}
+	return nil
+}
+
+func versionBannerAnchored(raw, binary string) bool {
+	prefix := binary + " version "
+	found := false
+	for line := range strings.SplitSeq(raw, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, prefix) {
+			if found {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
 }

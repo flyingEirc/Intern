@@ -21,7 +21,11 @@ import (
 // The downstream writer must honor cancellation; Go cannot interrupt arbitrary
 // user code blocked inside Write. The source never closes the caller's writer.
 type BackupSource struct {
-	Binary            string
+	Binary string
+	// WorkRoot is the caller-owned absolute directory for private run state.
+	// Each run removes its physical-run-* child when this process is alive.
+	// A killed tree can leave that child behind, without a credential file;
+	// reclaiming WorkRoot belongs to the persistent cleanup ledger.
 	WorkRoot          string
 	Connection        Connection
 	ParentCheckpoints []byte
@@ -78,12 +82,14 @@ func (s *BackupSource) Run(ctx context.Context, w io.Writer) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, removeWorkDir(dir)) }()
-	args, err := s.arguments(dir)
+	args, credential, err := s.arguments(dir)
 	if err != nil {
 		return err
 	}
 	var diagnostic boundedOutput
-	if err = runProcess(ctx, processSpec{binary: s.Binary, args: args, cleanup: dir, stdout: w, stderr: &diagnostic}); err != nil {
+	if err = runProcess(ctx, processSpec{
+		binary: s.Binary, args: args, credential: credential, cleanup: dir, stdout: w, stderr: &diagnostic,
+	}); err != nil {
 		return err
 	}
 	if !diagnostic.completed() {
@@ -116,6 +122,9 @@ func (s *BackupSource) validate(w io.Writer) error {
 	if !s.hasRequiredInputs(w) {
 		return errors.New("physical: binary, writer, username, absolute socket and datadir are required")
 	}
+	if err := validateXtrabackupBinary(s.Binary); err != nil {
+		return err
+	}
 	if s.Parallel < 0 || s.Throttle < 0 || s.Timeout < 0 {
 		return errors.New("physical: parallel, throttle and timeout must not be negative")
 	}
@@ -127,29 +136,35 @@ func (s *BackupSource) validate(w io.Writer) error {
 
 func (s *BackupSource) hasRequiredInputs(w io.Writer) bool {
 	return s.Binary != "" && w != nil && s.Connection.Username != "" &&
-		filepath.IsAbs(s.Connection.Socket) && filepath.IsAbs(s.Connection.DataDir)
+		filepath.IsAbs(s.Connection.Socket) && filepath.IsAbs(s.Connection.DataDir) &&
+		!strings.ContainsAny(s.Connection.Socket, "\x00\r\n") && !strings.ContainsAny(s.Connection.DataDir, "\x00\r\n")
 }
 
-func (s *BackupSource) arguments(dir string) ([]string, error) {
-	credential := filepath.Join(dir, "client.cnf")
+func (s *BackupSource) arguments(dir string) ([]string, []byte, error) {
 	body := "[client]\nuser=" + optionQuote(s.Connection.Username) + "\npassword=" + optionQuote(s.Connection.Password) + "\n"
-	if err := os.WriteFile(credential, []byte(body), 0o600); err != nil {
-		return nil, errors.New("physical: cannot create private credential file")
-	}
 	for _, child := range []string{"xb", "lsn"} {
 		if err := os.Mkdir(filepath.Join(dir, child), 0o700); err != nil {
-			return nil, errors.New("physical: cannot create private tool directory")
+			return nil, nil, errors.New("physical: cannot create private tool directory")
 		}
 	}
 	parallel := max(s.Parallel, 1)
-	args := []string{"--defaults-file=" + credential, "--backup", "--stream=xbstream", "--socket=" + s.Connection.Socket, "--datadir=" + s.Connection.DataDir, "--target-dir=" + filepath.Join(dir, "xb"), "--extra-lsndir=" + filepath.Join(dir, "lsn"), "--parallel=" + strconv.Itoa(parallel)}
+	args := []string{
+		defaultsFileArgument, "--no-login-paths", "--backup", "--stream=xbstream",
+		"--socket=" + s.Connection.Socket, "--datadir=" + s.Connection.DataDir,
+		"--target-dir=" + filepath.Join(dir, "xb"), "--extra-lsndir=" + filepath.Join(dir, "lsn"),
+		"--parallel=" + strconv.Itoa(parallel),
+	}
 	if s.Throttle > 0 {
 		args = append(args, "--throttle="+strconv.Itoa(s.Throttle))
 	}
 	if s.PageTracking {
 		args = append(args, "--page-tracking")
 	}
-	return s.incrementalArguments(args)
+	args, err := s.incrementalArguments(args)
+	if err != nil {
+		return nil, nil, err
+	}
+	return args, []byte(body), nil
 }
 
 func (s *BackupSource) incrementalArguments(args []string) ([]string, error) {
@@ -193,8 +208,8 @@ func optionQuote(value string) string {
 }
 
 func newWorkDir(root string) (string, error) {
-	if !filepath.IsAbs(root) {
-		return "", errors.New("physical: work root must be absolute")
+	if !filepath.IsAbs(root) || strings.ContainsAny(root, "\x00\r\n") {
+		return "", errors.New("physical: work root must be absolute and contain no control separators")
 	}
 	dir, err := os.MkdirTemp(root, "physical-run-")
 	if err != nil {

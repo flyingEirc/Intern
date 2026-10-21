@@ -10,11 +10,15 @@ import (
 var sourceUUIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func readSourceIdentity(ctx context.Context, db *sql.DB, identity *Identity) error {
-	err := db.QueryRowContext(ctx, `SELECT @@server_uuid, @@version, @@version_comment, @@datadir, @@innodb_page_size`).Scan(
-		&identity.UUID, &identity.Version, &identity.VersionComment, &identity.DataDir, &identity.PageSize,
+	var compileOS, compileMachine string
+	err := db.QueryRowContext(ctx, `SELECT @@server_uuid, @@version, @@version_comment, @@datadir, @@innodb_page_size, @@version_compile_os, @@version_compile_machine`).Scan(
+		&identity.UUID, &identity.Version, &identity.VersionComment, &identity.DataDir, &identity.PageSize, &compileOS, &compileMachine,
 	)
 	if err != nil {
 		return preflightExternalFailure(ctx, "identity", "identity_query_failed", "Cannot read MySQL identity; check socket connectivity and account access.")
+	}
+	if !strings.EqualFold(compileOS, "linux") || compileMachine != "x86_64" {
+		return preflightFailure("identity", "server_platform_unsupported", "The pinned physical source must be a native Linux x86_64 MySQL build.")
 	}
 	if !sourceUUIDPattern.MatchString(identity.UUID) {
 		return preflightFailure("identity", "identity_invalid", "MySQL did not return a valid server UUID.")
@@ -51,6 +55,9 @@ func collectGlobalPrivileges(grant string, granted map[string]bool) {
 	// Only the privilege clause is interpreted. Account names, role names and
 	// object names cannot manufacture global grants by containing known words.
 	clause, remainder, ok := strings.Cut(grant, " ON ")
+	if strings.ContainsAny(clause, "`'\"\\\r\n") {
+		return
+	}
 	if !ok || !strings.HasPrefix(remainder, "*.* TO ") || !strings.HasPrefix(clause, "GRANT ") {
 		return
 	}

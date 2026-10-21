@@ -35,3 +35,8 @@ in internal/physical/compat.json. Percona XtraBackup is GPLv2 software:
 https://github.com/percona/percona-xtrabackup
 These tests do not publish an Intern runtime image or fulfill the separate
 D1 redistribution/source-provision acceptance requirement.
+The P2 login-path isolation fixture also executes the unmodified
+mysql_config_editor from the matching official client RPM, using the existing
+client-tools Dockerfile target and the checksum-pinned CLI profile for that
+same MySQL image. The native tool, not a reimplemented login-file codec, creates
+the fixture. This helper image is not published.

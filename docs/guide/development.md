@@ -28,9 +28,9 @@
 - 参考实现不能成为本项目的隐含约束。复用代码遵守许可、版权与声明；Databasus 等参考路径以项目根和实际布局为准，不能把参考方案直接当作 Intern 已支持能力。
 - SQL 变更维护源查询和生成代码，必要时运行 `mise run generate`；模式变更通过版本化迁移，不手改生成结果规避源定义。
 - 官方数据库工具使用明确的可执行文件与参数调用，维护进程生命周期、取消和错误传播；不自研 redo/binlog 协议或拼接 shell 来执行用户参数。
-- P2（#27）共享入口：`physical.Preflight` 在当前执行身份下查询真实源并检查卷归属、权限、加密、空间；必须提供正数 `MinWorkBytes` / `MinBackupBytes`。`BackupSource` 是单次 `pipeline.Source`，调用前每次重新预检；`Metadata()` 只在进程成功、原始元数据一致且私有工作目录清理成功后返回独立副本。物理链发布仍由 P3 负责，不把 Source 成功当作完整备份 completed。
-- Linux 物理工具通过私有继承描述符传递结构化配置，自重执行监督进程管理工具进程组及父进程死亡清理；容器 PID 1 仍须回收孤儿监督进程。凭据仅在 `0700` 工作子目录内的 `0600` option file，工具原始诊断不进入公共错误。调用方 writer 必须可取消；任意卡死 Go `Write` 无法被强制中断。`physical.Extract` 仅是已认证可信 xbstream 的隔离解包原语，成功目录由调用方回收，不是完整恢复或恶意归档沙箱。
-- P2 真实组件入口：在原生 Linux amd64 Docker 上执行 `go test -v -tags=integration -count=1 -timeout=12m ./app/web/integration -run '^TestP2NativeContainers$'`。缺 runtime、平台不符或缺 fixture 都失败，不 skip；测试及 CI 结果绑定当次源码、worker 程序摘要和镜像 ID。当前候选范围与限制见控制面方案第 3 节，不能把 arm64 进程测试称为 amd64 物理链验收。
+- P2（#27）共享入口：`physical.Preflight` 在当前执行身份下查询真实源并检查只读挂载、卷归属、权限、加密、空间；必须提供正数 `MinWorkBytes` / `MinBackupBytes`。`BackupSource` 是单次 `pipeline.Source`，调用前每次重新预检；`Metadata()` 只在进程成功、原始元数据一致且私有工作目录清理成功后返回独立副本。`CheckpointsRaw` / `InfoRaw` 是工具 `--extra-lsndir` 的原文；流内 `xtrabackup_info` 会另行渲染，`backup_size` 可能不同。`Info.UUID` 是备份 UUID，不是 `Identity.UUID` 的服务器身份。物理链发布仍由 P3 负责，不把 Source 成功当作完整备份 completed。
+- Linux 物理工具通过私有继承描述符传递结构化配置，自重执行监督进程管理工具进程组及父进程死亡清理，支持父进程为容器 PID 1。凭据使用权限 `0600` 的匿名 memfd，经 `/proc/self/fd/4` 交给工具，不建立磁盘 `client.cnf`；`--no-login-paths` 与 MySQL 环境变量隔离阻止隐式凭据覆盖，工具原始诊断不进入公共错误。整个进程树被 SIGKILL 后可能遗留无凭据的工作子目录；调用方须为每次运行提供独占工作根，并由 P3 的持久归属/清理账本回收，禁止仅按前缀扫描删除。调用方 writer 必须可取消；任意卡死 Go `Write` 无法被强制中断。`physical.Extract` 仅是已认证可信 xbstream 的隔离解包原语，成功目录由调用方回收，不是完整恢复或恶意归档沙箱。
+- P2 真实组件入口：在原生 Linux amd64 Docker 上执行 `go test -v -tags=integration -count=1 -timeout=16m ./app/web/integration -run '^TestP2NativeContainers$'`。缺 runtime、平台不符或缺 fixture 都失败，不 skip；测试及 CI 结果绑定当次源码、worker 程序摘要和镜像 ID。证据包含只读挂载上的全备/增量与 extra-lsndir 原文字节、可写挂载拒绝、非 root PID 1 的 memfd 全备，以及 `mysql_config_editor` 登录文件在缺少 `--no-login-paths` 时认证失败。当前候选范围与限制见控制面方案第 3 节，不能把 arm64 进程测试称为 amd64 物理链验收。
 
 ## 安全与恢复约束
 

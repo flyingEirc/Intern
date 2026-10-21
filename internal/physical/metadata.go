@@ -56,6 +56,26 @@ func decimalField(fields map[string]string, key string) (uint64, error) {
 	return n, nil
 }
 
+// signedDecimalField accepts the native signed range of an informational field.
+// A leading plus is not part of that rendering. LSN and size fields stay unsigned.
+func signedDecimalField(fields map[string]string, key string) error {
+	value := fields[key]
+	if value == "" || value[0] == '+' {
+		return fmt.Errorf("physical: invalid metadata integer %s", key)
+	}
+	body := value
+	if body[0] == '-' {
+		body = body[1:]
+	}
+	if body == "" || strings.IndexFunc(body, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		return fmt.Errorf("physical: invalid metadata integer %s", key)
+	}
+	if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+		return fmt.Errorf("physical: metadata integer %s overflows", key)
+	}
+	return nil
+}
+
 // ParseCheckpoints rejects unknown states, malformed numbers and reversed LSNs.
 func ParseCheckpoints(raw []byte) (Checkpoints, error) {
 	fields, err := metadataFields(raw, "|backup_type|from_lsn|to_lsn|last_lsn|flushed_lsn|compact|recover_binlog_info|redo_memory|redo_frames|")
@@ -98,6 +118,8 @@ func validateCheckpointNumbers(fields map[string]string, cp Checkpoints) error {
 }
 
 // ParseInfo parses the native key/value format, preserving all recognized fields.
+// lock_time is the tool's signed informational duration and may be negative
+// when the clock steps backward. LSN and size fields remain unsigned.
 func ParseInfo(raw []byte) (Info, error) {
 	fields, err := metadataFields(raw, "|uuid|name|tool_name|tool_command|tool_version|ibbackup_version|server_version|server_flavor|start_time|end_time|lock_time|binlog_pos|innodb_from_lsn|innodb_to_lsn|partial|incremental|format|compact|compressed|encrypted|lock_ddl_type|backup_size|uncompressed_backup_size|")
 	if err != nil {
@@ -141,12 +163,13 @@ func validateInfoFlags(fields map[string]string) error {
 }
 
 func validateInfoOptionalFields(fields map[string]string) error {
-	for _, key := range []string{"lock_time", "backup_size", "uncompressed_backup_size"} {
-		if _, exists := fields[key]; exists {
-			if _, err := decimalField(fields, key); err != nil {
-				return err
-			}
+	if _, exists := fields["lock_time"]; exists {
+		if err := signedDecimalField(fields, "lock_time"); err != nil {
+			return err
 		}
+	}
+	if err := validateInfoSizes(fields); err != nil {
+		return err
 	}
 	if value, exists := fields["ibbackup_version"]; exists && value != fields["tool_version"] {
 		return errors.New("physical: native backup tool versions disagree")
@@ -157,7 +180,19 @@ func validateInfoOptionalFields(fields map[string]string) error {
 	return nil
 }
 
-// ReadMetadata reads bounded regular files and verifies their LSN agreement.
+func validateInfoSizes(fields map[string]string) error {
+	for _, key := range []string{"backup_size", "uncompressed_backup_size"} {
+		if _, exists := fields[key]; exists {
+			if _, err := decimalField(fields, key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ReadMetadata reads the --extra-lsndir xtrabackup_checkpoints and
+// xtrabackup_info files without rewriting them. Those bytes are authoritative.
 func ReadMetadata(dir string) (Metadata, error) {
 	var result Metadata
 	var err error

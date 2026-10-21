@@ -63,6 +63,7 @@ func TestBackupPrivilegeBoundaries(t *testing.T) {
 		{"table_grants_not_global", []string{static, "GRANT BACKUP_ADMIN ON `private`.* TO `backup`@`localhost`"}, []string{"BACKUP_ADMIN"}},
 		{"account_text_is_not_privilege", []string{static, "GRANT USAGE ON *.* TO `BACKUP_ADMIN`@`localhost`"}, []string{"BACKUP_ADMIN"}},
 		{"role_not_effective_evidence", []string{static, "GRANT `BACKUP_ADMIN`@`%` TO `backup`@`localhost`"}, []string{"BACKUP_ADMIN"}},
+		{"role_name_cannot_forge_static_grant", []string{dynamic, "GRANT PROCESS, LOCK TABLES, REPLICATION CLIENT ON *.* TO `backup`@`localhost`", "GRANT `x,RELOAD ON *.* TO `@`%` TO `backup`@`localhost`"}, []string{"RELOAD"}},
 		{"missing_static", []string{dynamic}, []string{"PROCESS", "RELOAD", "LOCK TABLES", "REPLICATION CLIENT"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -100,16 +101,16 @@ func preflightVolumeFixture(t *testing.T) (string, Identity) {
 
 func TestVolumeIdentityAndReadability(t *testing.T) {
 	dir, identity := preflightVolumeFixture(t)
-	if err := checkDataVolume(t.Context(), dir, identity); err != nil {
+	if err := checkDataVolume(t.Context(), dir, identity, ""); err != nil {
 		t.Fatal(err)
 	}
 	identity.UUID = "4b1568ba-4016-11ed-b878-0242ac120002"
-	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity), "uuid_mismatch")
+	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity, ""), "uuid_mismatch")
 	identity.UUID = preflightTestUUID
 	identity.DataDir = t.TempDir()
-	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity), "datadir_mismatch")
+	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity, ""), "datadir_mismatch")
 	missing := filepath.Join(t.TempDir(), "missing")
-	requirePreflightCode(t, checkDataVolume(t.Context(), missing, Identity{DataDir: missing}), "datadir_unreadable")
+	requirePreflightCode(t, checkDataVolume(t.Context(), missing, Identity{DataDir: missing}, ""), "datadir_unreadable")
 }
 
 func TestVolumeRejectsSymlinkAndMissingAutoCNF(t *testing.T) {
@@ -117,20 +118,29 @@ func TestVolumeRejectsSymlinkAndMissingAutoCNF(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "ibdata1"), filepath.Join(dir, "linked.ibd")); err != nil {
 		t.Fatal(err)
 	}
-	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity), "datadir_symlink_unsupported")
+	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity, ""), "datadir_symlink_unsupported")
 	if err := os.Remove(filepath.Join(dir, "auto.cnf")); err != nil {
 		t.Fatal(err)
 	}
-	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity), "auto_cnf_unreadable")
+	requirePreflightCode(t, checkDataVolume(t.Context(), dir, identity, ""), "auto_cnf_unreadable")
 }
 
 func TestSourceDatafileBoundaries(t *testing.T) {
 	dir, _ := preflightVolumeFixture(t)
-	if err := checkSourceDatafile(dir, "ibdata1"); err != nil {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	requirePreflightCode(t, checkSourceDatafile(dir, "../outside.ibd"), "external_tablespace_unsupported")
-	requirePreflightCode(t, checkSourceDatafile(dir, "missing.ibd"), "datadir_unreadable")
+	defer func() {
+		if closeErr := root.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	if err = checkSourceDatafile(root, dir, "ibdata1"); err != nil {
+		t.Fatal(err)
+	}
+	requirePreflightCode(t, checkSourceDatafile(root, dir, "../outside.ibd"), "external_tablespace_unsupported")
+	requirePreflightCode(t, checkSourceDatafile(root, dir, "missing.ibd"), "datadir_unreadable")
 }
 
 func TestKeyringFilesCannotEnableUnsupportedEncryption(t *testing.T) {
@@ -201,13 +211,13 @@ func TestPreflightCancellationAndSecretSafeErrors(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	dir, identity := preflightVolumeFixture(t)
-	err := checkDataVolume(ctx, dir, identity)
+	err := checkDataVolume(ctx, dir, identity, "")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("lost cancellation: %v", err)
 	}
 	secret := "credential-that-must-not-appear"
 	path := filepath.Join(t.TempDir(), secret)
-	err = checkDataVolume(t.Context(), path, Identity{DataDir: path})
+	err = checkDataVolume(t.Context(), path, Identity{DataDir: path}, "")
 	var failure *PreflightError
 	if !errors.As(err, &failure) {
 		t.Fatal(err)

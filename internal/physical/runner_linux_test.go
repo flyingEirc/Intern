@@ -14,18 +14,37 @@ import (
 
 func fakeTool(t *testing.T, body string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "tool")
+	return fakeNamedTool(t, "tool", body)
+}
+
+func fakeNamedTool(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
+func shellQuote(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
 func backupFixtureBody() string {
 	return `credential=${1#--defaults-file=}
 [ "$credential" != "$1" ]
-[ "$(stat -c %a "$credential")" = 600 ]
-[ "$(stat -c %a "$(dirname "$credential")")" = 700 ]
+[ "$2" = "--no-login-paths" ]
+case "$credential" in
+/proc/self/fd/*) ;;
+*) exit 72 ;;
+esac
+[ -z "${MYSQL_PWD+x}" ]
+[ -z "${MYSQL_TEST_LOGIN_FILE+x}" ]
+[ -z "${MYSQL_HOME+x}" ]
+[ -f "$credential" ]
+[ "$(stat -L -c %a "$credential")" = 600 ]
+grep -q '^user="backup"$' "$credential"
+grep -q '^password="private-test-value"$' "$credential"
 lsn=
 for arg in "$@"; do
  case "$arg" in
@@ -33,6 +52,9 @@ for arg in "$@"; do
  --password=*|--no-server-version-check) exit 70 ;;
  esac
 done
+[ -n "$lsn" ]
+[ "$(stat -c %a "$(dirname "$lsn")")" = 700 ]
+[ ! -e "$(dirname "$lsn")/client.cnf" ]
 cat > "$lsn/xtrabackup_checkpoints" <<'CHECKPOINTS'
 ` + testCheckpoints + `CHECKPOINTS
 cat > "$lsn/xtrabackup_info" <<'INFO'
@@ -40,6 +62,10 @@ cat > "$lsn/xtrabackup_info" <<'INFO'
 printf 'native-stream'
 printf 'completed OK!\n' >&2
 `
+}
+
+func grandchildScript(pidFile, follow string) string {
+	return "sleep 30 &\nprintf '%s %s\\n' \"$$\" \"$!\" > " + shellQuote(pidFile) + "\n" + follow
 }
 
 func testSource(t *testing.T, binary string) *BackupSource {
@@ -55,8 +81,25 @@ func assertWorkEmpty(t *testing.T, root string) {
 	}
 }
 
+func assertToolReaped(t *testing.T, source *BackupSource, ctx context.Context, writer io.Writer, want error, pidFile string, limit time.Duration) {
+	t.Helper()
+	started := time.Now()
+	err := source.Run(ctx, writer)
+	if !errors.Is(err, want) {
+		t.Fatalf("got %v, want %v", err, want)
+	}
+	if time.Since(started) > limit {
+		t.Fatalf("run took %s, limit %s", time.Since(started), limit)
+	}
+	assertPIDsGone(t, pidFile)
+	assertWorkEmpty(t, source.WorkRoot)
+}
+
 func TestBackupSourceSuccessAndMetadataOwnership(t *testing.T) {
-	source := testSource(t, fakeTool(t, backupFixtureBody()))
+	t.Setenv("MYSQL_PWD", "private-test-value")
+	t.Setenv("MYSQL_TEST_LOGIN_FILE", filepath.Join(t.TempDir(), "mylogin.cnf"))
+	t.Setenv("MYSQL_HOME", t.TempDir())
+	source := testSource(t, fakeNamedTool(t, "xtrabackup", backupFixtureBody()))
 	var output bytes.Buffer
 	if err := source.Run(context.Background(), &output); err != nil {
 		t.Fatal(err)
@@ -87,10 +130,9 @@ func TestBackupRejectsExitMarkerAndMetadataFailures(t *testing.T) {
 		"missing-marker":   strings.Replace(backupFixtureBody(), "printf 'completed OK!\\n' >&2", "true", 1),
 		"missing-metadata": "printf partial; printf 'completed OK!\\n' >&2\n",
 		"bad-metadata":     strings.Replace(backupFixtureBody(), "to_lsn = 100", "to_lsn = -1", 1),
-		"stderr-flood":     "i=0; while [ $i -lt 5000 ]; do printf 'private-test-value password=hidden token=hidden\\n' >&2; i=$((i+1)); done; exit 1\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			source := testSource(t, fakeTool(t, body))
+			source := testSource(t, fakeNamedTool(t, "xtrabackup", body))
 			err := source.Run(context.Background(), io.Discard)
 			if err == nil || strings.Contains(err.Error(), "private-test-value") || strings.Contains(err.Error(), "hidden") {
 				t.Fatalf("failure or diagnostic safety violated: %v", err)
@@ -103,6 +145,26 @@ func TestBackupRejectsExitMarkerAndMetadataFailures(t *testing.T) {
 	}
 }
 
+func TestStderrFloodCompletes(t *testing.T) {
+	t.Setenv("MYSQL_PWD", "private-test-value")
+	t.Setenv("MYSQL_TEST_LOGIN_FILE", filepath.Join(t.TempDir(), "mylogin.cnf"))
+	t.Setenv("MYSQL_HOME", t.TempDir())
+	body := `i=0
+while [ "$i" -lt 4000 ]; do
+ printf 'private-test-value password=hidden token=hidden\n' >&2
+ i=$((i+1))
+done
+` + backupFixtureBody()
+	source := testSource(t, fakeNamedTool(t, "xtrabackup", body))
+	if err := source.Run(context.Background(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Metadata(); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkEmpty(t, source.WorkRoot)
+}
+
 type failingWriter struct {
 	err error
 }
@@ -111,38 +173,41 @@ func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestBackupDownstreamErrors(t *testing.T) {
 	failure := errors.New("downstream sentinel")
+	limit := supervisorWaitDelay + 3*time.Second
 	for name, want := range map[string]error{"short-write": io.ErrShortWrite, "write-error": failure} {
 		t.Run(name, func(t *testing.T) {
 			err := want
 			if errors.Is(want, io.ErrShortWrite) {
 				err = nil
 			}
-			source := testSource(t, fakeTool(t, "while :; do printf 'stream-chunk'; done\n"))
-			if got := source.Run(context.Background(), failingWriter{err: err}); !errors.Is(got, want) {
-				t.Fatalf("got %v, want %v", got, want)
-			}
-			assertWorkEmpty(t, source.WorkRoot)
+			pidFile := filepath.Join(t.TempDir(), "pids")
+			source := testSource(t, fakeNamedTool(t, "xtrabackup", grandchildScript(pidFile, "while :; do printf stream-chunk; done\n")))
+			assertToolReaped(t, source, context.Background(), failingWriter{err: err}, want, pidFile, limit)
 		})
 	}
 }
 
 func TestBackupCancellationAndWatchdog(t *testing.T) {
 	for _, watchdog := range []bool{false, true} {
-		t.Run(map[bool]string{false: "caller", true: "watchdog"}[watchdog], func(t *testing.T) {
-			source := testSource(t, fakeTool(t, "printf 'ready'; sleep 30\n"))
+		name := "caller"
+		if watchdog {
+			name = "watchdog"
+		}
+		t.Run(name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "pids")
+			source := testSource(t, fakeNamedTool(t, "xtrabackup", grandchildScript(pidFile, "printf ready\nwait\n")))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			want := context.Canceled
 			writer := io.Writer(cancelOnWrite{cancel: cancel})
+			limit := supervisorWaitDelay + 3*time.Second
 			if watchdog {
-				source.Timeout = 100 * time.Millisecond
+				source.Timeout = 4 * time.Second
 				want = context.DeadlineExceeded
 				writer = io.Discard
+				limit = source.Timeout + supervisorWaitDelay + 3*time.Second
 			}
-			if err := source.Run(ctx, writer); !errors.Is(err, want) {
-				t.Fatalf("got %v, want %v", err, want)
-			}
-			assertWorkEmpty(t, source.WorkRoot)
+			assertToolReaped(t, source, ctx, writer, want, pidFile, limit)
 		})
 	}
 }
@@ -155,7 +220,17 @@ func (w cancelOnWrite) Write(p []byte) (int, error) {
 }
 
 func TestProbeAndExtractEntrypoints(t *testing.T) {
-	binary := fakeTool(t, "[ \"$1\" = --version ]; printf 'xtrabackup version 8.4.0-7 based on MySQL server 8.4.0\\n' >&2\n")
+	t.Setenv("MYSQL_PWD", "private-test-value")
+	t.Setenv("MYSQL_TEST_LOGIN_FILE", filepath.Join(t.TempDir(), "mylogin.cnf"))
+	t.Setenv("MYSQL_HOME", t.TempDir())
+	binary := fakeNamedTool(t, "xtrabackup", `[ "$1" = --no-defaults ]
+[ "$2" = --no-login-paths ]
+[ "$3" = --version ]
+[ -z "${MYSQL_PWD+x}" ]
+[ -z "${MYSQL_TEST_LOGIN_FILE+x}" ]
+[ -z "${MYSQL_HOME+x}" ]
+printf '%s version 8.4.0-7 based on MySQL server 8.4.0\n' "$0" >&2
+`)
 	version, err := ProbeVersion(context.Background(), binary)
 	if err != nil || version.Version != "8.4.0-7" {
 		t.Fatalf("probe: %#v, %v", version, err)
@@ -178,6 +253,37 @@ func TestProbeAndExtractEntrypoints(t *testing.T) {
 	assertWorkEmpty(t, root)
 }
 
+func TestProbeRejectsUnanchoredBannerAndBasename(t *testing.T) {
+	wrongName := fakeNamedTool(t, "xtrabackup-8.4", "printf streamed\n")
+	var output bytes.Buffer
+	source := testSource(t, wrongName)
+	if err := source.Run(context.Background(), &output); err == nil || output.Len() != 0 {
+		t.Fatal("non-xtrabackup binary streamed a backup")
+	}
+	if _, err := ProbeVersion(context.Background(), wrongName); err == nil {
+		t.Fatal("versioned basename was probed")
+	}
+	binary := fakeNamedTool(t, "xtrabackup", "printf 'xtrabackup version 8.4.0-7\\n' >&2\n")
+	if _, err := ProbeVersion(context.Background(), binary); err == nil {
+		t.Fatal("banner was not anchored to the configured binary")
+	}
+}
+
+func TestNonUTF8ConfigurationDoesNotStart(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	source := testSource(t, fakeNamedTool(t, "xtrabackup", "printf x > "+shellQuote(marker)+"\n"))
+	source.Connection.DataDir = "/mysql/\xff"
+	var output bytes.Buffer
+	err := source.Run(context.Background(), &output)
+	if !errors.Is(err, errSupervisorEncoding) || output.Len() != 0 {
+		t.Fatalf("non-UTF-8 configuration: %v bytes=%d", err, output.Len())
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("tool started")
+	}
+	assertWorkEmpty(t, source.WorkRoot)
+}
+
 func TestIncrementalUsesAndValidatesParentLSN(t *testing.T) {
 	body := strings.NewReplacer(
 		"full-backuped", "incremental",
@@ -187,7 +293,7 @@ func TestIncrementalUsesAndValidatesParentLSN(t *testing.T) {
 		"incremental = N", "incremental = Y",
 	).Replace(backupFixtureBody())
 	body = "found=0; for arg in \"$@\"; do [ \"$arg\" != --incremental-lsn=100 ] || found=1; done; [ \"$found\" = 1 ]\n" + body
-	source := testSource(t, fakeTool(t, body))
+	source := testSource(t, fakeNamedTool(t, "xtrabackup", body))
 	source.ParentCheckpoints = []byte(testCheckpoints)
 	if err := source.Run(context.Background(), io.Discard); err != nil {
 		t.Fatal(err)
@@ -197,7 +303,7 @@ func TestIncrementalUsesAndValidatesParentLSN(t *testing.T) {
 		t.Fatalf("incremental metadata mismatch: %v", err)
 	}
 	assertWorkEmpty(t, source.WorkRoot)
-	source = testSource(t, fakeTool(t, backupFixtureBody()))
+	source = testSource(t, fakeNamedTool(t, "xtrabackup", backupFixtureBody()))
 	source.ParentCheckpoints = []byte(testCheckpoints)
 	if err := source.Run(context.Background(), io.Discard); err == nil {
 		t.Fatal("full metadata accepted for incremental request")
@@ -207,11 +313,13 @@ func TestIncrementalUsesAndValidatesParentLSN(t *testing.T) {
 
 func TestDownstreamSecretErrorIsOpaqueButPreserved(t *testing.T) {
 	sentinel := errors.New("password=private-test-value")
-	source := testSource(t, fakeTool(t, "while :; do printf chunk; done\n"))
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	source := testSource(t, fakeNamedTool(t, "xtrabackup", grandchildScript(pidFile, "while :; do printf chunk; done\n")))
 	err := source.Run(context.Background(), failingWriter{err: sentinel})
 	if !errors.Is(err, sentinel) || strings.Contains(err.Error(), "private-test-value") {
 		t.Fatalf("downstream cause not safely preserved: %v", err)
 	}
+	assertPIDsGone(t, pidFile)
 	assertWorkEmpty(t, source.WorkRoot)
 }
 
@@ -229,4 +337,31 @@ func TestExtractCancellationClosesBlockedInput(t *testing.T) {
 		t.Fatalf("input pipe was not closed: %v", err)
 	}
 	assertWorkEmpty(t, root)
+}
+
+func TestControlPathsNeverStartTool(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*BackupSource, string)
+	}{
+		{"socket", func(s *BackupSource, path string) { s.Connection.Socket = path }},
+		{"datadir", func(s *BackupSource, path string) { s.Connection.DataDir = path }},
+		{"work", func(s *BackupSource, path string) { s.WorkRoot = path }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			badPath := filepath.Join(t.TempDir(), "unsupported\npath")
+			if err := os.Mkdir(badPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "started")
+			source := testSource(t, fakeNamedTool(t, "xtrabackup", "printf started > "+shellQuote(marker)+"\n"))
+			test.set(source, badPath)
+			if err := source.Run(t.Context(), io.Discard); err == nil {
+				t.Fatal("control separator path admitted")
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("tool started before rejecting unsupported path")
+			}
+		})
+	}
 }

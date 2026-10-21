@@ -1,18 +1,17 @@
 package physical
 
 import (
+	"encoding/json/v2"
+	"strings"
 	"testing"
 )
 
-func TestCompatibilityPinnedCandidate(t *testing.T) {
+func TestCompatibilityAdmissionCannotBeChangedByCaller(t *testing.T) {
 	identity := Identity{Version: "8.4.11", VersionComment: "MySQL Community Server - GPL"}
 	tool := ToolVersion{Version: "8.4.0-7"}
-	entry, err := matchingCompatibility(identity, tool, "linux/amd64")
+	_, err := matchingCompatibility(identity, tool, "linux/amd64")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if entry.Verified || entry.Status != "candidate" || entry.EvidenceIssue == "" {
-		t.Fatalf("candidate must not claim verification: %+v", entry)
 	}
 	matrix, err := CompatibilityMatrix()
 	if err != nil {
@@ -69,4 +68,36 @@ func TestPrepareAdmission(t *testing.T) {
 			requirePreflightCode(t, CheckPrepareVersion(test.backup, test.prepare), test.code)
 		})
 	}
+}
+
+func TestMatrixRejectsContradictoryOrMalformedAdmission(t *testing.T) {
+	entries, err := parseCompatibilityMatrix(compatibilityJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*CompatibilityEntry){
+		func(entry *CompatibilityEntry) { entry.Status, entry.Verified = "candidate", true },
+		func(entry *CompatibilityEntry) { entry.Status, entry.Verified = "verified", false },
+		func(entry *CompatibilityEntry) { entry.EvidenceIssue = "" },
+		func(entry *CompatibilityEntry) { entry.ServerVersion = "8.4" },
+		func(entry *CompatibilityEntry) { entry.MySQLImage = "mysql:latest" },
+	} {
+		entry := entries[0]
+		mutate(&entry)
+		raw, marshalErr := json.Marshal([]CompatibilityEntry{entry})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		_, parseErr := parseCompatibilityMatrix(raw)
+		requirePreflightCode(t, parseErr, "matrix_invalid")
+	}
+	raw, err := json.Marshal([]CompatibilityEntry{entries[0], entries[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = parseCompatibilityMatrix(raw)
+	requirePreflightCode(t, err, "matrix_invalid")
+	unknown := strings.Replace(string(compatibilityJSON), `"status":`, `"unexpected": true, "status":`, 1)
+	_, err = parseCompatibilityMatrix([]byte(unknown))
+	requirePreflightCode(t, err, "matrix_invalid")
 }

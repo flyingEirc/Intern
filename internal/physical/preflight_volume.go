@@ -14,7 +14,7 @@ import (
 
 const maxAutoCNFBytes = 64 * 1024
 
-func checkDataVolume(ctx context.Context, directory string, identity Identity) (retErr error) {
+func checkDataVolume(ctx context.Context, directory string, identity Identity, socket string) (retErr error) {
 	if filepath.Clean(directory) != filepath.Clean(identity.DataDir) {
 		return preflightFailure("volume", "datadir_mismatch", "Mount the data volume at the same absolute path returned by MySQL datadir.")
 	}
@@ -31,7 +31,7 @@ func checkDataVolume(ctx context.Context, directory string, identity Identity) (
 		return err
 	}
 	err = fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
-		return checkVolumeEntry(ctx, root, path, entry, walkErr)
+		return checkVolumeEntry(ctx, root, path, socket, entry, walkErr)
 	})
 	if err != nil {
 		return err
@@ -106,14 +106,20 @@ func invalidAutoCNF() error {
 	return preflightFailure("volume", "auto_cnf_invalid", "auto.cnf must contain one valid server-uuid in its auto section.")
 }
 
-func checkVolumeEntry(ctx context.Context, root *os.Root, path string, entry fs.DirEntry, walkErr error) error {
+func checkVolumeEntry(ctx context.Context, root *os.Root, path, socket string, entry fs.DirEntry, walkErr error) error {
 	if ctx.Err() != nil {
 		return preflightExternalFailure(ctx, "volume", "canceled", "Preflight was canceled.")
+	}
+	if errors.Is(walkErr, fs.ErrNotExist) {
+		return nil
 	}
 	if walkErr != nil {
 		return preflightFailure("volume", "datadir_unreadable", "Cannot enumerate the data volume; check read and directory search permissions for the runtime UID/GID.")
 	}
 	if entry.Type()&os.ModeSymlink != 0 {
+		if isSocketAlias(root, path, socket) {
+			return nil
+		}
 		return preflightFailure("volume", "datadir_symlink_unsupported", "Symlinked data files or directories are outside the admitted volume layout; mount a self-contained datadir.")
 	}
 	// Unix sockets may live in datadir; they are not physical backup payloads.
@@ -123,7 +129,14 @@ func checkVolumeEntry(ctx context.Context, root *os.Root, path string, entry fs.
 	if !entry.IsDir() && !entry.Type().IsRegular() {
 		return preflightFailure("volume", "datadir_file_unsupported", "The data directory contains a non-regular file that cannot be safely inspected.")
 	}
+	return checkReadableVolumeEntry(root, path)
+}
+
+func checkReadableVolumeEntry(root *os.Root, path string) error {
 	file, err := root.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return preflightFailure("volume", "datadir_unreadable", "Cannot open a data-volume entry; check file readability and directory search permissions for the runtime UID/GID.")
 	}
@@ -191,4 +204,27 @@ func pathsOverlap(left, right string) bool {
 func pathWithin(root, path string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func isSocketAlias(root *os.Root, path, socket string) bool {
+	if socket == "" {
+		return false
+	}
+	target, err := root.Readlink(path)
+	if err != nil {
+		return false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root.Name(), filepath.Dir(path), target)
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	expected, err := filepath.EvalSymlinks(socket)
+	if err != nil || resolved != expected {
+		return false
+	}
+	info, err := os.Stat(resolved)
+	return err == nil && info.Mode()&os.ModeSocket != 0
 }

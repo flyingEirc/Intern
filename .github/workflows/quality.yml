@@ -120,7 +120,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -133,7 +133,21 @@ jobs:
             app/web/go.sum
             go.work.sum
       - name: Native physical runner and source preflight
-        run: go test -v -tags=integration -count=1 -timeout=12m ./app/web/integration -run '^TestP2NativeContainers$'
+        run: |
+          mkdir -p .cache/quality/physical
+          go test -json -tags=integration -count=1 -timeout=16m ./app/web/integration -run '^TestP2NativeContainers$' | tee .cache/quality/physical/events.jsonl
+      - name: Reject incomplete or skipped physical evidence
+        if: always()
+        run: .github/scripts/verify-physical-evidence.sh .cache/quality/physical/events.jsonl
+      - name: Retain allowlisted physical evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: physical-p2-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/physical/events.jsonl
 
   quality-gate:
     name: quality-gate

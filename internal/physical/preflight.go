@@ -120,7 +120,10 @@ func runPreflightChecks(ctx context.Context, db *sql.DB, opts PreflightOptions, 
 		name string
 		run  func() error
 	}{
-		{"volume", func() error { return checkDataVolume(ctx, opts.Connection.DataDir, result.Identity) }},
+		{"volume", func() error {
+			return checkDataVolume(ctx, opts.Connection.DataDir, result.Identity, opts.Connection.Socket)
+		}},
+		{"mount", func() error { return checkReadonlyDataMount(opts.Connection.DataDir) }},
 		{"privileges", func() error { return checkBackupPrivileges(ctx, db, &result) }},
 		{"datafiles", func() error { return checkSourceDatafiles(ctx, db, opts.Connection.DataDir) }},
 		{"tables", func() error { return checkSourceTables(ctx, db, &result) }},
@@ -148,8 +151,8 @@ func validatePreflightOptions(opts PreflightOptions) error {
 		return preflightFailure("configuration", "configuration_invalid", "A database username and XtraBackup executable are required.")
 	}
 	for _, path := range []string{opts.Connection.Socket, opts.Connection.DataDir, opts.WorkRoot, opts.BackupRoot} {
-		if !filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
-			return preflightFailure("configuration", "path_invalid", "Socket, datadir, work and backup paths must be absolute paths without NUL bytes.")
+		if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") {
+			return preflightFailure("configuration", "path_invalid", "Socket, datadir, work and backup paths must be absolute paths without NUL, CR or LF bytes.")
 		}
 	}
 	if opts.MinWorkBytes == 0 || opts.MinBackupBytes == 0 {
