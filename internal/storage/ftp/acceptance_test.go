@@ -93,9 +93,9 @@ func s1DiagnoseSetup(t *testing.T) {
 		client.DialWithDisabledMLSD(true), client.DialWithForceListHidden(true))
 	s1SetupResult(t, started, "greeting", err)
 	defer func() { _ = conn.Quit() }()
+	t.Logf("S1 setup diagnostic authentication_observation_budget=20s original_business_idle=%s", cfg.IdleTimeout)
 	s1SetupResult(t, started, "login", conn.Login(cfg.Username, cfg.Password))
-	_, err = conn.List("/")
-	s1SetupResult(t, started, "list", err)
+	t.Fatal("diagnostic-only authentication observation complete; business scenarios not executed")
 }
 
 func s1SetupResult(t *testing.T, started time.Time, stage string, err error) {
@@ -119,10 +119,17 @@ type s1SetupConn struct {
 	started time.Time
 	idle    time.Duration
 	control bool
+	auth    bool
 }
 
 func (c *s1SetupConn) Read(p []byte) (int, error) {
-	if err := c.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+	idle := c.idle
+	if c.auth {
+		// Observe the actual PASS outcome, not acceptance under a larger budget.
+		// The setup context still closes this socket after twenty seconds.
+		idle = 20 * time.Second
+	}
+	if err := c.SetReadDeadline(time.Now().Add(idle)); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(p)
@@ -134,6 +141,7 @@ func (c *s1SetupConn) Write(p []byte) (int, error) {
 		// replies, credentials, or the SDK's unredacted debug stream.
 		verb, _, _ := strings.Cut(string(p), " ")
 		verb = strings.TrimSuffix(verb, "\r\n")
+		c.auth = verb == "PASS"
 		switch verb {
 		case "USER", "PASS", "FEAT", "TYPE", "OPTS", "EPSV", "PASV", "LIST", "QUIT":
 			c.t.Logf("S1 setup diagnostic command=%s elapsed=%s", verb, time.Since(c.started).Round(time.Millisecond))

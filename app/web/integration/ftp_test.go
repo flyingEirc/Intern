@@ -88,6 +88,11 @@ func TestS1NativeContainers(t *testing.T) {
 	require(t, err)
 	volume := s1FixtureVolume(t, serverInfo)
 	serverHash := s1ServerIdentity(t, ctx, server, secrets)
+	authDiagnostic := execOutput(t, ctx, server, "", []string{"cat", "/run/s1-auth-diagnostic"}, secrets...)
+	t.Log(authDiagnostic)
+	if !strings.HasSuffix(authDiagnostic, "S1 auth diagnostic exit=0\n") {
+		t.Fatal("bounded authentication diagnostic failed; no business acceptance")
+	}
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: s1AlpineImage, ImagePlatform: "linux/" + arch,
 		Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
