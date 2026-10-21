@@ -149,9 +149,44 @@ jobs:
           include-hidden-files: true
           path: .cache/quality/physical/events.jsonl
 
+  container-ftp:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native FTP publication and fault acceptance
+        env:
+          INTERN_S1_ARCH: amd64
+        run: |
+          mkdir -p .cache/quality/ftp
+          go test -json -tags=integration -count=1 -timeout=14m ./app/web/integration -run '^TestS1NativeContainers$' | tee .cache/quality/ftp/events.jsonl
+      - name: Reject incomplete or skipped FTP evidence
+        if: always()
+        run: .github/scripts/verify-ftp-evidence.sh .cache/quality/ftp/events.jsonl
+      - name: Retain allowlisted FTP evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ftp-s1-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/ftp/events.jsonl
+
   quality-gate:
     name: quality-gate
-    needs: [scope, quality-fast, container-mysql, container-physical]
+    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -163,12 +198,13 @@ jobs:
           FAST: ${{ needs.quality-fast.result }}
           CONTAINERS: ${{ needs.container-mysql.result }}
           PHYSICAL: ${{ needs.container-physical.result }}
+          FTP: ${{ needs.container-ftp.result }}
         working-directory: .
         run: |
           test "$SCOPE" = success
           case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

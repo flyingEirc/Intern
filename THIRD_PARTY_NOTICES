@@ -40,3 +40,18 @@ mysql_config_editor from the matching official client RPM, using the existing
 client-tools Dockerfile target and the checksum-pinned CLI profile for that
 same MySQL image. The native tool, not a reimplemented login-file codec, creates
 the fixture. This helper image is not published.
+
+Plain FTP repository and real-server verification (S1, issue #28):
+github.com/jlaffaye/ftp v0.2.4 is used under ISC:
+https://github.com/jlaffaye/ftp/blob/v0.2.4/LICENSE
+The private fixture builds unmodified Pure-FTPd 1.0.54 with quota support
+from its official release tarball, verified against the SHA512 pinned in
+app/web/integration/ftp.Dockerfile. Pure-FTPd is ISC-licensed:
+https://github.com/jedisct1/pure-ftpd/blob/1.0.54/COPYING
+The image retains COPYING at /usr/share/licenses/pure-ftpd/COPYING.
+The exact Alpine base digest and build/runtime package versions are pinned
+in that Dockerfile. Alpine package license information remains upstream:
+https://pkgs.alpinelinux.org/
+This fixture is used only for private verification, not published as an
+Intern runtime image. SFTPGo was evaluated but is not the selected fixture:
+its quota/permission status codes did not match the locked fault scenarios.
