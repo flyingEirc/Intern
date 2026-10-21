@@ -207,6 +207,10 @@ func enableEncryptedFixture(t *testing.T, ctx context.Context, fixture tc.Contai
 	require(t, db.QueryRowContext(ctx, "SELECT @@plugin_dir").Scan(&pluginDir))
 	execOutput(t, ctx, fixture, "0", []string{"mkdir", "-m", "0700", "/var/lib/intern-test-keyring"})
 	execOutput(t, ctx, fixture, "0", []string{"chown", fmt.Sprintf("%d:%d", uid, gid), "/var/lib/intern-test-keyring"})
+	// The image entrypoint probes mysqld configuration as root before dropping
+	// privileges. Pre-create the empty store as mysql so that probe cannot
+	// leave a root-owned keyring file that the real server cannot open.
+	execOutput(t, ctx, fixture, strconv.Itoa(uid), []string{"install", "-m", "0600", "/dev/null", "/var/lib/intern-test-keyring/keys"})
 	require(t, fixture.CopyToContainer(ctx, []byte(`{"path":"/var/lib/intern-test-keyring/keys","read_only":false}`), filepath.Join(pluginDir, "component_keyring_file.cnf"), 0o644))
 	mysqldPath := mysqldExecutable(t, ctx, fixture, db, uid)
 	require(t, fixture.CopyToContainer(ctx, []byte(`{"components":"file://component_keyring_file"}`), filepath.Join(filepath.Dir(mysqldPath), "mysqld.my"), 0o644))
@@ -214,6 +218,13 @@ func enableEncryptedFixture(t *testing.T, ctx context.Context, fixture tc.Contai
 	require(t, fixture.Stop(ctx, &stopTimeout))
 	require(t, fixture.Start(ctx))
 	fresh := waitForFixture(t, ctx, fixture, rootPassword)
+	var keyringStatus string
+	statusErr := fresh.QueryRowContext(ctx, "SELECT STATUS_VALUE FROM performance_schema.keyring_component_status WHERE STATUS_KEY='Component_status'").Scan(&keyringStatus)
+	if statusErr != nil || keyringStatus != "Active" {
+		require(t, fresh.Close())
+		require(t, statusErr)
+		t.Fatal("encrypted refusal fixture requires an active native keyring component")
+	}
 	for _, statement := range []string{
 		"CREATE TABLE fixture.encrypted_records(id INT PRIMARY KEY) ENCRYPTION='Y'",
 		"INSERT INTO fixture.encrypted_records VALUES (1)",
