@@ -14,4 +14,6 @@ pure-pw useradd quota -f /data/users.txt -u 1000 -g 1000 -d /data/quota -N 1 < /
 pure-pw mkdb /data/users.pdb -f /data/users.txt
 chmod 0600 /data/users.txt /data/users.pdb
 rm /run/s1-password /run/s1-quota-password
-exec pure-ftpd -S0.0.0.0,2121 -lpuredb:/data/users.pdb -E -A -j -u1000 -p50000:50020
+# Private Docker peers have no public PTR records; do not gate the FTP greeting
+# on external reverse-DNS resolution.
+exec pure-ftpd -H -S0.0.0.0,2121 -lpuredb:/data/users.pdb -E -A -j -u1000 -p50000:50020

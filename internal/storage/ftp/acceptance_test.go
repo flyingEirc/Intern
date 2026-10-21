@@ -56,6 +56,10 @@ func TestS1RepositoryWorker(t *testing.T) {
 func s1Require(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
+		var operation *Error
+		if errors.As(err, &operation) {
+			t.Fatalf("%v (operation=%s kind=%s reply_code=%d)", err, operation.Op, operation.Kind, operation.ReplyCode)
+		}
 		t.Fatal(err)
 	}
 }
