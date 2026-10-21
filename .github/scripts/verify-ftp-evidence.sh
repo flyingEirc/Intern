@@ -27,5 +27,6 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($source == "" or ($output | contains("source=" + $source + " source_dirty=false"))) and
   ($output | test("daemon=linux/(x86_64|amd64) platform=linux/amd64")) and
   ($output | contains("server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 uid=1000 passive=EPSV/PASV:50000-50020 topology=private-network-no-NAT")) and
+  ($output | contains("S1 fixture authentication backend=musl-crypt algorithm=bcrypt cost=10 accounts=normal,quota")) and
   ($output | contains("S1-A5 fixture_cleanup:"))
 ' "$1"

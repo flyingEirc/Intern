@@ -11,7 +11,6 @@ import (
 	"io"
 	"io/fs"
 	"net"
-	"net/textproto"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	client "github.com/jlaffaye/ftp"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"github.com/tink-crypto/tink-go/v2/streamingaead"
 
@@ -35,7 +33,6 @@ func TestS1RepositoryWorker(t *testing.T) {
 	if os.Getenv("INTERN_S1_ADDRESS") == "" || os.Getuid() == 0 {
 		t.Fatal("real FTP fixture and non-root worker are required; never skip")
 	}
-	s1DiagnoseSetup(t)
 	t.Run("publish", s1Publish)
 	t.Run("interrupted_upload", func(t *testing.T) { s1TransportFailure(t, "interrupt") })
 	t.Run("quota_552", s1Quota)
@@ -54,103 +51,6 @@ func TestS1RepositoryWorker(t *testing.T) {
 	t.Run("rolling_idle", s1RollingIdle)
 	t.Run("pipeline_completion", s1Completion)
 	t.Run("rename_ack_lost", s1RenameAckLost)
-}
-
-// Temporary native CI phase capture; not an acceptance case. Remove once the
-// native setup failure is diagnosed, before final S1 acceptance.
-func s1DiagnoseSetup(t *testing.T) {
-	t.Helper()
-	cfg := s1Config("diagnostic", "normal")
-	started := time.Now()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
-	host, _, err := net.SplitHostPort(cfg.Address)
-	s1SetupResult(t, started, "address", err)
-	lookupCtx, stopLookup := context.WithTimeout(ctx, cfg.DialTimeout)
-	_, err = net.DefaultResolver.LookupIPAddr(lookupCtx, host)
-	stopLookup()
-	s1SetupResult(t, started, "dns", err)
-	control := true
-	dial := func(network, address string) (net.Conn, error) {
-		isControl := control
-		control = false
-		stage := "data_tcp"
-		if isControl {
-			stage = "control_tcp"
-		}
-		dialCtx, stopDial := context.WithTimeout(ctx, cfg.DialTimeout)
-		defer stopDial()
-		conn, dialErr := (&net.Dialer{Timeout: cfg.DialTimeout}).DialContext(dialCtx, network, address)
-		s1SetupResult(t, started, stage, dialErr)
-		stopIO := context.AfterFunc(ctx, func() { _ = conn.Close() })
-		t.Cleanup(func() {
-			stopIO()
-			_ = conn.Close()
-		})
-		return &s1SetupConn{Conn: conn, t: t, started: started, idle: cfg.IdleTimeout, control: isControl}, nil
-	}
-	conn, err := client.Dial(cfg.Address, client.DialWithDialFunc(dial),
-		client.DialWithDisabledMLSD(true), client.DialWithForceListHidden(true))
-	s1SetupResult(t, started, "greeting", err)
-	defer func() { _ = conn.Quit() }()
-	t.Logf("S1 setup diagnostic authentication_observation_budget=20s original_business_idle=%s", cfg.IdleTimeout)
-	s1SetupResult(t, started, "login", conn.Login(cfg.Username, cfg.Password))
-	t.Fatal("diagnostic-only authentication observation complete; business scenarios not executed")
-}
-
-func s1SetupResult(t *testing.T, started time.Time, stage string, err error) {
-	t.Helper()
-	code := 0
-	var reply *textproto.Error
-	if errors.As(err, &reply) {
-		code = reply.Code
-	}
-	var network net.Error
-	timedOut := errors.As(err, &network) && network.Timeout()
-	t.Logf("S1 setup diagnostic stage=%s elapsed=%s success=%t error_type=%T timeout=%t reply_code=%d", stage, time.Since(started).Round(time.Millisecond), err == nil, err, timedOut, code)
-	if err != nil {
-		t.Fatal("FTP fixture setup failed before business scenarios")
-	}
-}
-
-type s1SetupConn struct {
-	net.Conn
-	t       *testing.T
-	started time.Time
-	idle    time.Duration
-	control bool
-	auth    bool
-}
-
-func (c *s1SetupConn) Read(p []byte) (int, error) {
-	idle := c.idle
-	if c.auth {
-		// Observe the actual PASS outcome, not acceptance under a larger budget.
-		// The setup context still closes this socket after twenty seconds.
-		idle = 20 * time.Second
-	}
-	if err := c.SetReadDeadline(time.Now().Add(idle)); err != nil {
-		return 0, err
-	}
-	return c.Conn.Read(p)
-}
-
-func (c *s1SetupConn) Write(p []byte) (int, error) {
-	if c.control {
-		// Only fixed command identifiers are emitted: never arguments, raw
-		// replies, credentials, or the SDK's unredacted debug stream.
-		verb, _, _ := strings.Cut(string(p), " ")
-		verb = strings.TrimSuffix(verb, "\r\n")
-		c.auth = verb == "PASS"
-		switch verb {
-		case "USER", "PASS", "FEAT", "TYPE", "OPTS", "EPSV", "PASV", "LIST", "QUIT":
-			c.t.Logf("S1 setup diagnostic command=%s elapsed=%s", verb, time.Since(c.started).Round(time.Millisecond))
-		}
-	}
-	if err := c.SetWriteDeadline(time.Now().Add(c.idle)); err != nil {
-		return 0, err
-	}
-	return c.Conn.Write(p)
 }
 
 func s1Require(t *testing.T, err error) {

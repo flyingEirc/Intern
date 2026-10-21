@@ -52,6 +52,11 @@ The image retains COPYING at /usr/share/licenses/pure-ftpd/COPYING.
 The exact Alpine base digest and build/runtime package versions are pinned
 in that Dockerfile. Alpine package license information remains upstream:
 https://pkgs.alpinelinux.org/
+The fixture uses Pure-FTPd's built-in system crypt path with musl 1.2.6-r2
+(MIT), not the optional libsodium backend. Generated test credentials must
+use the upstream default bcrypt cost 10; an unexpected fallback is refused.
+https://pkgs.alpinelinux.org/package/v3.24/main/x86_64/musl
+https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT?h=v1.2.6
 This fixture is used only for private verification, not published as an
 Intern runtime image. SFTPGo was evaluated but is not the selected fixture:
 its quota/permission status codes did not match the locked fault scenarios.

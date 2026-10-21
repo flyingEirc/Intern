@@ -88,11 +88,6 @@ func TestS1NativeContainers(t *testing.T) {
 	require(t, err)
 	volume := s1FixtureVolume(t, serverInfo)
 	serverHash := s1ServerIdentity(t, ctx, server, secrets)
-	authDiagnostic := execOutput(t, ctx, server, "", []string{"cat", "/run/s1-auth-diagnostic"}, secrets...)
-	t.Log(authDiagnostic)
-	if !strings.HasSuffix(authDiagnostic, "S1 auth diagnostic exit=0\n") {
-		t.Fatal("bounded authentication diagnostic failed; no business acceptance")
-	}
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: s1AlpineImage, ImagePlatform: "linux/" + arch,
 		Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
@@ -139,12 +134,17 @@ func s1ServerIdentity(t *testing.T, ctx context.Context, server tc.Container, se
 	if len(serverHash) != 2 || len(serverHash[0]) != 64 {
 		t.Fatal("missing compiled daemon digest")
 	}
-	packages := execOutput(t, ctx, server, "", []string{"apk", "list", "--installed", "libsodium", "libssl3", "libcrypto3"}, secrets...)
-	for _, pin := range []string{"libsodium-1.0.22-r0", "libssl3-3.5.9-r0", "libcrypto3-3.5.9-r0"} {
+	packages := execOutput(t, ctx, server, "", []string{"apk", "list", "--installed", "musl", "libssl3", "libcrypto3"}, secrets...)
+	for _, pin := range []string{"musl-1.2.6-r2", "libssl3-3.5.9-r0", "libcrypto3-3.5.9-r0"} {
 		if !strings.Contains(packages, pin) {
 			t.Fatalf("runtime package pin missing: %s", pin)
 		}
 	}
+	authBackend := execOutput(t, ctx, server, "", []string{"cat", "/run/s1-auth-backend"}, secrets...)
+	if authBackend != "normal bcrypt cost=10\nquota bcrypt cost=10\n" {
+		t.Fatal("fixture authentication backend differs from the pinned system crypt selection")
+	}
+	t.Log("S1 fixture authentication backend=musl-crypt algorithm=bcrypt cost=10 accounts=normal,quota")
 	return serverHash[0]
 }
 
