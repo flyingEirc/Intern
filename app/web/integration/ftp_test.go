@@ -134,7 +134,7 @@ func s1ServerIdentity(t *testing.T, ctx context.Context, server tc.Container, se
 	if len(serverHash) != 2 || len(serverHash[0]) != 64 {
 		t.Fatal("missing compiled daemon digest")
 	}
-	packages := execOutput(t, ctx, server, "", []string{"apk", "info", "-v", "libsodium", "libssl3", "libcrypto3"}, secrets...)
+	packages := execOutput(t, ctx, server, "", []string{"apk", "list", "--installed", "libsodium", "libssl3", "libcrypto3"}, secrets...)
 	for _, pin := range []string{"libsodium-1.0.22-r0", "libssl3-3.5.9-r0", "libcrypto3-3.5.9-r0"} {
 		if !strings.Contains(packages, pin) {
 			t.Fatalf("runtime package pin missing: %s", pin)
