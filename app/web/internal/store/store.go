@@ -17,6 +17,7 @@ import (
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
 	"github.com/flyingEirc/Intern/internal/fsutil"
+	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 )
 
 // BusyTimeout is the SQLite busy_timeout on every control-plane connection.
@@ -74,6 +75,9 @@ func openStore(ctx context.Context, dir string) (_ *Store, retErr error) {
 	latest := provider.ListSources()
 	s := &Store{db: db, provider: provider, latest: latest[len(latest)-1].Version}
 	if err = s.migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err = physicalstore.Migrate(ctx, db); err != nil {
 		return nil, err
 	}
 	s.instanceID, err = ensureInstance(ctx, db)
@@ -178,6 +182,13 @@ func (s *Store) Ready(ctx context.Context) error {
 	}
 	if current != s.latest {
 		return fmt.Errorf("metadata database version %d does not match embedded latest version %d", current, s.latest)
+	}
+	physicalCurrent, physicalLatest, err := physicalstore.Version(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if physicalCurrent != physicalLatest {
+		return fmt.Errorf("physical database version %d does not match embedded latest version %d", physicalCurrent, physicalLatest)
 	}
 	return nil
 }

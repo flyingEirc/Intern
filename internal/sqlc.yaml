@@ -8,3 +8,11 @@ sql:
         package: "catalogsql"
         out: "catalog/internal/catalogsql"
         emit_empty_slices: true
+  - engine: "sqlite"
+    schema: "physical/store/migrations"
+    queries: "physical/store/queries.sql"
+    gen:
+      go:
+        package: "storesql"
+        out: "physical/store/internal/storesql"
+        emit_empty_slices: true
