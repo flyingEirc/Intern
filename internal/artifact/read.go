@@ -20,11 +20,17 @@ import (
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
-func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) (manifest []byte, retErr error) {
+func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) ([]byte, error) {
+	return ReadFiles(ctx, filepath.Join(dir, "envelope.json"), filepath.Join(dir, "payload.bin"), output, opts)
+}
+
+// ReadFiles authenticates and decodes a v1 artifact stored under explicit member
+// paths. It enforces the same regular-file, size, and authentication checks as Read.
+func ReadFiles(ctx context.Context, envelopePath, payloadPath string, output io.Writer, opts ReadOptions) (manifest []byte, retErr error) {
 	if opts.MaxBytes < 1 {
 		return nil, errors.New("expanded artifact exceeds restore size limit")
 	}
-	env, b, err := readEnvelope(dir, opts.Encrypt)
+	env, b, err := readEnvelope(envelopePath, opts.Encrypt)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +38,7 @@ func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) (
 	if err != nil {
 		return nil, err
 	}
-	f, err := openPayload(ctx, filepath.Join(dir, "payload.bin"), meta)
+	f, err := openPayload(ctx, payloadPath, meta)
 	if err != nil {
 		return nil, err
 	}
@@ -52,8 +58,8 @@ func Read(ctx context.Context, dir string, output io.Writer, opts ReadOptions) (
 	return meta.Manifest, nil
 }
 
-func readEnvelope(dir string, encrypted bool) (env envelope, b binding, retErr error) {
-	f, err := regularFile(filepath.Join(dir, "envelope.json"))
+func readEnvelope(path string, encrypted bool) (env envelope, b binding, retErr error) {
+	f, err := regularFile(path)
 	if err != nil {
 		return env, b, err
 	}
