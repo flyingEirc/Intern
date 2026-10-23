@@ -3,12 +3,14 @@ package backup
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -73,7 +75,8 @@ func awaitToolExit(t *testing.T, pid int) {
 	defer ticker.Stop()
 	for {
 		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if os.IsNotExist(err) {
+		// Linux reports ESRCH when the process is reaped after /proc lookup.
+		if os.IsNotExist(err) || errors.Is(err, syscall.ESRCH) {
 			return
 		}
 		if err != nil {
