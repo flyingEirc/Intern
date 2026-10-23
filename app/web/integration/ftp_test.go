@@ -70,7 +70,7 @@ func TestS1NativeContainers(t *testing.T) {
 		require(t, nw.Remove(cleanup))
 	})
 	server, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{Context: filepath.Join(root, "app/web/integration"), Dockerfile: "ftp.Dockerfile"},
+		FromDockerfile: tc.FromDockerfile{Context: filepath.Join(root, "app/web/integration"), Dockerfile: "ftp.Dockerfile", BuildLogWriter: os.Stderr},
 		ImagePlatform:  "linux/" + arch,
 		Networks:       []string{nw.Name}, NetworkAliases: map[string][]string{nw.Name: {"s1-ftp"}},
 		Mounts: []tc.ContainerMount{tc.VolumeMount("", "/data")},
@@ -135,7 +135,7 @@ func s1ServerIdentity(t *testing.T, ctx context.Context, server tc.Container, se
 		t.Fatal("missing compiled daemon digest")
 	}
 	packages := execOutput(t, ctx, server, "", []string{"apk", "list", "--installed", "musl", "libssl3", "libcrypto3"}, secrets...)
-	for _, pin := range []string{"musl-1.2.6-r2", "libssl3-3.5.9-r0", "libcrypto3-3.5.9-r0"} {
+	for _, pin := range []string{"musl-1.2.6-r3", "libssl3-3.5.9-r0", "libcrypto3-3.5.9-r0"} {
 		if !strings.Contains(packages, pin) {
 			t.Fatalf("runtime package pin missing: %s", pin)
 		}
