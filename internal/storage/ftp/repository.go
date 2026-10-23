@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/textproto"
 	"path"
 	"sort"
 	"strings"
@@ -60,28 +61,64 @@ func Open(ctx context.Context, cfg Config) (*Repository, error) {
 	return r, nil
 }
 
-// lookup deliberately uses a successful parent listing to establish absence.
-// A 550 reply alone cannot distinguish missing objects from denied access.
+// LIST arguments may be interpreted as glob patterns. CWD takes the absolute
+// literal directory; listing its contents without an argument preserves names.
+func listDirectory(c *client.ServerConn, name string) ([]*client.Entry, error) {
+	if err := c.ChangeDir(name); err != nil {
+		return nil, err
+	}
+	return c.List("")
+}
+
+// A listing can omit an existing object (for example at a server entry cap).
+// Literal probes may veto absence, but never invent an entry type or authorize
+// reading/deleting an object whose exact name the listing did not establish.
 func lookup(c *client.ServerConn, name string) (*client.Entry, error) {
-	entries, err := c.List(path.Dir(name))
+	entries, err := listDirectory(c, path.Dir(name))
 	if err != nil {
 		return nil, err
 	}
 	var found *client.Entry
+	base := path.Base(name)
 	for _, entry := range entries {
-		if entry.Name == path.Base(name) {
+		if entry.Name == base {
 			if found != nil {
 				return nil, fs.ErrInvalid
 			}
 			found = entry
 		}
 	}
+	if found == nil {
+		return nil, probeUnlisted(c, name)
+	}
 	return found, nil
+}
+
+func probeUnlisted(c *client.ServerConn, name string) error {
+	_, err := c.FileSize(name)
+	if err == nil {
+		return fs.ErrExist
+	}
+	if !unavailableReply(err) {
+		return err
+	}
+	if err = c.ChangeDir(name); err == nil {
+		return fs.ErrExist
+	}
+	if !unavailableReply(err) {
+		return err
+	}
+	return nil
+}
+
+func unavailableReply(err error) bool {
+	var reply *textproto.Error
+	return errors.As(err, &reply) && reply.Code == client.StatusFileUnavailable
 }
 
 func directory(c *client.ServerConn, name string) error {
 	if name == "/" {
-		_, err := c.List(name)
+		_, err := listDirectory(c, name)
 		return err
 	}
 	current := "/"
@@ -283,7 +320,7 @@ func (r *Repository) walk(s *session, prefix string) ([]string, error) {
 	for len(pending) != 0 {
 		dir := pending[len(pending)-1]
 		pending = pending[:len(pending)-1]
-		entries, err := s.conn.List(r.absolute(dir))
+		entries, err := listDirectory(s.conn, r.absolute(dir))
 		if err != nil {
 			return nil, err
 		}

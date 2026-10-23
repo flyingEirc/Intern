@@ -20,6 +20,8 @@ const markerName = ".intern-instance"
 // Config selects one instance namespace beneath an existing FTP directory.
 // Only TLSMode "plain" is implemented; there is no implicit downgrade.
 // Zero timeouts select 10-second dial and 30-second rolling idle deadlines.
+// Path components may contain internal spaces and glob characters literally,
+// but not C0/DEL control bytes or leading/trailing ASCII spaces.
 type Config struct {
 	Address     string
 	Username    string
@@ -48,8 +50,8 @@ func validateConfig(cfg Config) error {
 	if cfg.TLSMode != "plain" || cfg.DialTimeout < 0 || cfg.IdleTimeout < 0 {
 		return fs.ErrInvalid
 	}
-	for _, value := range []string{cfg.Address, cfg.Username, cfg.Password, cfg.BasePath, cfg.InstanceID} {
-		if strings.ContainsAny(value, "\x00\r\n") {
+	for _, value := range []string{cfg.Address, cfg.Username, cfg.Password} {
+		if !protocolText(value) {
 			return fs.ErrInvalid
 		}
 	}
@@ -75,6 +77,13 @@ func validateNamespace(base, instance string) error {
 	if !path.IsAbs(base) || path.Clean(base) != base || strings.Contains(base, "\\") {
 		return fs.ErrInvalid
 	}
+	if base != "/" {
+		for part := range strings.SplitSeq(strings.TrimPrefix(base, "/"), "/") {
+			if !component(part) {
+				return fs.ErrInvalid
+			}
+		}
+	}
 	if !component(instance) || reserved(instance) {
 		return fs.ErrInvalid
 	}
@@ -82,7 +91,19 @@ func validateNamespace(base, instance string) error {
 }
 
 func component(value string) bool {
-	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, "/\\\x00\r\n")
+	return value != "" && value != "." && value != ".." &&
+		value[0] != ' ' && value[len(value)-1] != ' ' &&
+		!strings.ContainsAny(value, "/\\") && protocolText(value)
+}
+
+// Refuse command bytes that FTP servers may rewrite into another name.
+func protocolText(value string) bool {
+	for index := range len(value) {
+		if value[index] < 0x20 || value[index] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func reserved(value string) bool {
@@ -91,7 +112,7 @@ func reserved(value string) bool {
 }
 
 func (r *Repository) key(key string, root, temporary bool) error {
-	if !fs.ValidPath(key) || path.Clean(key) != key || strings.ContainsAny(key, "\\\x00\r\n") {
+	if !fs.ValidPath(key) || path.Clean(key) != key || strings.Contains(key, "\\") {
 		return fs.ErrInvalid
 	}
 	parts := strings.Split(key, "/")

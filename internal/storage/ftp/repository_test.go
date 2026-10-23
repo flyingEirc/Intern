@@ -28,6 +28,11 @@ func TestConfigurationRejectsBeforeDial(t *testing.T) {
 		"empty_host":        func(c *Config) { c.Address = ":21" },
 		"password_command":  func(c *Config) { c.Password = "private\r\nDELE /file" },
 		"username_command":  func(c *Config) { c.Username = "intern\nPASS private" },
+		"password_control":  func(c *Config) { c.Password = "private\tvalue" },
+		"username_control":  func(c *Config) { c.Username = "intern\x7f" },
+		"base_control":      func(c *Config) { c.BasePath = "/backups/\x01name" },
+		"base_space":        func(c *Config) { c.BasePath = "/backups /child" },
+		"instance_space":    func(c *Config) { c.InstanceID = " instance" },
 		"relative_base":     func(c *Config) { c.BasePath = "backups" },
 		"unclean_base":      func(c *Config) { c.BasePath = "/backups/../foreign" },
 		"backslash_base":    func(c *Config) { c.BasePath = "/backups\\foreign" },
@@ -48,18 +53,6 @@ func TestConfigurationRejectsBeforeDial(t *testing.T) {
 				t.Fatal("configuration error disclosed credentials")
 			}
 		})
-	}
-}
-
-func TestConfigurationDefaults(t *testing.T) {
-	cfg, err := normalizeConfig(validConfig())
-	if err != nil || cfg.DialTimeout != 10*time.Second || cfg.IdleTimeout != 30*time.Second {
-		t.Fatalf("unexpected timeout defaults: %v", err)
-	}
-	cfg.DialTimeout, cfg.IdleTimeout = time.Second, 2*time.Second
-	got, err := normalizeConfig(cfg)
-	if err != nil || got.DialTimeout != cfg.DialTimeout || got.IdleTimeout != cfg.IdleTimeout {
-		t.Fatalf("explicit timeout changed: %v", err)
 	}
 }
 

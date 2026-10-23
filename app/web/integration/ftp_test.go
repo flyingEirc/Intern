@@ -24,7 +24,7 @@ const s1AlpineImage = "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b
 
 // Keep these exact case names synchronized with the worker and CI evidence gate.
 var s1WorkerCases = []string{
-	"publish", "interrupted_upload", "quota_552", "permission_550", "source_error",
+	"publish", "listing_limit", "interrupted_upload", "quota_552", "permission_550", "source_error",
 	"short_write", "data_close_error", "stage_close_error", "cancel_upload", "cleanup_retry",
 	"instance_isolation", "marker_conflict", "path_tls_rejection", "ciphertext_resume",
 	"close_drain", "rolling_idle", "pipeline_completion", "rename_ack_lost",

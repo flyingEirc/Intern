@@ -34,6 +34,7 @@ func TestS1RepositoryWorker(t *testing.T) {
 		t.Fatal("real FTP fixture and non-root worker are required; never skip")
 	}
 	t.Run("publish", s1Publish)
+	t.Run("listing_limit", s1ListingLimit)
 	t.Run("interrupted_upload", func(t *testing.T) { s1TransportFailure(t, "interrupt") })
 	t.Run("quota_552", s1Quota)
 	t.Run("permission_550", s1Permission)
@@ -149,7 +150,7 @@ func s1Write(t *testing.T, w io.Writer, data []byte) {
 func s1Publish(t *testing.T) {
 	r, _ := s1Repository(t, "publish", "normal")
 	s1Require(t, r.Probe(t.Context()))
-	key := "publish/source/chain/1-full/payload"
+	key := "publish/source dir[1]/payload"
 	s := s1Create(t, r, key)
 	part := s.TemporaryPath()
 	s1Absent(t, "normal", part)
@@ -167,6 +168,7 @@ func s1Publish(t *testing.T) {
 		t.Fatal("incorrect receipt or unstable cleanup reference")
 	}
 	s1Absent(t, "normal", part)
+	s1PreserveCommitted(t, r, s, key)
 	size, err := r.Size(t.Context(), key)
 	s1Require(t, err)
 	if size != receipt.Size {
@@ -184,7 +186,6 @@ func s1Publish(t *testing.T) {
 	if !slices.Equal(listed, []string{key}) {
 		t.Fatalf("published listing mismatch: %v", listed)
 	}
-	s1PreserveCommitted(t, r, s, key)
 	s1Require(t, r.Delete(t.Context(), key))
 	s1Absent(t, "normal", key)
 	t.Log("S1-A1 publish: private part -> STOR -> SIZE -> RNTO -> exact RETR -> DELETE")
@@ -485,6 +486,7 @@ func s1Marker(t *testing.T) {
 
 func s1Paths(t *testing.T) {
 	r, _ := s1Repository(t, "paths", "normal")
+	s1RejectRewrittenNames(t, r)
 	for _, key := range []string{"../escape", "/paths/absolute", "paths/../escape", "paths/back\\slash", "other/payload", "paths/cr\r\n", "paths/.intern-instance"} {
 		if _, err := r.Create(t.Context(), key); err == nil {
 			t.Fatalf("unsafe key accepted: %q", key)
@@ -504,6 +506,67 @@ func s1Paths(t *testing.T) {
 		t.Fatal("negative RETR offset accepted")
 	}
 	t.Log("S1-A3 path_tls_rejection: traversal and foreign paths refused; plain explicitly selected; FTP credentials travel in cleartext")
+}
+
+func s1RejectRewrittenNames(t *testing.T, r *Repository) {
+	t.Helper()
+	original := []byte("must remain unchanged")
+	for _, name := range []string{"x_", "_x", "a_b"} {
+		s1Put(t, r, "paths/"+name, original)
+	}
+	for _, name := range []string{"x ", " x", "a\tb", "a\x1fb", "a\x7fb"} {
+		key := "paths/" + name
+		if _, err := r.Create(t.Context(), key); !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("server-rewritten create not rejected: %q", key)
+		}
+		if err := r.Delete(t.Context(), key); !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("server-rewritten delete not rejected: %q", key)
+		}
+	}
+	for _, name := range []string{"x_", "_x", "a_b"} {
+		got, err := os.ReadFile(s1Disk("normal", "paths/"+name))
+		s1Require(t, err)
+		if !bytes.Equal(got, original) {
+			t.Fatal("rejected spelling changed a different object")
+		}
+	}
+}
+
+func s1ListingLimit(t *testing.T) {
+	r, _ := s1Repository(t, "limited", "normal")
+	dir := s1Disk("normal", "limited/crowded")
+	s1Require(t, os.Mkdir(dir, 0o700))
+	original := []byte("existing immutable object")
+	for index := range 10005 {
+		s1Require(t, os.WriteFile(filepath.Join(dir, fmt.Sprintf("object-%05d", index)), original, 0o600))
+	}
+	session, err := r.connect(t.Context())
+	s1Require(t, err)
+	defer session.finish()
+	listed, err := session.conn.List("/limited/crowded")
+	s1Require(t, err)
+	seen := make(map[string]bool, len(listed))
+	for _, entry := range listed {
+		seen[entry.Name] = true
+	}
+	files, err := os.ReadDir(dir)
+	s1Require(t, err)
+	for _, entry := range files {
+		if !seen[entry.Name()] {
+			key := "limited/crowded/" + entry.Name()
+			if _, err = r.Create(t.Context(), key); !errors.Is(err, fs.ErrExist) {
+				t.Fatal("truncated LIST allowed creation over an existing file")
+			}
+			got, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+			s1Require(t, readErr)
+			if !bytes.Equal(got, original) {
+				t.Fatal("omitted immutable object changed")
+			}
+			t.Log("S1-A1 listing_limit: real server listing omitted an existing file; literal existence check prevented replacement")
+			return
+		}
+	}
+	t.Fatal("real server did not exercise its listing limit")
 }
 
 func s1Resume(t *testing.T) {

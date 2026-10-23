@@ -97,6 +97,8 @@ func (r *Repository) absent(s *session, key string) error {
 
 // Create checks ownership and the destination but does not open a payload
 // connection. Empty objects start their STOR only when Commit is called.
+// ctx owns the entire sink lifetime, including Write and Commit; callers must
+// use their run/transfer context, not a short-lived setup-only context.
 func (r *Repository) Create(ctx context.Context, key string) (*Sink, error) {
 	if err := r.key(key, false, false); err != nil {
 		return nil, failure("create", err)

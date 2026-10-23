@@ -5,7 +5,7 @@ test "$#" -eq 1
 jq -e -s --arg source "${GITHUB_SHA:-}" '
   ([.[] | .Output // ""] | join("")) as $output |
   [
-    ["A1", "publish"],
+    ["A1", "publish"], ["A1", "listing_limit"],
     ["A2", "interrupted_upload"], ["A2", "quota_552"], ["A2", "permission_550"],
     ["A2", "source_error"], ["A2", "short_write"], ["A2", "data_close_error"],
     ["A2", "stage_close_error"], ["A2", "cancel_upload"], ["A2", "cleanup_retry"],
