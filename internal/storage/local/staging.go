@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"strings"
 	"sync"
 
 	"github.com/flyingEirc/Intern/internal/fsutil"
@@ -49,6 +50,17 @@ type Staging struct {
 // creates no pending directory. Publish still refuses a path that appears
 // later, with a non-replacing rename.
 func (r *Repository) Begin(dir string) (*Staging, error) {
+	return r.BeginOwned(dir, strings.ToLower(rand.Text()))
+}
+
+// BeginOwned creates a 0700 pending directory named ".pending-"+token.
+// The caller must first durably record ownership of a fresh token in its cleanup
+// ledger. Tokens contain 1–64 lowercase ASCII letters, digits, or hyphens.
+// An existing publish target or pending token returns fs.ErrExist without reuse.
+func (r *Repository) BeginOwned(dir, token string) (*Staging, error) {
+	if err := validPendingToken(token); err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -64,7 +76,7 @@ func (r *Repository) Begin(dir string) (*Staging, error) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	pending := ".pending-" + rand.Text()
+	pending := pendingPrefix + token
 	if err := r.root.Mkdir(pending, 0o700); err != nil {
 		return nil, err
 	}

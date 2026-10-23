@@ -29,10 +29,10 @@ import (
 // Repository confines all object access to a pinned private directory.
 type Repository struct {
 	// mu serializes namespace operations on the pinned root: Open, Size, List,
-	// Delete, Begin, exclusive Create, Abort removal, and Close. Publish holds
-	// mu for parent creation, the exclusive rename, and the parent/root
-	// directory sync. Create and Abort acquire Staging.mu before mu and hold mu
-	// until they return.
+	// Delete, BeginOwned, ReclaimPending, ReclaimPublished, exclusive Create,
+	// Abort removal, and Close. Publish holds mu for parent creation, the
+	// exclusive rename, and the parent/root directory sync. Create and Abort
+	// acquire Staging.mu before mu and hold mu until they return.
 	//
 	// Write and Commit fsync take only Staging.mu. They never acquire mu, so a
 	// large object does not block readers of this Repository. While Create,
