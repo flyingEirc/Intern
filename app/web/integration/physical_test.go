@@ -107,7 +107,8 @@ func TestP2NativeContainers(t *testing.T) {
 	installPoisonedLoginFile(t, ctx, loginTools, uid)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: pxbImage, ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Mounts: mounts,
-		Env: map[string]string{"INTERN_P2_PASSWORD": backupPassword, "INTERN_P2_DENIED_PASSWORD": deniedPassword, "HOME": poisonedLoginHome, "TMPDIR": "/tmp"}, Files: []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/physical-worker.test", FileMode: 0o755}},
+		Env: map[string]string{"INTERN_P2_PASSWORD": backupPassword, "INTERN_P2_DENIED_PASSWORD": deniedPassword, "INTERN_P3_FULL_DISK": "/p3-full", "HOME": poisonedLoginHome, "TMPDIR": "/tmp"}, Files: []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/physical-worker.test", FileMode: 0o755}},
+		Tmpfs:          map[string]string{"/p3-full": fmt.Sprintf("rw,size=1048576,mode=0700,uid=%d,gid=%d", uid, gid)},
 		ConfigModifier: func(config *container.Config) { config.User = fmt.Sprintf("%d:%d", uid, gid) },
 		WaitingFor:     wait.ForExec([]string{"/usr/bin/test", "-x", "/tmp/physical-worker.test"}).WithStartupTimeout(30 * time.Second),
 	}, Started: true})
@@ -121,6 +122,7 @@ func TestP2NativeContainers(t *testing.T) {
 	text := execOutput(t, ctx, worker, "", []string{"/tmp/physical-worker.test", "-test.v", "-test.run=^TestP2RealWorker$", "-test.timeout=7m"}, backupPassword, deniedPassword)
 	verifyPrimaryEvidence(t, text)
 	t.Log(text)
+	runP3Workers(t, ctx, worker, backupPassword, deniedPassword)
 	verifyWritableVolume(t, ctx, mounts, binary, pxbImage, backupPassword, uid, gid)
 	runPIDOneWorker(t, ctx, mounts, binary, pxbImage, backupPassword, uid, gid)
 	verifyWrongVolume(t, ctx, mounts, binary, pxbImage, backupPassword, uid, gid)
@@ -623,4 +625,32 @@ func physicalSourceIdentity(t *testing.T, ctx context.Context, root string) (str
 		t.Fatal("CI physical candidate contains uncommitted source changes")
 	}
 	return source, dirty
+}
+
+func runP3Workers(t *testing.T, ctx context.Context, worker tc.Container, secrets ...string) {
+	t.Helper()
+	text := execOutput(t, ctx, worker, "", []string{"/tmp/physical-worker.test", "-test.v", "-test.run=^TestP3(Real|Disk|Recovery)Worker$", "-test.timeout=7m"}, secrets...)
+	for _, marker := range []string{
+		"--- PASS: TestP3RealWorker (",
+		"--- PASS: TestP3DiskWorker (",
+		"--- PASS: TestP3RecoveryWorker (",
+		"P3-A1 backup=0", "P3-A1 backup=1", "P3-A1 backup=2",
+		"P3-A2 fault=nonzero", "P3-A2 fault=enospc", "P3-A2 fault=cancel",
+		"P3-A2 fault=short_write", "P3-A2 fault=close", "P3-A2 fault=fsync",
+		"P3-A2 fault=metadata", "P3-A2 fault=publish", "P3-A2 fault=completion",
+		"P3-A2 fault=late_cancel completed=true object=intact",
+		"P3-A3 rejected=parent_missing", "P3-A3 rejected=parent_not_completed",
+		"P3-A3 rejected=chain_broken", "P3-A3 rejected=server_uuid_changed",
+		"P3-A3 rejected=server_version_changed", "P3-A3 rejected=tool_version_changed",
+		"P3-A3 rejected=chain_length_reached",
+		"P3-A4 kill=SIGKILL restart=real ledger=empty pending=gone work=gone active=untouched foreign=untouched second_recover=noop",
+	} {
+		if !strings.Contains(text, marker) {
+			t.Fatalf("missing P3 worker evidence %q", marker)
+		}
+	}
+	if strings.Contains(text, "SKIP") || strings.Count(text, "raw_tool_bytes=exact authenticated_eof=true snapshot_sha256=") != 3 {
+		t.Fatal("P3 worker skipped a case or omitted authenticated snapshot evidence")
+	}
+	t.Log(text)
 }
