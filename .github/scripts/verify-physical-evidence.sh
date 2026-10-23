@@ -2,7 +2,7 @@
 set -euo pipefail
 
 test "$#" -eq 1
-jq -e -s '
+jq -e -s --arg source "${GITHUB_SHA:-}" '
   ([.[] | .Output // ""] | join("")) as $output |
   [
     "--- PASS: TestP2RealWorker (",
@@ -61,5 +61,7 @@ jq -e -s '
   ([.[] | select(.Action == "pass" and .Test == "TestP2NativeContainers" and .Package == "github.com/flyingEirc/Intern/app/web/integration")] | length == 1) and
   ([.[] | select(.Action == "pass" and .Test == null and .Package == "github.com/flyingEirc/Intern/app/web/integration")] | length == 1) and
   all($required[]; . as $marker | $output | contains($marker)) and
-  ($output | contains("--- SKIP:") | not)
+  ($output | contains("--- SKIP:") | not) and
+  ($output | test("candidate source=[0-9a-f]{40} source_dirty=false")) and
+  ($source == "" or ($output | contains("candidate source=" + $source + " source_dirty=false")))
 ' "$1"
