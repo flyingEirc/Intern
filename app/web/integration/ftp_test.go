@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 	tc "github.com/testcontainers/testcontainers-go"
@@ -57,12 +58,23 @@ func TestS1NativeContainers(t *testing.T) {
 	password, quotaPassword := secrets[0], secrets[1]
 	nw, err := network.New(ctx)
 	require(t, err)
-	// Registered first, this marker is emitted only after all registered cleanup
-	// actions have completed successfully; canceled test context is not reused.
+	var fixtureVolume string
+	// Registered first, this check runs after every container/network cleanup.
+	// It proves the private filesystem oracle was removed instead of assuming it.
 	t.Cleanup(func() {
-		if !t.Failed() {
-			t.Log("S1-A5 fixture_cleanup: worker/server removed; private volume and network removed")
+		if t.Failed() || fixtureVolume == "" {
+			return
 		}
+		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		inspector, clientErr := tc.NewDockerClientWithOpts(cleanup)
+		require(t, clientErr)
+		defer func() { require(t, inspector.Close()) }()
+		_, inspectErr := inspector.VolumeInspect(cleanup, fixtureVolume, client.VolumeInspectOptions{})
+		if !errdefs.IsNotFound(inspectErr) {
+			t.Fatal("private FTP fixture volume remained after cleanup")
+		}
+		t.Log("S1-A5 fixture_cleanup: worker/server removed; private volume absence verified; network removed")
 	})
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
@@ -86,7 +98,8 @@ func TestS1NativeContainers(t *testing.T) {
 	require(t, err)
 	serverInfo, err := server.Inspect(ctx)
 	require(t, err)
-	volume := s1FixtureVolume(t, serverInfo)
+	fixtureVolume = s1FixtureVolume(t, serverInfo)
+	volume := fixtureVolume
 	serverHash := s1ServerIdentity(t, ctx, server, secrets)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: s1AlpineImage, ImagePlatform: "linux/" + arch,

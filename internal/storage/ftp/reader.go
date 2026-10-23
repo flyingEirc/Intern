@@ -23,6 +23,7 @@ type objectReader struct {
 
 // Open resumes reads of one immutable object at an absolute byte offset.
 // The caller must consume and Close the reader and check both error results.
+// ctx owns the whole read; cancellation closes the control and data sockets.
 func (r *Repository) Open(ctx context.Context, key string, offset int64) (io.ReadCloser, error) {
 	if err := r.key(key, false, false); err != nil {
 		return nil, failure("open", err)
