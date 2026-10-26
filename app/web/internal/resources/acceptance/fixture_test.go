@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -175,6 +176,10 @@ func requirePrivateDir(t *testing.T, dir string) {
 	if !info.IsDir() || info.Mode() != os.ModeDir|0o700 {
 		t.Fatalf("fixture directory %s must be a private 0700 directory: %v", dir, info.Mode())
 	}
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(sys.Uid) != os.Geteuid() {
+		t.Fatalf("fixture directory %s owner uid = %v, want %d", dir, info.Sys(), os.Geteuid())
+	}
 }
 
 func requireKey(t *testing.T, path string) {
@@ -205,6 +210,7 @@ func copyPinnedTool(t *testing.T, path string) {
 	if original != copied {
 		t.Fatalf("the matrix-refusal tool copy is not byte-identical to %s", realXtrabackup)
 	}
+	t.Logf("copied_tool_sha256=%x", copied)
 }
 
 // fileDigest hashes one file in a stream, so a large executable never has to

@@ -101,20 +101,38 @@ func TestW3NativeContainers(t *testing.T) {
 		t.Fatal("the executed worker differs from the candidate binary")
 	}
 	requirePinnedFTP(t, ctx, server, secrets)
-	// The copied tool must be the real pinned executable, byte for byte.
-	tool := strings.Fields(execOutput(t, ctx, worker, "", []string{"sha256sum", "/usr/bin/xtrabackup"}, secrets...))
-	copied := strings.Fields(execOutput(t, ctx, worker, "", []string{"sha256sum", w3Root + "/tools/xtrabackup-8.4.0-7"}, secrets...))
-	if len(tool) != 2 || len(copied) != 2 || tool[0] != copied[0] {
-		t.Fatal("the matrix-refusal tool copy is not the pinned executable")
-	}
-	t.Logf("W3 candidate source=%s source_dirty=%t binary_sha256=%x mysql_image=%s pxb_image=%s worker_image=%s ftp_image=%s daemon=%s/%s platform=linux/amd64 worker_uid=%d worker_gid=%d tool_sha256=%s server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 topology=private-network-no-NAT",
-		source, dirty, digest, mysqlImage, pxbImage, workerInfo.Image, serverInfo.Image,
-		info.Info.OSType, info.Info.Architecture, uid, gid, tool[0])
+	// The pinned executable is in the image now. The matrix-refusal copy is
+	// created later by the worker, so that file's digest is bound after the run.
+	tool := fileDigestSum(t, ctx, worker, "/usr/bin/xtrabackup", secrets...)
 	text := execOutput(t, ctx, worker, "", []string{
 		"/tmp/w3-worker.test", "-test.v", "-test.run=^" + w3WorkerTest + "$", "-test.timeout=26m",
 	}, append(secrets, operatorPassword)...)
+	copied := fileDigestSum(t, ctx, worker, w3CopiedTool, secrets...)
+	if tool != copied {
+		t.Fatal("the matrix-refusal tool copy is not the pinned executable")
+	}
+	if !strings.Contains(text, "copied_tool_sha256="+tool) {
+		t.Fatal("the worker did not bind the matrix-refusal tool copy to the pinned digest")
+	}
+	t.Logf("W3 candidate source=%s source_dirty=%t binary_sha256=%x mysql_image=%s pxb_image=%s worker_image=%s ftp_image=%s daemon=%s/%s platform=linux/amd64 worker_uid=%d worker_gid=%d tool_sha256=%s server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 topology=private-network-no-NAT",
+		source, dirty, digest, mysqlImage, pxbImage, workerInfo.Image, serverInfo.Image,
+		info.Info.OSType, info.Info.Architecture, uid, gid, tool)
 	verifyW3Evidence(t, text)
 	t.Log(text)
+}
+
+// w3CopiedTool is the worker-created byte copy of /usr/bin/xtrabackup under a
+// basename that is not "xtrabackup". Keep it synchronized with copiedToolName.
+const w3CopiedTool = w3Root + "/tools/xtrabackup-8.4.0-7"
+
+// fileDigestSum is sha256sum of one path that must already exist.
+func fileDigestSum(t *testing.T, ctx context.Context, target tc.Container, path string, secrets ...string) string {
+	t.Helper()
+	fields := strings.Fields(execOutput(t, ctx, target, "", []string{"sha256sum", path}, secrets...))
+	if len(fields) != 2 {
+		t.Fatalf("sha256sum %s returned %q", path, strings.Join(fields, " "))
+	}
+	return fields[0]
 }
 
 // startW3MySQL starts the pinned source with a shared datadir volume (mounted
@@ -232,6 +250,7 @@ var w3StateMarkers = []string{
 	"plaintext_ftp=audited", "responses=clean", "log=clean", "audit=clean",
 	"database_bytes=clean", "cross_row=refused", "cross_field=refused",
 	"audit_abort=500", "enabled=1 persisted", "unseal=exact",
+	"copied_tool_sha256=",
 }
 
 // w3RefusalCases are the four enable refusals, each of which must persist

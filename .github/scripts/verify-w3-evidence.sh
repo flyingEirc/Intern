@@ -40,7 +40,9 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
     ($output | split("--- PASS: TestW3Worker/" + $case + " (") | length == 2)) and
   all($markers[]; . as $marker | $output | contains($marker)) and
   ($output | test("W3 candidate source=[0-9a-f]{40} source_dirty=false binary_sha256=[0-9a-f]{64} ")) and
-  ($output | test("tool_sha256=[0-9a-f]{64} ")) and
+  ($output | test("worker_gid=[1-9][0-9]* tool_sha256=[0-9a-f]{64} ")) and
+  ($output | test("copied_tool_sha256=[0-9a-f]{64}")) and
+  (($output | capture("copied_tool_sha256=(?<copied>[0-9a-f]{64})") | .copied) == ($output | capture("worker_gid=[0-9]+ tool_sha256=(?<tool>[0-9a-f]{64})") | .tool)) and
   ($source == "" or ($output | contains("W3 candidate source=" + $source + " source_dirty=false"))) and
   ($output | test("daemon=linux/(x86_64|amd64) platform=linux/amd64")) and
   ($output | test("worker_uid=[1-9][0-9]* worker_gid=[1-9][0-9]*")) and
