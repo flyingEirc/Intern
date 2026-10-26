@@ -59,6 +59,184 @@ func (q *Queries) CommitSession(ctx context.Context, arg CommitSessionParams) er
 	return err
 }
 
+const countPoliciesByRepository = `-- name: CountPoliciesByRepository :one
+SELECT COUNT(*) FROM policies WHERE local_repository_id = ?1 OR replica_repository_id = ?1
+`
+
+func (q *Queries) CountPoliciesByRepository(ctx context.Context, localRepositoryID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPoliciesByRepository, localRepositoryID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countPoliciesBySource = `-- name: CountPoliciesBySource :one
+SELECT COUNT(*) FROM policies WHERE source_id = ?
+`
+
+func (q *Queries) CountPoliciesBySource(ctx context.Context, sourceID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPoliciesBySource, sourceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createPolicy = `-- name: CreatePolicy :one
+INSERT INTO policies (
+    id, name, source_id, local_repository_id, replica_repository_id, full_cron,
+    incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level,
+    page_tracking, enabled, last_preflight_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+`
+
+type CreatePolicyParams struct {
+	ID                  string
+	Name                string
+	SourceID            string
+	LocalRepositoryID   string
+	ReplicaRepositoryID sql.NullString
+	FullCron            string
+	IncrementalCron     string
+	Timezone            string
+	MaxChainLength      int64
+	Parallel            int64
+	Throttle            int64
+	ZstdLevel           int64
+	PageTracking        int64
+	Enabled             int64
+	LastPreflightJson   sql.NullString
+	CreatedAt           string
+	UpdatedAt           string
+}
+
+func (q *Queries) CreatePolicy(ctx context.Context, arg CreatePolicyParams) (Policy, error) {
+	row := q.db.QueryRowContext(ctx, createPolicy,
+		arg.ID,
+		arg.Name,
+		arg.SourceID,
+		arg.LocalRepositoryID,
+		arg.ReplicaRepositoryID,
+		arg.FullCron,
+		arg.IncrementalCron,
+		arg.Timezone,
+		arg.MaxChainLength,
+		arg.Parallel,
+		arg.Throttle,
+		arg.ZstdLevel,
+		arg.PageTracking,
+		arg.Enabled,
+		arg.LastPreflightJson,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	var i Policy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SourceID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
+		&i.FullCron,
+		&i.IncrementalCron,
+		&i.Timezone,
+		&i.MaxChainLength,
+		&i.Parallel,
+		&i.Throttle,
+		&i.ZstdLevel,
+		&i.PageTracking,
+		&i.Enabled,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createRepository = `-- name: CreateRepository :one
+INSERT INTO repositories (id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
+`
+
+type CreateRepositoryParams struct {
+	ID               string
+	Name             string
+	Kind             string
+	ConfigJson       string
+	SecretCiphertext []byte
+	TlsMode          string
+	CreatedAt        string
+	UpdatedAt        string
+}
+
+func (q *Queries) CreateRepository(ctx context.Context, arg CreateRepositoryParams) (Repository, error) {
+	row := q.db.QueryRowContext(ctx, createRepository,
+		arg.ID,
+		arg.Name,
+		arg.Kind,
+		arg.ConfigJson,
+		arg.SecretCiphertext,
+		arg.TlsMode,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	var i Repository
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.ConfigJson,
+		&i.SecretCiphertext,
+		&i.TlsMode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createSource = `-- name: CreateSource :one
+INSERT INTO sources (id, name, socket, datadir, username, secret_ciphertext, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+`
+
+type CreateSourceParams struct {
+	ID               string
+	Name             string
+	Socket           string
+	Datadir          string
+	Username         string
+	SecretCiphertext []byte
+	CreatedAt        string
+	UpdatedAt        string
+}
+
+func (q *Queries) CreateSource(ctx context.Context, arg CreateSourceParams) (Source, error) {
+	row := q.db.QueryRowContext(ctx, createSource,
+		arg.ID,
+		arg.Name,
+		arg.Socket,
+		arg.Datadir,
+		arg.Username,
+		arg.SecretCiphertext,
+		arg.CreatedAt,
+		arg.UpdatedAt,
+	)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Socket,
+		&i.Datadir,
+		&i.Username,
+		&i.SecretCiphertext,
+		&i.ServerUuid,
+		&i.ServerVersion,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, ?) RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
@@ -114,12 +292,39 @@ func (q *Queries) DeleteExpiredTombstones(ctx context.Context, expiry float64) e
 	return err
 }
 
+const deletePolicy = `-- name: DeletePolicy :exec
+DELETE FROM policies WHERE id = ?
+`
+
+func (q *Queries) DeletePolicy(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deletePolicy, id)
+	return err
+}
+
+const deleteRepository = `-- name: DeleteRepository :exec
+DELETE FROM repositories WHERE id = ?
+`
+
+func (q *Queries) DeleteRepository(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteRepository, id)
+	return err
+}
+
 const deleteSession = `-- name: DeleteSession :exec
 DELETE FROM sessions WHERE token = ?
 `
 
 func (q *Queries) DeleteSession(ctx context.Context, token string) error {
 	_, err := q.db.ExecContext(ctx, deleteSession, token)
+	return err
+}
+
+const deleteSource = `-- name: DeleteSource :exec
+DELETE FROM sources WHERE id = ?
+`
+
+func (q *Queries) DeleteSource(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, deleteSource, id)
 	return err
 }
 
@@ -155,6 +360,55 @@ func (q *Queries) GetInstance(ctx context.Context) (GetInstanceRow, error) {
 	return i, err
 }
 
+const getPolicy = `-- name: GetPolicy :one
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at FROM policies WHERE id = ?
+`
+
+func (q *Queries) GetPolicy(ctx context.Context, id string) (Policy, error) {
+	row := q.db.QueryRowContext(ctx, getPolicy, id)
+	var i Policy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SourceID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
+		&i.FullCron,
+		&i.IncrementalCron,
+		&i.Timezone,
+		&i.MaxChainLength,
+		&i.Parallel,
+		&i.Throttle,
+		&i.ZstdLevel,
+		&i.PageTracking,
+		&i.Enabled,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRepository = `-- name: GetRepository :one
+SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE id = ?
+`
+
+func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, error) {
+	row := q.db.QueryRowContext(ctx, getRepository, id)
+	var i Repository
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.ConfigJson,
+		&i.SecretCiphertext,
+		&i.TlsMode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getSessionExpiry = `-- name: GetSessionExpiry :one
 SELECT expiry FROM sessions WHERE token = ?
 `
@@ -164,6 +418,29 @@ func (q *Queries) GetSessionExpiry(ctx context.Context, token string) (float64, 
 	var expiry float64
 	err := row.Scan(&expiry)
 	return expiry, err
+}
+
+const getSource = `-- name: GetSource :one
+SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE id = ?
+`
+
+func (q *Queries) GetSource(ctx context.Context, id string) (Source, error) {
+	row := q.db.QueryRowContext(ctx, getSource, id)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Socket,
+		&i.Datadir,
+		&i.Username,
+		&i.SecretCiphertext,
+		&i.ServerUuid,
+		&i.ServerVersion,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getUser = `-- name: GetUser :one
@@ -306,6 +583,144 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 	return items, nil
 }
 
+const listPolicies = `-- name: ListPolicies :many
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at FROM policies WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+ORDER BY id DESC LIMIT ?2
+`
+
+type ListPoliciesParams struct {
+	Before   string
+	RowLimit int64
+}
+
+func (q *Queries) ListPolicies(ctx context.Context, arg ListPoliciesParams) ([]Policy, error) {
+	rows, err := q.db.QueryContext(ctx, listPolicies, arg.Before, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Policy{}
+	for rows.Next() {
+		var i Policy
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.SourceID,
+			&i.LocalRepositoryID,
+			&i.ReplicaRepositoryID,
+			&i.FullCron,
+			&i.IncrementalCron,
+			&i.Timezone,
+			&i.MaxChainLength,
+			&i.Parallel,
+			&i.Throttle,
+			&i.ZstdLevel,
+			&i.PageTracking,
+			&i.Enabled,
+			&i.LastPreflightJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRepositories = `-- name: ListRepositories :many
+SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+ORDER BY id DESC LIMIT ?2
+`
+
+type ListRepositoriesParams struct {
+	Before   string
+	RowLimit int64
+}
+
+func (q *Queries) ListRepositories(ctx context.Context, arg ListRepositoriesParams) ([]Repository, error) {
+	rows, err := q.db.QueryContext(ctx, listRepositories, arg.Before, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Repository{}
+	for rows.Next() {
+		var i Repository
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Kind,
+			&i.ConfigJson,
+			&i.SecretCiphertext,
+			&i.TlsMode,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSources = `-- name: ListSources :many
+SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+ORDER BY id DESC LIMIT ?2
+`
+
+type ListSourcesParams struct {
+	Before   string
+	RowLimit int64
+}
+
+func (q *Queries) ListSources(ctx context.Context, arg ListSourcesParams) ([]Source, error) {
+	rows, err := q.db.QueryContext(ctx, listSources, arg.Before, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Source{}
+	for rows.Next() {
+		var i Source
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Socket,
+			&i.Datadir,
+			&i.Username,
+			&i.SecretCiphertext,
+			&i.ServerUuid,
+			&i.ServerVersion,
+			&i.LastPreflightJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users ORDER BY username COLLATE NOCASE, id
 `
@@ -342,6 +757,48 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const recordSourcePreflight = `-- name: RecordSourcePreflight :one
+UPDATE sources SET
+    server_uuid = ?1,
+    server_version = ?2,
+    last_preflight_json = ?3,
+    updated_at = ?4
+WHERE id = ?5 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+`
+
+type RecordSourcePreflightParams struct {
+	ServerUuid        sql.NullString
+	ServerVersion     sql.NullString
+	LastPreflightJson sql.NullString
+	UpdatedAt         string
+	ID                string
+}
+
+func (q *Queries) RecordSourcePreflight(ctx context.Context, arg RecordSourcePreflightParams) (Source, error) {
+	row := q.db.QueryRowContext(ctx, recordSourcePreflight,
+		arg.ServerUuid,
+		arg.ServerVersion,
+		arg.LastPreflightJson,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Socket,
+		&i.Datadir,
+		&i.Username,
+		&i.SecretCiphertext,
+		&i.ServerUuid,
+		&i.ServerVersion,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const revokeUserSessions = `-- name: RevokeUserSessions :one
 UPDATE users SET session_epoch = session_epoch + 1, updated_at = ? WHERE id = ? RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
 `
@@ -367,6 +824,52 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 	return i, err
 }
 
+const setPolicyEnabled = `-- name: SetPolicyEnabled :one
+UPDATE policies SET
+    enabled = ?1,
+    last_preflight_json = COALESCE(?2, last_preflight_json),
+    updated_at = ?3
+WHERE id = ?4 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+`
+
+type SetPolicyEnabledParams struct {
+	Enabled           int64
+	LastPreflightJson sql.NullString
+	UpdatedAt         string
+	ID                string
+}
+
+// Enable persists the preflight that authorised it in the same statement.
+func (q *Queries) SetPolicyEnabled(ctx context.Context, arg SetPolicyEnabledParams) (Policy, error) {
+	row := q.db.QueryRowContext(ctx, setPolicyEnabled,
+		arg.Enabled,
+		arg.LastPreflightJson,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Policy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SourceID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
+		&i.FullCron,
+		&i.IncrementalCron,
+		&i.Timezone,
+		&i.MaxChainLength,
+		&i.Parallel,
+		&i.Throttle,
+		&i.ZstdLevel,
+		&i.PageTracking,
+		&i.Enabled,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const tombstoneActive = `-- name: TombstoneActive :one
 SELECT expiry FROM session_tombstones WHERE token = ? AND expiry > ?
 `
@@ -381,6 +884,177 @@ func (q *Queries) TombstoneActive(ctx context.Context, arg TombstoneActiveParams
 	var expiry float64
 	err := row.Scan(&expiry)
 	return expiry, err
+}
+
+const updatePolicy = `-- name: UpdatePolicy :one
+UPDATE policies SET
+    name = ?1,
+    source_id = ?2,
+    local_repository_id = ?3,
+    replica_repository_id = ?4,
+    full_cron = ?5,
+    incremental_cron = ?6,
+    timezone = ?7,
+    max_chain_length = ?8,
+    parallel = ?9,
+    throttle = ?10,
+    zstd_level = ?11,
+    page_tracking = ?12,
+    enabled = ?13,
+    last_preflight_json = ?14,
+    updated_at = ?15
+WHERE id = ?16 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+`
+
+type UpdatePolicyParams struct {
+	Name                string
+	SourceID            string
+	LocalRepositoryID   string
+	ReplicaRepositoryID sql.NullString
+	FullCron            string
+	IncrementalCron     string
+	Timezone            string
+	MaxChainLength      int64
+	Parallel            int64
+	Throttle            int64
+	ZstdLevel           int64
+	PageTracking        int64
+	Enabled             int64
+	LastPreflightJson   sql.NullString
+	UpdatedAt           string
+	ID                  string
+}
+
+// PUT replaces every mutable field, so the replica repository can be cleared.
+func (q *Queries) UpdatePolicy(ctx context.Context, arg UpdatePolicyParams) (Policy, error) {
+	row := q.db.QueryRowContext(ctx, updatePolicy,
+		arg.Name,
+		arg.SourceID,
+		arg.LocalRepositoryID,
+		arg.ReplicaRepositoryID,
+		arg.FullCron,
+		arg.IncrementalCron,
+		arg.Timezone,
+		arg.MaxChainLength,
+		arg.Parallel,
+		arg.Throttle,
+		arg.ZstdLevel,
+		arg.PageTracking,
+		arg.Enabled,
+		arg.LastPreflightJson,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Policy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.SourceID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
+		&i.FullCron,
+		&i.IncrementalCron,
+		&i.Timezone,
+		&i.MaxChainLength,
+		&i.Parallel,
+		&i.Throttle,
+		&i.ZstdLevel,
+		&i.PageTracking,
+		&i.Enabled,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateRepository = `-- name: UpdateRepository :one
+UPDATE repositories SET
+    name = ?1,
+    config_json = ?2,
+    secret_ciphertext = COALESCE(?3, secret_ciphertext),
+    updated_at = ?4
+WHERE id = ?5 RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
+`
+
+type UpdateRepositoryParams struct {
+	Name             string
+	ConfigJson       string
+	SecretCiphertext []byte
+	UpdatedAt        string
+	ID               string
+}
+
+// kind and tls_mode are immutable; the secret is replaced only when supplied.
+func (q *Queries) UpdateRepository(ctx context.Context, arg UpdateRepositoryParams) (Repository, error) {
+	row := q.db.QueryRowContext(ctx, updateRepository,
+		arg.Name,
+		arg.ConfigJson,
+		arg.SecretCiphertext,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Repository
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Kind,
+		&i.ConfigJson,
+		&i.SecretCiphertext,
+		&i.TlsMode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateSource = `-- name: UpdateSource :one
+UPDATE sources SET
+    name = ?1,
+    socket = ?2,
+    datadir = ?3,
+    username = ?4,
+    secret_ciphertext = COALESCE(?5, secret_ciphertext),
+    updated_at = ?6
+WHERE id = ?7 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+`
+
+type UpdateSourceParams struct {
+	Name             string
+	Socket           string
+	Datadir          string
+	Username         string
+	SecretCiphertext []byte
+	UpdatedAt        string
+	ID               string
+}
+
+// The sealed password is replaced only when supplied.
+func (q *Queries) UpdateSource(ctx context.Context, arg UpdateSourceParams) (Source, error) {
+	row := q.db.QueryRowContext(ctx, updateSource,
+		arg.Name,
+		arg.Socket,
+		arg.Datadir,
+		arg.Username,
+		arg.SecretCiphertext,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Socket,
+		&i.Datadir,
+		&i.Username,
+		&i.SecretCiphertext,
+		&i.ServerUuid,
+		&i.ServerVersion,
+		&i.LastPreflightJson,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateUser = `-- name: UpdateUser :one

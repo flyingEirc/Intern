@@ -357,6 +357,473 @@ paths:
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
+  /api/v1/repositories:
+    get:
+      operationId: listRepositories
+      summary: List backup repositories (resources:read)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Before'
+      responses:
+        '200':
+          description: Descending UUIDv7 ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepositoryPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createRepository
+      summary: Create a local or plain-FTP repository (repositories:manage, admin only)
+      description: >-
+        A local repository requires tls_mode "none" and an absolute root. An FTP
+        repository requires tls_mode "plain" explicitly; an omitted value, "explicit"
+        or "implicit" is rejected because FTPS is not implemented. The password is
+        sealed with the deployment KEK and is never returned. A successful FTP
+        create records plaintext_ftp=true in the same transaction as its audit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RepositoryWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/Repository'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/repositories/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getRepository
+      summary: Read one repository (resources:read)
+      responses:
+        '200':
+          $ref: '#/components/responses/Repository'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    put:
+      operationId: updateRepository
+      summary: Replace a repository (repositories:manage, admin only)
+      description: >-
+        kind and tls_mode are immutable. An omitted password keeps the stored
+        secret; a supplied password replaces the ciphertext in place, in the same
+        transaction as the success audit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RepositoryWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/Repository'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteRepository
+      summary: Delete a repository (repositories:manage, admin only)
+      description: A repository used by a policy or a replica row cannot be deleted.
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/repositories/{id}/probe:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: probeRepository
+      summary: Probe repository writability (repositories:manage, admin only)
+      description: >-
+        A local repository is probed through a private staged write and removal.
+        An FTP repository is opened with this instance's namespace marker and
+        probed without publishing. The result is 200 with ok=false and a safe code
+        when the target is unusable; raw replies, paths and credentials never appear.
+      responses:
+        '200':
+          description: Probe result
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResult'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/sources:
+    get:
+      operationId: listSources
+      summary: List MySQL sources (resources:read)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Before'
+      responses:
+        '200':
+          description: Descending UUIDv7 ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourcePage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createSource
+      summary: Create a MySQL source (sources:manage, admin or operator)
+      description: The password is sealed with the deployment KEK and never returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/Source'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/sources/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getSource
+      summary: Read one source (resources:read)
+      responses:
+        '200':
+          $ref: '#/components/responses/Source'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    put:
+      operationId: updateSource
+      summary: Replace a source (sources:manage, admin or operator)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/Source'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deleteSource
+      summary: Delete a source (sources:manage, admin or operator)
+      description: A source used by a policy or by any physical chain cannot be deleted.
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/sources/{id}/preflight:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: preflightSource
+      summary: Run the real source preflight (sources:manage, admin or operator)
+      description: >-
+        Runs the mounted-socket MySQL preflight with the local repository as the
+        backup root, bounded by a 60-second deadline. Success persists the observed
+        identity and record; failure returns 200 with ok=false and a structured
+        error. Neither the password, the DSN nor raw tool output appears.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [local_repository_id]
+              properties:
+                local_repository_id:
+                  type: string
+      responses:
+        '200':
+          description: Preflight outcome
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreflightResult'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/policies:
+    get:
+      operationId: listPolicies
+      summary: List backup policies (resources:read)
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Before'
+      responses:
+        '200':
+          description: Descending UUIDv7 ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createPolicy
+      summary: Create a backup policy (policies:manage, admin or operator)
+      description: >-
+        enabled=true runs the source preflight and, when a replica is configured,
+        the replica probe first. A failed preflight returns 409 preflight_failed
+        with the structured outcome and writes nothing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyWrite'
+      responses:
+        '201':
+          $ref: '#/components/responses/Policy'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/PreflightErrorResponse'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/policies/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getPolicy
+      summary: Read one policy (resources:read)
+      responses:
+        '200':
+          $ref: '#/components/responses/Policy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    put:
+      operationId: updatePolicy
+      summary: Replace a policy (policies:manage, admin or operator)
+      description: >-
+        enabled=true re-runs the preflight. A failed preflight returns 409
+        preflight_failed and leaves the stored row unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyWrite'
+      responses:
+        '200':
+          $ref: '#/components/responses/Policy'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/PreflightErrorResponse'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    delete:
+      operationId: deletePolicy
+      summary: Delete a policy (policies:manage, admin or operator)
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/policies/{id}/enable:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: enablePolicy
+      summary: Enable a policy after a real preflight (policies:manage, admin or operator)
+      description: >-
+        Runs the source preflight and the replica probe. Only on success does one
+        transaction set enabled=1, persist the preflight record and write the
+        success audit. On failure the response is 409 preflight_failed with the
+        structured outcome, enabled stays 0, and the failure audit is best-effort.
+      responses:
+        '200':
+          $ref: '#/components/responses/Policy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/PreflightErrorResponse'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/policies/{id}/disable:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: disablePolicy
+      summary: Disable a policy (policies:manage, admin or operator)
+      description: Disable is always allowed and needs no preflight.
+      responses:
+        '200':
+          $ref: '#/components/responses/Policy'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
 components:
   securitySchemes:
     cookieAuth:
@@ -368,6 +835,26 @@ components:
       name: id
       in: path
       required: true
+      schema:
+        type: string
+    ResourceID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 100
+    Before:
+      name: before
+      in: query
+      description: Return only rows whose ID sorts before this one.
       schema:
         type: string
     RequestID:
@@ -403,6 +890,44 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/User'
+    Repository:
+      description: Repository without its sealed secret
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Repository'
+    Source:
+      description: Source without its sealed password
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Source'
+    Policy:
+      description: Policy
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Policy'
+    PreflightErrorResponse:
+      description: >-
+        preflight_failed (409) with the structured preflight outcome in
+        error.preflight. validation_failed and conflict are also possible here.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     RetryableError:
       description: >-
         rate_limited (429) or unavailable (503). Retry-After is whole seconds.
@@ -457,7 +982,7 @@ components:
       enum: [admin, operator, viewer]
     Permission:
       type: string
-      enum: ['session:self', 'users:manage', 'audit:read']
+      enum: ['session:self', 'users:manage', 'audit:read', 'repositories:manage', 'sources:manage', 'policies:manage', 'resources:read']
     User:
       type: object
       additionalProperties: false
@@ -549,6 +1074,8 @@ components:
               enum: [POST, PUT, PATCH, DELETE]
             route:
               type: string
+            plaintext_ftp:
+              type: boolean
     HealthResponse:
       type: object
       additionalProperties: false
@@ -565,6 +1092,374 @@ components:
         status:
           type: string
           enum: [ready]
+    RepositoryKind:
+      type: string
+      enum: [local, ftp]
+    TLSMode:
+      type: string
+      enum: [none, plain]
+      description: >-
+        local repositories are "none"; FTP repositories are "plain" only. FTPS
+        ("explicit", "implicit") is not accepted.
+    Repository:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, tls_mode, has_secret, plaintext_credentials, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        kind:
+          $ref: '#/components/schemas/RepositoryKind'
+        tls_mode:
+          $ref: '#/components/schemas/TLSMode'
+        local:
+          type: object
+          additionalProperties: false
+          required: [root]
+          properties:
+            root:
+              type: string
+        ftp:
+          type: object
+          additionalProperties: false
+          required: [host, port, base_path, username]
+          properties:
+            host:
+              type: string
+            port:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            base_path:
+              type: string
+            username:
+              type: string
+        has_secret:
+          type: boolean
+          description: A sealed secret is stored; the value is never returned.
+        plaintext_credentials:
+          type: boolean
+          description: True for plain FTP, whose credentials cross the network unencrypted.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RepositoryWrite:
+      type: object
+      additionalProperties: false
+      required: [name, kind, tls_mode]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        kind:
+          $ref: '#/components/schemas/RepositoryKind'
+        tls_mode:
+          allOf:
+            - $ref: '#/components/schemas/TLSMode'
+          description: >-
+            Must match the kind: "none" for local, "plain" for FTP. An FTP
+            repository that omits it, or sends "explicit"/"implicit", is 422.
+        root:
+          type: string
+          description: Required for local repositories; must be an absolute path.
+        ftp:
+          type: object
+          additionalProperties: false
+          required: [host, port, base_path, username]
+          properties:
+            host:
+              type: string
+              minLength: 1
+            port:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            base_path:
+              type: string
+              pattern: '^(/[^/]+)*$'
+            username:
+              type: string
+              minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          description: >-
+            Required when creating an FTP repository. On update, omitted keeps the
+            stored secret and supplied replaces it in place.
+    RepositoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Repository'
+        next_before:
+          type: string
+          nullable: true
+    Source:
+      type: object
+      additionalProperties: false
+      required: [id, name, socket, datadir, username, has_secret, server_uuid, server_version, last_preflight, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        socket:
+          type: string
+        datadir:
+          type: string
+        username:
+          type: string
+        has_secret:
+          type: boolean
+        server_uuid:
+          type: string
+          nullable: true
+        server_version:
+          type: string
+          nullable: true
+        last_preflight:
+          allOf:
+            - $ref: '#/components/schemas/PreflightRecord'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SourceWrite:
+      type: object
+      additionalProperties: false
+      required: [name, socket, datadir, username]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        socket:
+          type: string
+          minLength: 1
+        datadir:
+          type: string
+          minLength: 1
+        username:
+          type: string
+          minLength: 1
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          description: Required when creating; omitted on update keeps the stored secret.
+    SourcePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        next_before:
+          type: string
+          nullable: true
+    PreflightWarning:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+    PreflightRecord:
+      type: object
+      additionalProperties: false
+      required: [ok, checks, warnings]
+      properties:
+        ok:
+          type: boolean
+        checks:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreflightWarning'
+    PreflightFailure:
+      type: object
+      additionalProperties: false
+      required: [check, code, message]
+      properties:
+        check:
+          type: string
+          minLength: 1
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        missing:
+          type: array
+          items:
+            type: string
+    PreflightResult:
+      type: object
+      additionalProperties: false
+      required: [ok, checks, warnings]
+      properties:
+        ok:
+          type: boolean
+        checks:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreflightWarning'
+        error:
+          $ref: '#/components/schemas/PreflightFailure'
+    ProbeResult:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, reply_code]
+          properties:
+            code:
+              type: string
+              minLength: 1
+            reply_code:
+              type: integer
+              minimum: 0
+    Policy:
+      type: object
+      additionalProperties: false
+      required: [id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        source_id:
+          type: string
+        local_repository_id:
+          type: string
+        replica_repository_id:
+          type: string
+          nullable: true
+        full_cron:
+          type: string
+        incremental_cron:
+          type: string
+        timezone:
+          type: string
+        max_chain_length:
+          type: integer
+          minimum: 1
+        parallel:
+          type: integer
+          minimum: 1
+        throttle:
+          type: integer
+          minimum: 0
+        zstd_level:
+          type: integer
+          minimum: 1
+          maximum: 22
+        page_tracking:
+          type: boolean
+        enabled:
+          type: boolean
+        last_preflight:
+          allOf:
+            - $ref: '#/components/schemas/PreflightRecord'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PolicyWrite:
+      type: object
+      additionalProperties: false
+      required: [name, source_id, local_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        source_id:
+          type: string
+        local_repository_id:
+          type: string
+        replica_repository_id:
+          type: string
+          nullable: true
+        full_cron:
+          type: string
+          description: Standard 5-field cron expression, validated with cron.ParseStandard.
+        incremental_cron:
+          type: string
+        timezone:
+          type: string
+          description: IANA time zone name.
+        max_chain_length:
+          type: integer
+          minimum: 1
+        parallel:
+          type: integer
+          minimum: 1
+        throttle:
+          type: integer
+          minimum: 0
+        zstd_level:
+          type: integer
+          minimum: 1
+          maximum: 22
+        page_tracking:
+          type: boolean
+        enabled:
+          type: boolean
+    PolicyPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Policy'
+        next_before:
+          type: string
+          nullable: true
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -577,9 +1472,11 @@ components:
       additionalProperties: false
       required: [code, message, request_id]
       properties:
+        preflight:
+          $ref: '#/components/schemas/PreflightResult'
         code:
           type: string
-          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed]
+          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed, preflight_failed]
         message:
           type: string
           minLength: 1

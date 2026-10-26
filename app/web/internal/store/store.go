@@ -208,7 +208,14 @@ func (s *Store) Ready(ctx context.Context) error {
 
 // withTx runs fn inside one BEGIN IMMEDIATE transaction. A non-nil error rolls
 // the mutation and any success audit inserted by fn back together.
-func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (retErr error) {
+func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) error {
+	return s.withTxDB(ctx, func(queries *storesql.Queries, _ *sql.Tx) error { return fn(queries) })
+}
+
+// withTxDB is withTx for a caller that must also run one statement the Web
+// schema does not own, such as an existence count over a table migrated by the
+// physical or replication package. Anything else belongs in sqlc.
+func (s *Store) withTxDB(ctx context.Context, fn func(*storesql.Queries, *sql.Tx) error) (retErr error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -220,7 +227,7 @@ func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (r
 			}
 		}
 	}()
-	if err = fn(storesql.New(tx)); err != nil {
+	if err = fn(storesql.New(tx), tx); err != nil {
 		return err
 	}
 	return tx.Commit()

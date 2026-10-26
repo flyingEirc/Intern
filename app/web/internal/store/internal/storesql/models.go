@@ -30,6 +30,37 @@ type Instance struct {
 	CreatedAt string
 }
 
+type Policy struct {
+	ID                  string
+	Name                string
+	SourceID            string
+	LocalRepositoryID   string
+	ReplicaRepositoryID sql.NullString
+	FullCron            string
+	IncrementalCron     string
+	Timezone            string
+	MaxChainLength      int64
+	Parallel            int64
+	Throttle            int64
+	ZstdLevel           int64
+	PageTracking        int64
+	Enabled             int64
+	LastPreflightJson   sql.NullString
+	CreatedAt           string
+	UpdatedAt           string
+}
+
+type Repository struct {
+	ID               string
+	Name             string
+	Kind             string
+	ConfigJson       string
+	SecretCiphertext []byte
+	TlsMode          string
+	CreatedAt        string
+	UpdatedAt        string
+}
+
 type Session struct {
 	Token  string
 	Data   []byte
@@ -39,6 +70,20 @@ type Session struct {
 type SessionTombstone struct {
 	Token  string
 	Expiry float64
+}
+
+type Source struct {
+	ID                string
+	Name              string
+	Socket            string
+	Datadir           string
+	Username          string
+	SecretCiphertext  []byte
+	ServerUuid        sql.NullString
+	ServerVersion     sql.NullString
+	LastPreflightJson sql.NullString
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 type User struct {

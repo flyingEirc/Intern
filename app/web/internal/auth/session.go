@@ -80,19 +80,31 @@ func (s *Service) StartCleanup(ctx context.Context, interval time.Duration, logg
 }
 
 const (
-	SessionSelf = "session:self"
-	UsersManage = "users:manage"
-	AuditRead   = "audit:read"
+	SessionSelf        = "session:self"
+	UsersManage        = "users:manage"
+	AuditRead          = "audit:read"
+	RepositoriesManage = "repositories:manage"
+	SourcesManage      = "sources:manage"
+	PoliciesManage     = "policies:manage"
+	ResourcesRead      = "resources:read"
 )
 
+// Permissions is the frozen Stage C matrix. Administrator is a superset for the
+// source and policy resources: both roles may manage them. Only an administrator
+// may write repositories, matching the architectural role split (operator owns
+// sources and policies; admin owns repositories and restore operations).
+// Viewer is read-only and anonymous holds nothing.
 func Permissions(role string) []string {
-	if role == "admin" {
-		return []string{SessionSelf, UsersManage, AuditRead}
+	switch role {
+	case "admin":
+		return []string{SessionSelf, UsersManage, AuditRead, RepositoriesManage, SourcesManage, PoliciesManage, ResourcesRead}
+	case "operator":
+		return []string{SessionSelf, SourcesManage, PoliciesManage, ResourcesRead}
+	case "viewer":
+		return []string{SessionSelf, ResourcesRead}
+	default:
+		return []string{}
 	}
-	if role == "operator" || role == "viewer" {
-		return []string{SessionSelf}
-	}
-	return []string{}
 }
 
 func HasPermission(role, permission string) bool {

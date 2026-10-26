@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,10 @@ import (
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/credential"
 )
 
 const (
@@ -27,15 +31,37 @@ const (
 type authFixture struct {
 	database *store.Store
 	dir      string
+	keys     string
+	keyFile  string
 	service  *auth.Service
 	engine   *gin.Engine
 	client   *contractClient
+	sealer   *credential.Sealer
 	logs     bytes.Buffer
 }
 
+// newAuthFixture serves with a real KEK so source and FTP repository writes can
+// seal a secret. The physical preflight inputs stay absent, which is the
+// deployment-independent default: those endpoints answer 503.
 func newAuthFixture(t *testing.T) *authFixture {
 	t.Helper()
-	fixture := &authFixture{dir: filepath.Join(t.TempDir(), "metadata")}
+	fixture := newUnconfiguredAuthFixture(t)
+	settings := fixture.resourceSettings(t)
+	fixture.sealer = settings.Sealer
+	engine, err := NewEngineWithResources(fixture.database, slog.New(slog.NewJSONHandler(&fixture.logs, nil)), nil, fixture.service,
+		&resources.Service{Store: fixture.database, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.engine = engine
+	fixture.client = newContractClient(t, Handler(engine))
+	return fixture
+}
+
+// newUnconfiguredAuthFixture serves with no KEK and no preflight settings.
+func newUnconfiguredAuthFixture(t *testing.T) *authFixture {
+	t.Helper()
+	fixture := &authFixture{dir: filepath.Join(t.TempDir(), "metadata"), keys: t.TempDir()}
 	database, err := store.Open(t.Context(), fixture.dir)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +81,22 @@ func newAuthFixture(t *testing.T) *authFixture {
 	stop := fixture.service.StartCleanup(t.Context(), time.Hour, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	t.Cleanup(stop)
 	return fixture
+}
+
+// resourceSettings generates a KEK for this fixture and returns settings that
+// seal secrets but cannot run the physical preflight.
+func (f *authFixture) resourceSettings(t *testing.T) resources.Settings {
+	t.Helper()
+	keyFile := filepath.Join(f.keys, "kek.json")
+	if err := artifact.GenerateKey(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := credential.Open(keyFile, f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.keyFile = keyFile
+	return resources.Settings{Sealer: sealer, KeyFile: keyFile, MetadataDir: f.dir}
 }
 
 func (f *authFixture) seed(t *testing.T, username, role string) store.User {
@@ -153,7 +195,7 @@ func TestSessionTokenRenewalLogoutAndCurrentPermissions(t *testing.T) {
 	cookie := f.login(t, "ADMIN", testPassword)
 	response := f.request(t, "GET", "/api/v1/auth/session", "", cookie, 200)
 	current := decodeResponse[sessionResponse](t, response)
-	if current.User.ID != user.ID || len(current.Permissions) != 3 || strings.Contains(response.Body.String(), "password_hash") {
+	if current.User.ID != user.ID || !reflect.DeepEqual(current.Permissions, auth.Permissions("admin")) || strings.Contains(response.Body.String(), "password_hash") {
 		t.Fatal("invalid session response")
 	}
 	body, err := json.Marshal(loginRequest{Username: "admin", Password: testPassword})

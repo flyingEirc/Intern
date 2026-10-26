@@ -105,6 +105,13 @@ func KeyID(path string) (string, error) {
 	return fmt.Sprintf("%08x", h.KeysetInfo().PrimaryKeyId), nil
 }
 
+// AEAD loads the KEK at path and returns its authenticated-encryption primitive.
+// Callers that bind ciphertext to a specific row and field supply that context
+// as associated data themselves; this primitive adds none of its own.
+func AEAD(path string) (tink.AEAD, error) {
+	return masterKey(path)
+}
+
 // ValidateKeyLocation also works before the backup/state directories have been created.
 func ValidateKeyLocation(key string, directories ...string) error {
 	if key == "" {

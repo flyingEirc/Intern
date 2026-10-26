@@ -204,6 +204,28 @@ func TestOperationSecurityAndExplicitErrors(t *testing.T) {
 		"PATCH /api/v1/users/{id}":           {"401", "403", "409", "503"},
 		"DELETE /api/v1/users/{id}/sessions": {"401", "403"},
 		"GET /api/v1/audit-logs":             {"401", "403"},
+
+		"GET /api/v1/repositories":             {"400", "401", "403"},
+		"POST /api/v1/repositories":            {"400", "401", "403", "409", "503"},
+		"GET /api/v1/repositories/{id}":        {"401", "403", "404"},
+		"PUT /api/v1/repositories/{id}":        {"400", "401", "403", "404", "409", "503"},
+		"DELETE /api/v1/repositories/{id}":     {"401", "403", "404", "409"},
+		"POST /api/v1/repositories/{id}/probe": {"401", "403", "404", "503"},
+
+		"GET /api/v1/sources":                 {"400", "401", "403"},
+		"POST /api/v1/sources":                {"400", "401", "403", "409", "503"},
+		"GET /api/v1/sources/{id}":            {"401", "403", "404"},
+		"PUT /api/v1/sources/{id}":            {"400", "401", "403", "404", "409", "503"},
+		"DELETE /api/v1/sources/{id}":         {"401", "403", "404", "409"},
+		"POST /api/v1/sources/{id}/preflight": {"400", "401", "403", "404", "503"},
+
+		"GET /api/v1/policies":               {"400", "401", "403"},
+		"POST /api/v1/policies":              {"400", "401", "403", "404", "409", "503"},
+		"GET /api/v1/policies/{id}":          {"401", "403", "404"},
+		"PUT /api/v1/policies/{id}":          {"400", "401", "403", "404", "409", "503"},
+		"DELETE /api/v1/policies/{id}":       {"401", "403", "404"},
+		"POST /api/v1/policies/{id}/enable":  {"401", "403", "404", "409", "503"},
+		"POST /api/v1/policies/{id}/disable": {"401", "403", "404"},
 	}
 	retryAfter := map[string][]string{
 		"POST /api/v1/auth/login":   {"429", "503"},

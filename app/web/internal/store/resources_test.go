@@ -1,0 +1,329 @@
+package store
+
+import (
+	"database/sql"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/credential"
+)
+
+func testSealer(t *testing.T) *credential.Sealer {
+	t.Helper()
+	key := filepath.Join(t.TempDir(), "kek.json")
+	if err := artifact.GenerateKey(key); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := credential.Open(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sealer
+}
+
+// createTestSource seals with a fresh KEK, so it is only for rows whose secret is
+// never opened again in the same test.
+func createTestSource(t *testing.T, s *Store, name, secret string) Source {
+	t.Helper()
+	return createTestSourceWith(t, s, testSealer(t), name, secret)
+}
+
+func createTestSourceWith(t *testing.T, s *Store, sealer SecretSealer, name, secret string) Source {
+	t.Helper()
+	source, err := s.CreateSource(t.Context(), SourceInput{
+		Name: name, Socket: "/run/mysqld/mysqld.sock", Datadir: "/var/lib/mysql",
+		Username: "backup", Secret: []byte(secret),
+	}, sealer, SystemAudit("sources.create", AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
+// TestStoredCiphertextIsBoundToItsRowAndField proves the AAD contract against
+// the real database: swapping ciphertext between rows or fields is refused, and a
+// different KEK cannot open the value.
+func TestStoredCiphertextIsBoundToItsRowAndField(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "metadata")
+	s := openTestStore(t, dir)
+	sealer := testSealer(t)
+	first := createTestSourceWith(t, s, sealer, "first", "{{SECRET_first_source}}")
+	second := createTestSourceWith(t, s, sealer, "second", "{{SECRET_second_source}}")
+	firstCiphertext := rawCiphertext(t, dir, "sources", first.ID)
+	secondCiphertext := rawCiphertext(t, dir, "sources", second.ID)
+	assertDistinctCiphertext(t, firstCiphertext, secondCiphertext)
+	opened, err := s.SourceSecret(t.Context(), first.ID, sealer)
+	if err != nil || string(opened) != "{{SECRET_first_source}}" {
+		t.Fatalf("first secret = %q %v", opened, err)
+	}
+	assertRowSwapRefused(t, s, sealer, dir, second.ID, firstCiphertext, secondCiphertext)
+	repository := createTestFTPRepository(t, s, sealer)
+	assertFieldSwapRefused(t, s, sealer, dir, second.ID, rawCiphertext(t, dir, "repositories", repository.ID))
+	assertWrongKEKRefused(t, s, first.ID, repository.ID)
+	if opened, err = s.RepositorySecret(t.Context(), repository.ID, sealer); err != nil || string(opened) != "{{SECRET_ftp_repository}}" {
+		t.Fatalf("repository secret = %q %v", opened, err)
+	}
+}
+
+func assertDistinctCiphertext(t *testing.T, first, second []byte) {
+	t.Helper()
+	if string(first) == string(second) {
+		t.Fatal("two rows share a ciphertext")
+	}
+	if strings.Contains(string(first), "{{SECRET_first_source}}") {
+		t.Fatal("stored ciphertext contains the plaintext")
+	}
+}
+
+func createTestFTPRepository(t *testing.T, s *Store, sealer SecretSealer) Repository {
+	t.Helper()
+	return mustRepository(t, s, sealer, RepositoryInput{
+		Name: "ftp", Kind: RepositoryFTP, TLSMode: TLSModePlain,
+		FTP:    &FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/b", Username: "u"},
+		Secret: []byte("{{SECRET_ftp_repository}}"),
+	})
+}
+
+// assertRowSwapRefused moves one row's ciphertext onto another row.
+func assertRowSwapRefused(t *testing.T, s *Store, sealer SecretSealer, dir, target string, foreign, original []byte) {
+	t.Helper()
+	writeCiphertext(t, dir, "sources", target, foreign)
+	if _, err := s.SourceSecret(t.Context(), target, sealer); err == nil {
+		t.Fatal("swapped ciphertext decrypted for another row")
+	}
+	writeCiphertext(t, dir, "sources", target, original)
+}
+
+// assertFieldSwapRefused moves a repository password onto a source row.
+func assertFieldSwapRefused(t *testing.T, s *Store, sealer SecretSealer, dir, target string, foreign []byte) {
+	t.Helper()
+	writeCiphertext(t, dir, "sources", target, foreign)
+	if _, err := s.SourceSecret(t.Context(), target, sealer); err == nil {
+		t.Fatal("a column-foreign ciphertext decrypted")
+	}
+}
+
+func assertWrongKEKRefused(t *testing.T, s *Store, sourceID, repositoryID string) {
+	t.Helper()
+	other := testSealer(t)
+	if _, err := s.SourceSecret(t.Context(), sourceID, other); err == nil {
+		t.Fatal("another KEK opened the stored secret")
+	}
+	if _, err := s.RepositorySecret(t.Context(), repositoryID, other); err == nil {
+		t.Fatal("another KEK opened the repository secret")
+	}
+}
+
+// TestSecretRotationReplacesCiphertextInPlace covers the rotation contract: a new
+// password yields new ciphertext for the same row and the old one no longer opens.
+func TestSecretRotationReplacesCiphertextInPlace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "metadata")
+	s := openTestStore(t, dir)
+	sealer := testSealer(t)
+	source := createTestSourceWith(t, s, sealer, "source", "{{SECRET_before_rotation}}")
+	before := string(rawCiphertext(t, dir, "sources", source.ID))
+	updated, err := s.UpdateSource(t.Context(), source.ID, SourceInput{
+		Name: source.Name, Socket: source.Socket, Datadir: source.Datadir,
+		Username: source.Username, Secret: []byte("{{SECRET_after_rotation}}"),
+	}, sealer, SystemAudit("sources.update", AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := string(rawCiphertext(t, dir, "sources", source.ID))
+	if before == after {
+		t.Fatal("rotation kept the old ciphertext")
+	}
+	opened, err := s.SourceSecret(t.Context(), updated.ID, sealer)
+	if err != nil || string(opened) != "{{SECRET_after_rotation}}" {
+		t.Fatalf("rotated secret = %q %v", opened, err)
+	}
+	// The AAD does not change with rotation, so the previous ciphertext remains a
+	// valid sealed value for this row in isolation. What rotation guarantees is
+	// that it is no longer stored: the row now holds the new value only.
+	// An update without a password keeps the stored ciphertext.
+	if _, err = s.UpdateSource(t.Context(), source.ID, SourceInput{
+		Name: "renamed", Socket: source.Socket, Datadir: source.Datadir, Username: source.Username,
+	}, sealer, SystemAudit("sources.update", AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	if string(rawCiphertext(t, dir, "sources", source.ID)) != after {
+		t.Fatal("an omitted password rewrote the ciphertext")
+	}
+}
+
+func TestResourceNamesAndKindsAreEnforcedBySchema(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "metadata")
+	s := openTestStore(t, dir)
+	sealer := testSealer(t)
+	root := filepath.Join(t.TempDir(), "repository")
+	local := RepositoryInput{Name: "local", Kind: RepositoryLocal, TLSMode: TLSModeNone, Root: root}
+	if _, err := s.CreateRepository(t.Context(), local, sealer, SystemAudit("repositories.create", AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateRepository(t.Context(), local, sealer, SystemAudit("repositories.create", AuditDetail{})); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate name = %v", err)
+	}
+	if _, err := s.CreateRepository(t.Context(), RepositoryInput{
+		Name: "local-plain", Kind: RepositoryLocal, TLSMode: TLSModePlain, Root: root,
+	}, sealer, SystemAudit("repositories.create", AuditDetail{})); err == nil {
+		t.Fatal("a local repository accepted a TLS mode")
+	}
+	if _, err := s.CreateRepository(t.Context(), RepositoryInput{
+		Name: "ftp-no-secret", Kind: RepositoryFTP, TLSMode: TLSModePlain,
+		FTP: &FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/b", Username: "u"},
+	}, sealer, SystemAudit("repositories.create", AuditDetail{})); err == nil {
+		t.Fatal("an FTP repository was created without a secret")
+	}
+	source := createTestSourceWith(t, s, sealer, "source", "{{SECRET_unique_source}}")
+	if _, err := s.CreateSource(t.Context(), SourceInput{
+		Name: "SOURCE", Socket: source.Socket, Datadir: source.Datadir, Username: source.Username, Secret: []byte("x"),
+	}, sealer, SystemAudit("sources.create", AuditDetail{})); !errors.Is(err, ErrConflict) {
+		t.Fatalf("case-insensitive duplicate = %v", err)
+	}
+}
+
+// policyFixture holds the rows one policy test needs plus the store under test.
+type policyFixture struct {
+	store  *Store
+	local  Repository
+	ftp    Repository
+	source Source
+}
+
+func newPolicyFixture(t *testing.T) policyFixture {
+	t.Helper()
+	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	sealer := testSealer(t)
+	return policyFixture{
+		store: s,
+		local: mustRepository(t, s, sealer, RepositoryInput{
+			Name: "local", Kind: RepositoryLocal, TLSMode: TLSModeNone, Root: filepath.Join(t.TempDir(), "repository"),
+		}),
+		ftp: mustRepository(t, s, sealer, RepositoryInput{
+			Name: "ftp", Kind: RepositoryFTP, TLSMode: TLSModePlain,
+			FTP: &FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/b", Username: "u"}, Secret: []byte("{{SECRET_ftp}}"),
+		}),
+		source: createTestSourceWith(t, s, sealer, "source", "{{SECRET_policy_source}}"),
+	}
+}
+
+func (f policyFixture) create(t *testing.T) Policy {
+	t.Helper()
+	policy, err := f.store.CreatePolicy(t.Context(), PolicyInput{
+		Name: "policy", SourceID: f.source.ID, LocalRepositoryID: f.local.ID, ReplicaRepositoryID: &f.ftp.ID,
+		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
+		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+	}, SystemAudit("policies.create", AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
+
+func TestPolicyReferencesBlockDeletion(t *testing.T) {
+	f := newPolicyFixture(t)
+	policy := f.create(t)
+	if policy.Enabled || policy.ReplicaRepositoryID == nil || *policy.ReplicaRepositoryID != f.ftp.ID {
+		t.Fatalf("policy = %+v", policy)
+	}
+	if err := f.store.DeleteRepository(t.Context(), f.local.ID, SystemAudit("repositories.delete", AuditDetail{})); !errors.Is(err, ErrReferenced) {
+		t.Fatalf("referenced repository delete = %v", err)
+	}
+	if err := f.store.DeleteSource(t.Context(), f.source.ID, SystemAudit("sources.delete", AuditDetail{})); !errors.Is(err, ErrReferenced) {
+		t.Fatalf("referenced source delete = %v", err)
+	}
+}
+
+func TestPolicyEnableRequiresASuccessfulPreflightRecord(t *testing.T) {
+	f := newPolicyFixture(t)
+	policy := f.create(t)
+	if _, err := f.store.EnablePolicy(t.Context(), policy.ID, true, nil, SystemAudit("policies.enable", AuditDetail{})); err == nil {
+		t.Fatal("enable without a preflight record succeeded")
+	}
+	failed := PreflightRecord{OK: false, Checks: []string{}, Warnings: []PreflightWarning{}}
+	if _, err := f.store.EnablePolicy(t.Context(), policy.ID, true, &failed, SystemAudit("policies.enable", AuditDetail{})); err == nil {
+		t.Fatal("enable with a failed preflight record succeeded")
+	}
+	record := PreflightRecord{OK: true, Checks: []string{"identity"}, Warnings: []PreflightWarning{}}
+	enabled, err := f.store.EnablePolicy(t.Context(), policy.ID, true, &record, SystemAudit("policies.enable", AuditDetail{}))
+	if err != nil || !enabled.Enabled || enabled.LastPreflight == nil {
+		t.Fatalf("enable = %+v %v", enabled, err)
+	}
+}
+
+func TestDeletedPolicyReleasesItsReferences(t *testing.T) {
+	f := newPolicyFixture(t)
+	policy := f.create(t)
+	if err := f.store.DeletePolicy(t.Context(), policy.ID, SystemAudit("policies.delete", AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.DeleteSource(t.Context(), f.source.ID, SystemAudit("sources.delete", AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{f.local.ID, f.ftp.ID} {
+		if err := f.store.DeleteRepository(t.Context(), id, SystemAudit("repositories.delete", AuditDetail{})); err != nil {
+			t.Fatalf("delete repository %s: %v", id, err)
+		}
+	}
+	if _, err := f.store.Repository(t.Context(), f.local.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted repository = %v", err)
+	}
+}
+
+func TestResourcePaginationIsBounded(t *testing.T) {
+	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	for _, name := range []string{"a", "b", "c"} {
+		createTestSource(t, s, name, "{{SECRET_"+name+"}}")
+	}
+	first, err := s.Sources(t.Context(), "", 2)
+	if err != nil || len(first) != 2 {
+		t.Fatalf("page = %d %v", len(first), err)
+	}
+	next, err := s.Sources(t.Context(), first[len(first)-1].ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].ID >= first[1].ID {
+		t.Fatalf("cursor page = %+v", next)
+	}
+}
+
+func mustRepository(t *testing.T, s *Store, sealer SecretSealer, in RepositoryInput) Repository {
+	t.Helper()
+	repository, err := s.CreateRepository(t.Context(), in, sealer, SystemAudit("repositories.create", AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func rawCiphertext(t *testing.T, dir, table, id string) []byte {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ciphertext []byte
+	query := `SELECT COALESCE(secret_ciphertext, X'') FROM ` + table + ` WHERE id = ?`
+	if err = db.QueryRowContext(t.Context(), query, id).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	return ciphertext
+}
+
+func writeCiphertext(t *testing.T, dir, table, id string, ciphertext []byte) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	query := `UPDATE ` + table + ` SET secret_ciphertext = ? WHERE id = ?`
+	if _, err = db.ExecContext(t.Context(), query, ciphertext, id); err != nil {
+		t.Fatal(err)
+	}
+}

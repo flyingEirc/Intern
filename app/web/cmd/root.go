@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/server"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/fsutil"
@@ -80,7 +81,12 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 	}
 	stopCleanup := authentication.StartCleanup(command.Context(), time.Minute, logger)
 	defer stopCleanup()
-	engine, err := server.NewEngine(database, logger, c.TrustedProxies, authentication)
+	settings, err := c.resourceSettings()
+	if err != nil {
+		return err
+	}
+	engine, err := server.NewEngineWithResources(database, logger, c.TrustedProxies, authentication,
+		&resources.Service{Store: database, Settings: settings})
 	if err != nil {
 		return err
 	}

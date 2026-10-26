@@ -30,6 +30,22 @@ var auditActions = map[string]string{
 	"POST /api/v1/users":                "users.create",
 	"PATCH /api/v1/users/:id":           "users.update",
 	"DELETE /api/v1/users/:id/sessions": "users.revoke_sessions",
+
+	"POST /api/v1/repositories":           "repositories.create",
+	"PUT /api/v1/repositories/:id":        "repositories.update",
+	"DELETE /api/v1/repositories/:id":     "repositories.delete",
+	"POST /api/v1/repositories/:id/probe": "repositories.probe",
+
+	"POST /api/v1/sources":               "sources.create",
+	"PUT /api/v1/sources/:id":            "sources.update",
+	"DELETE /api/v1/sources/:id":         "sources.delete",
+	"POST /api/v1/sources/:id/preflight": "sources.preflight",
+
+	"POST /api/v1/policies":             "policies.create",
+	"PUT /api/v1/policies/:id":          "policies.update",
+	"DELETE /api/v1/policies/:id":       "policies.delete",
+	"POST /api/v1/policies/:id/enable":  "policies.enable",
+	"POST /api/v1/policies/:id/disable": "policies.disable",
 }
 
 const auditContextKey = "intern.audit"
@@ -79,6 +95,21 @@ func auditData(c *gin.Context) *auditContext {
 	entry := &auditContext{}
 	c.Set(auditContextKey, entry)
 	return entry
+}
+
+// RecordOutcome writes one audit row with a caller-chosen result and then marks
+// the request as recorded. It is for operations that answer 2xx while reporting a
+// failed outcome in the body, such as a completed preflight whose checks failed:
+// the middleware would otherwise label that request "success". A write failure is
+// logged and does not change the response.
+func RecordOutcome(c *gin.Context, database *store.Store, logger *slog.Logger, result string, status int, action, resourceType, resourceID string, detail store.AuditDetail) {
+	entry := auditEntry(c)
+	entry.Action, entry.ResourceType, entry.ResourceID = action, resourceType, resourceID
+	entry.Detail, entry.Result = detail, result
+	code := int64(status)
+	entry.Status = &code
+	writeAudit(c.Request.Context(), database, logger, entry)
+	MarkAuditRecorded(c)
 }
 
 // MarkAuditRecorded tells Audit to skip its best-effort row because the handler

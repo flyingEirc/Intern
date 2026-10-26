@@ -18,6 +18,9 @@ type AuditDetail struct {
 	PasswordChanged bool   `json:"password_changed,omitzero"`
 	Method          string `json:"method,omitempty"`
 	Route           string `json:"route,omitempty"`
+	// PlaintextFTP records that the stored FTP credential is sent without TLS.
+	// It is a risk flag for display, never a credential.
+	PlaintextFTP bool `json:"plaintext_ftp,omitzero"`
 }
 
 type AuditLog struct {

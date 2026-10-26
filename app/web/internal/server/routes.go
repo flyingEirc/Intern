@@ -11,6 +11,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 )
 
 type Readiness interface {
@@ -21,7 +22,17 @@ type StatusResponse struct {
 	Status string `json:"status"`
 }
 
+// NewEngine serves every route with the deployment capabilities authentication
+// already carries. A deployment without a KEK or preflight settings still serves:
+// only the operations that need them answer 503.
 func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service) (*gin.Engine, error) {
+	return NewEngineWithResources(database, logger, trustedProxies, authentication,
+		&resources.Service{Store: authentication.Database})
+}
+
+// NewEngineWithResources is NewEngine with explicit preflight and credential
+// settings. Callers outside the server package supply them from configuration.
+func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service, service *resources.Service) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.HandleMethodNotAllowed = true
@@ -58,5 +69,6 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string,
 		render.JSON(c, http.StatusOK, StatusResponse{Status: "ready"})
 	})
 	registerAuth(engine, authentication, logger)
+	registerResources(engine, authentication.Database, service, middleware.Authorization{Service: authentication}, logger)
 	return engine, nil
 }

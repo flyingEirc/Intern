@@ -274,7 +274,7 @@ func TestOpenCurrentRequiresExactMigrationsWithoutOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBootstrapAudit(t, database, user.ID)
-	if _, err = database.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 3"); err != nil {
+	if _, err = database.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 4"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = OpenCurrent(t.Context(), dir); err == nil {

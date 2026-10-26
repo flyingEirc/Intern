@@ -73,3 +73,110 @@ INSERT INTO audit_logs (
 
 -- name: ListAuditLogs :many
 SELECT * FROM audit_logs WHERE id < ? ORDER BY id DESC LIMIT ?;
+
+-- name: CreateRepository :one
+INSERT INTO repositories (id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
+
+-- name: GetRepository :one
+SELECT * FROM repositories WHERE id = ?;
+
+-- name: ListRepositories :many
+SELECT * FROM repositories WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT))
+ORDER BY id DESC LIMIT sqlc.arg(row_limit);
+
+-- name: UpdateRepository :one
+-- kind and tls_mode are immutable; the secret is replaced only when supplied.
+UPDATE repositories SET
+    name = sqlc.arg(name),
+    config_json = sqlc.arg(config_json),
+    secret_ciphertext = COALESCE(sqlc.narg(secret_ciphertext), secret_ciphertext),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: DeleteRepository :exec
+DELETE FROM repositories WHERE id = ?;
+
+-- name: CountPoliciesByRepository :one
+SELECT COUNT(*) FROM policies WHERE local_repository_id = ?1 OR replica_repository_id = ?1;
+
+-- name: CreateSource :one
+INSERT INTO sources (id, name, socket, datadir, username, secret_ciphertext, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
+
+-- name: GetSource :one
+SELECT * FROM sources WHERE id = ?;
+
+-- name: ListSources :many
+SELECT * FROM sources WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT))
+ORDER BY id DESC LIMIT sqlc.arg(row_limit);
+
+-- name: UpdateSource :one
+-- The sealed password is replaced only when supplied.
+UPDATE sources SET
+    name = sqlc.arg(name),
+    socket = sqlc.arg(socket),
+    datadir = sqlc.arg(datadir),
+    username = sqlc.arg(username),
+    secret_ciphertext = COALESCE(sqlc.narg(secret_ciphertext), secret_ciphertext),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: RecordSourcePreflight :one
+UPDATE sources SET
+    server_uuid = sqlc.arg(server_uuid),
+    server_version = sqlc.arg(server_version),
+    last_preflight_json = sqlc.arg(last_preflight_json),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: DeleteSource :exec
+DELETE FROM sources WHERE id = ?;
+
+-- name: CountPoliciesBySource :one
+SELECT COUNT(*) FROM policies WHERE source_id = ?;
+
+-- name: CreatePolicy :one
+INSERT INTO policies (
+    id, name, source_id, local_repository_id, replica_repository_id, full_cron,
+    incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level,
+    page_tracking, enabled, last_preflight_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
+
+-- name: GetPolicy :one
+SELECT * FROM policies WHERE id = ?;
+
+-- name: ListPolicies :many
+SELECT * FROM policies WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT))
+ORDER BY id DESC LIMIT sqlc.arg(row_limit);
+
+-- name: UpdatePolicy :one
+-- PUT replaces every mutable field, so the replica repository can be cleared.
+UPDATE policies SET
+    name = sqlc.arg(name),
+    source_id = sqlc.arg(source_id),
+    local_repository_id = sqlc.arg(local_repository_id),
+    replica_repository_id = sqlc.narg(replica_repository_id),
+    full_cron = sqlc.arg(full_cron),
+    incremental_cron = sqlc.arg(incremental_cron),
+    timezone = sqlc.arg(timezone),
+    max_chain_length = sqlc.arg(max_chain_length),
+    parallel = sqlc.arg(parallel),
+    throttle = sqlc.arg(throttle),
+    zstd_level = sqlc.arg(zstd_level),
+    page_tracking = sqlc.arg(page_tracking),
+    enabled = sqlc.arg(enabled),
+    last_preflight_json = sqlc.narg(last_preflight_json),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: SetPolicyEnabled :one
+-- Enable persists the preflight that authorised it in the same statement.
+UPDATE policies SET
+    enabled = sqlc.arg(enabled),
+    last_preflight_json = COALESCE(sqlc.narg(last_preflight_json), last_preflight_json),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: DeletePolicy :exec
+DELETE FROM policies WHERE id = ?;

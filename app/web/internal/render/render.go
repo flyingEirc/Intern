@@ -27,12 +27,39 @@ const (
 	RateLimited          = "rate_limited"
 	Conflict             = "conflict"
 	ValidationFailed     = "validation_failed"
+	PreflightFailed      = "preflight_failed"
 )
 
 type ErrorDetail struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"request_id"`
+	Code      string     `json:"code"`
+	Message   string     `json:"message"`
+	RequestID string     `json:"request_id"`
+	Preflight *Preflight `json:"preflight,omitempty"`
+}
+
+// Preflight is the structured, secret-safe outcome of one preflight run. It is
+// both the 200 body of a standalone preflight and the optional detail of a
+// preflight_failed error.
+type Preflight struct {
+	OK       bool               `json:"ok"`
+	Checks   []string           `json:"checks"`
+	Warnings []PreflightWarning `json:"warnings"`
+	Error    *PreflightError    `json:"error,omitempty"`
+}
+
+// PreflightWarning is a stable code with an actionable explanation.
+type PreflightWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// PreflightError names the failed check. Missing holds known privilege names
+// only; it never carries SQL, paths, replies or credentials.
+type PreflightError struct {
+	Check   string   `json:"check"`
+	Code    string   `json:"code"`
+	Message string   `json:"message"`
+	Missing []string `json:"missing,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -49,10 +76,18 @@ func JSON(c *gin.Context, status int, value any) {
 }
 
 func Error(c *gin.Context, status int, code, message string) {
+	errorWith(c, status, ErrorDetail{Code: code, Message: message})
+}
+
+// ErrorPreflight renders a preflight_failed error with its structured outcome.
+func ErrorPreflight(c *gin.Context, status int, message string, preflight Preflight) {
+	errorWith(c, status, ErrorDetail{Code: PreflightFailed, Message: message, Preflight: &preflight})
+}
+
+func errorWith(c *gin.Context, status int, detail ErrorDetail) {
 	c.Abort()
-	JSON(c, status, ErrorResponse{Error: ErrorDetail{
-		Code: code, Message: message, RequestID: c.Writer.Header().Get(RequestIDHeader),
-	}})
+	detail.RequestID = c.Writer.Header().Get(RequestIDHeader)
+	JSON(c, status, ErrorResponse{Error: detail})
 }
 
 // HTTPError preserves the same wire format for errors outside the Gin engine.

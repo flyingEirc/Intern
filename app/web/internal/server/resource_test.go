@@ -1,0 +1,482 @@
+package server
+
+import (
+	"database/sql"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/flyingEirc/Intern/app/web/internal/render"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
+	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/credential"
+)
+
+// repositoryBody and sourceBody are built per call because the local root must
+// be a fresh absolute directory.
+func localRepository(name, root string) string {
+	return `{"name":"` + name + `","kind":"local","tls_mode":"none","root":"` + root + `"}`
+}
+
+func ftpRepository(name, password string) string {
+	return `{"name":"` + name + `","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,` +
+		`"base_path":"/backups","username":"backup"},"password":"` + password + `"}`
+}
+
+func sourceBody(name string) string {
+	return `{"name":"` + name + `","socket":"/run/mysqld/mysqld.sock","datadir":"/var/lib/mysql",` +
+		`"username":"backup","password":"` + matrixSecret + `"}`
+}
+
+func policyBody(name, sourceID, repositoryID string) string {
+	return `{"name":"` + name + `","source_id":"` + sourceID + `","local_repository_id":"` + repositoryID + `",` +
+		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","max_chain_length":3,` +
+		`"parallel":2,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`
+}
+
+func newRepositoryDir(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repository")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// assertNoSecrets scans the response, the audit table and the logs for the
+// supplied secret markers and for the stored ciphertext.
+func assertNoSecrets(t *testing.T, f *authFixture, response string, secrets ...string) {
+	t.Helper()
+	stored := rawResourceSecrets(t, f.dir)
+	all := response + rawAudit(t, f.dir) + f.logs.String() + stored
+	for _, secret := range secrets {
+		if secret != "" && strings.Contains(all, secret) {
+			t.Fatalf("secret %q leaked", secret)
+		}
+	}
+}
+
+// rawResourceSecrets reads every repository and source text column, so a leaked
+// value cannot hide in a column the API does not return.
+func rawResourceSecrets(t *testing.T, dir string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var text string
+	query := `SELECT COALESCE(group_concat(name || kind || config_json || hex(secret_ciphertext) || tls_mode, ''), '') FROM repositories`
+	if err = db.QueryRowContext(t.Context(), query).Scan(&text); err != nil {
+		t.Fatal(err)
+	}
+	var sources string
+	query = `SELECT COALESCE(group_concat(name || socket || datadir || username || hex(secret_ciphertext), ''), '') FROM sources`
+	if err = db.QueryRowContext(t.Context(), query).Scan(&sources); err != nil {
+		t.Fatal(err)
+	}
+	return text + sources
+}
+
+func TestRepositoryCRUDIsWriteOnly(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	root := newRepositoryDir(t)
+
+	local := f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", root), cookie, http.StatusCreated)
+	created := decodeResponse[store.Repository](t, local)
+	assertLocalRepository(t, created, root)
+	ftp := f.request(t, "POST", "/api/v1/repositories", ftpRepository("ftp-a", "{{SECRET_ftp_a_password}}"), cookie, http.StatusCreated)
+	ftpCreated := decodeResponse[store.Repository](t, ftp)
+	assertFTPRepository(t, ftpCreated)
+	assertNoSecrets(t, f, local.Body.String()+ftp.Body.String(), "{{SECRET_ftp_a_password}}")
+
+	read := f.request(t, "GET", "/api/v1/repositories/"+ftpCreated.ID, "", cookie, http.StatusOK)
+	if strings.Contains(read.Body.String(), "secret_ciphertext") || !strings.Contains(read.Body.String(), `"has_secret":true`) {
+		t.Fatalf("read body = %s", read.Body)
+	}
+	assertFTPRotation(t, f, cookie, ftpCreated.ID)
+	f.request(t, "DELETE", "/api/v1/repositories/"+ftpCreated.ID, "", cookie, http.StatusNoContent)
+	f.request(t, "GET", "/api/v1/repositories/"+ftpCreated.ID, "", cookie, http.StatusNotFound)
+	expectAuditCount(t, f.dir, "repositories.create", "success", 2)
+	expectAuditCount(t, f.dir, "repositories.update", "success", 2)
+	expectAuditCount(t, f.dir, "repositories.delete", "success", 1)
+}
+
+func assertLocalRepository(t *testing.T, repository store.Repository, root string) {
+	t.Helper()
+	if repository.Kind != store.RepositoryLocal || repository.TLSMode != store.TLSModeNone ||
+		repository.HasSecret || repository.PlaintextCredentials {
+		t.Fatalf("local repository = %+v", repository)
+	}
+	if repository.Local == nil || repository.Local.Root != root || repository.FTP != nil {
+		t.Fatalf("local repository config = %+v", repository.Local)
+	}
+}
+
+func assertFTPRepository(t *testing.T, repository store.Repository) {
+	t.Helper()
+	if repository.Kind != store.RepositoryFTP || repository.TLSMode != store.TLSModePlain ||
+		!repository.HasSecret || !repository.PlaintextCredentials {
+		t.Fatalf("ftp repository = %+v", repository)
+	}
+	if repository.FTP == nil || repository.FTP.Port != 21 || repository.Local != nil {
+		t.Fatalf("ftp repository config = %+v", repository.FTP)
+	}
+}
+
+// assertFTPRotation proves a supplied password replaces the ciphertext in place
+// and an omitted one keeps it.
+func assertFTPRotation(t *testing.T, f *authFixture, cookie *http.Cookie, id string) {
+	t.Helper()
+	rotation := `{"name":"ftp-a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,` +
+		`"base_path":"/backups","username":"backup"},"password":"{{SECRET_ftp_b_password}}"}`
+	f.request(t, "PUT", "/api/v1/repositories/"+id, rotation, cookie, http.StatusOK)
+	first := storedCiphertext(t, f.dir, "repositories", id)
+	if first == "" {
+		t.Fatal("rotation removed the ciphertext")
+	}
+	opened, err := f.sealer.Unseal("repositories", id, "secret_ciphertext", []byte(first))
+	if err != nil || string(opened) != "{{SECRET_ftp_b_password}}" {
+		t.Fatalf("rotated secret = %q %v", opened, err)
+	}
+	second := f.request(t, "PUT", "/api/v1/repositories/"+id,
+		`{"name":"ftp-a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/backups","username":"backup"}}`,
+		cookie, http.StatusOK)
+	if storedCiphertext(t, f.dir, "repositories", id) != first {
+		t.Fatal("an omitted password replaced the stored secret")
+	}
+	assertNoSecrets(t, f, second.Body.String(), "{{SECRET_ftp_b_password}}")
+}
+
+// requestRejected asserts that a request is refused. The kin-openapi round trip
+// still validates the body whenever the schema accepts it; when the schema itself
+// rejects the body, the request is marked invalid for the run and only the
+// response is validated. Either way the observed status must match.
+func (f *authFixture) requestRejected(t *testing.T, method, path, body string, cookie *http.Cookie, status int) *httptest.ResponseRecorder {
+	t.Helper()
+	response, err := f.client.roundTripRequest(apiRequest(method, path, body, cookie), false)
+	if err != nil {
+		if !strings.Contains(err.Error(), "request contract") {
+			t.Fatal(err)
+		}
+		response, err = f.client.roundTripRequest(apiRequest(method, path, body, cookie), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if response.Code != status {
+		t.Fatalf("status=%d, want=%d; %s", response.Code, status, response.Body)
+	}
+	return response
+}
+
+// storedCiphertext returns the stored ciphertext of a sealed column.
+func storedCiphertext(t *testing.T, dir, table, id string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var ciphertext []byte
+	query := `SELECT secret_ciphertext FROM ` + table + ` WHERE id = ?`
+	if err = db.QueryRowContext(t.Context(), query, id).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	return string(ciphertext)
+}
+
+func TestRepositoryValidationRejectsUnsafeAndFTPSShapes(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	root := newRepositoryDir(t)
+	// A tls_mode that does not match the kind is the frozen 422 case: an FTP
+	// repository must send "plain" explicitly, and omitted or FTPS values are
+	// refused rather than downgraded.
+	for name, body := range map[string]string{
+		"omitted tls_mode": `{"name":"a","kind":"ftp","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"explicit ftps":    `{"name":"a","kind":"ftp","tls_mode":"explicit","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"implicit ftps":    `{"name":"a","kind":"ftp","tls_mode":"implicit","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"local with plain": `{"name":"a","kind":"local","tls_mode":"plain","root":"` + root + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := f.requestRejected(t, "POST", "/api/v1/repositories", body, cookie, http.StatusUnprocessableEntity)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	for name, body := range map[string]string{
+		"relative root":      `{"name":"a","kind":"local","tls_mode":"none","root":"relative/path"}`,
+		"empty name":         `{"name":"","kind":"local","tls_mode":"none","root":"` + root + `"}`,
+		"long name":          `{"name":"` + strings.Repeat("n", 65) + `","kind":"local","tls_mode":"none","root":"` + root + `"}`,
+		"unknown kind":       `{"name":"a","kind":"s3","tls_mode":"none","root":"` + root + `"}`,
+		"ftp without secret": `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"}}`,
+		"ftp relative path":  `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"b","username":"u"},"password":"x"}`,
+		"ftp bad port":       `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":0,"base_path":"/b","username":"u"},"password":"x"}`,
+		"local with ftp":     `{"name":"a","kind":"local","tls_mode":"none","root":"` + root + `","ftp":{"host":"h","port":21,"base_path":"/b","username":"u"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// These bodies are out of the OpenAPI schema as well as out of the
+			// handler's rules; both layers must reject them.
+			response := f.requestRejected(t, "POST", "/api/v1/repositories", body, cookie, http.StatusBadRequest)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	expectAuditCount(t, f.dir, "repositories.create", "success", 0)
+}
+
+// TestLocalRepositoryRootMustNotContainKEK covers the repository-time location
+// check: startup only rejects a KEK inside metadata_dir and work_root, so a new
+// local repository root is checked when it is created.
+func TestLocalRepositoryRootMustNotContainKEK(t *testing.T) {
+	f := newUnconfiguredAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	container := t.TempDir()
+	keyFile := filepath.Join(container, "kek.json")
+	if err := artifact.GenerateKey(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := credential.Open(keyFile, f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
+		&resources.Service{Store: f.database, Settings: resources.Settings{
+			Sealer: sealer, KeyFile: keyFile, MetadataDir: f.dir,
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.client = newContractClient(t, Handler(engine))
+	cookie := f.login(t, "admin", testPassword)
+	response := f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", container), cookie, http.StatusBadRequest)
+	assertSingleError(t, response, render.ValidationFailed)
+	outside := newRepositoryDir(t)
+	if outside == container {
+		t.Fatal("test roots coincide")
+	}
+	f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", outside), cookie, http.StatusCreated)
+}
+
+// TestDeleteRefusesReferencedRows covers both reference kinds: the rows the
+// policy uses cannot be deleted, and unreferenced rows can.
+func TestDeleteRefusesReferencedRows(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	seeded := f.seedResources(t)
+	for _, target := range []string{
+		"/api/v1/repositories/" + seeded.policyRepository,
+		"/api/v1/sources/" + seeded.policySource,
+	} {
+		response := f.request(t, "DELETE", target, "", cookie, http.StatusConflict)
+		assertSingleError(t, response, render.Conflict)
+	}
+	f.request(t, "DELETE", "/api/v1/repositories/"+seeded.freeRepository, "", cookie, http.StatusNoContent)
+	f.request(t, "DELETE", "/api/v1/sources/"+seeded.freeSource, "", cookie, http.StatusNoContent)
+	expectAuditCount(t, f.dir, "repositories.delete", "success", 1)
+	expectAuditCount(t, f.dir, "sources.delete", "success", 1)
+	// A physical chain keeps its source, even when no policy uses it.
+	chained := f.createSourceRow(t, t.Context(), "chained-source", f.sealer)
+	insertChain(t, f.dir, chained)
+	f.request(t, "DELETE", "/api/v1/sources/"+chained, "", cookie, http.StatusConflict)
+	expectAuditCount(t, f.dir, "sources.delete", "success", 1)
+}
+
+// insertChain adds one physical chain row that refers to sourceID. chains is
+// owned by the physical migration, so this uses the shared file directly.
+func insertChain(t *testing.T, dir, sourceID string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.ExecContext(t.Context(), `INSERT INTO chains
+		(id, source_id, server_uuid, server_version, tool_version, started_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"chain-1", sourceID, "00000000-0000-0000-0000-000000000000", "8.4.11", "8.4.0-7", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSourceCRUDNameConflictsAndPreflightUnavailable(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "operator", "operator")
+	cookie := f.login(t, "operator", testPassword)
+	created := f.request(t, "POST", "/api/v1/sources", sourceBody("source-a"), cookie, http.StatusCreated)
+	source := decodeResponse[store.Source](t, created)
+	if !source.HasSecret || source.ServerUUID != nil || source.LastPreflight != nil {
+		t.Fatalf("source = %+v", source)
+	}
+	assertNoSecrets(t, f, created.Body.String(), matrixSecret)
+	f.request(t, "POST", "/api/v1/sources", sourceBody("SOURCE-A"), cookie, http.StatusConflict)
+	for name, body := range map[string]string{
+		"relative socket": `{"name":"b","socket":"relative","datadir":"/var/lib/mysql","username":"u","password":"x"}`,
+		"missing secret":  `{"name":"b","socket":"/s","datadir":"/d","username":"u"}`,
+		"empty name":      `{"name":"","socket":"/s","datadir":"/d","username":"u","password":"x"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := f.requestRejected(t, "POST", "/api/v1/sources", body, cookie, http.StatusBadRequest)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	// The physical preflight needs a work root, an XtraBackup path and capacity
+	// thresholds; this fixture has none. The endpoint reports 503 and the source
+	// keeps its empty preflight state.
+	repository := f.createRepositoryRow(t, t.Context(), "local-a", newRepositoryDir(t), f.sealer)
+	unavailable := f.request(t, "POST", "/api/v1/sources/"+source.ID+"/preflight",
+		`{"local_repository_id":"`+repository+`"}`, cookie, http.StatusServiceUnavailable)
+	assertSingleError(t, unavailable, render.Unavailable)
+	f.requestRejected(t, "POST", "/api/v1/sources/"+source.ID+"/preflight", `{}`, cookie, http.StatusBadRequest)
+	reloaded, err := f.database.Source(t.Context(), source.ID)
+	if err != nil || reloaded.LastPreflight != nil || reloaded.ServerUUID != nil {
+		t.Fatalf("failed preflight persisted state: %+v %v", reloaded, err)
+	}
+	// Updating without a password keeps the sealed secret.
+	f.request(t, "PUT", "/api/v1/sources/"+source.ID,
+		`{"name":"source-a","socket":"/run/mysqld/other.sock","datadir":"/var/lib/mysql","username":"backup"}`, cookie, http.StatusOK)
+	opened, err := f.database.SourceSecret(t.Context(), source.ID, f.sealer)
+	if err != nil || string(opened) != matrixSecret {
+		t.Fatalf("source secret = %q %v", opened, err)
+	}
+}
+
+func TestPolicyValidationAndRoleKinds(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "operator", "operator")
+	cookie := f.login(t, "operator", testPassword)
+	source := f.createSourceRow(t, t.Context(), "source-a", f.sealer)
+	local := f.createRepositoryRow(t, t.Context(), "local-a", newRepositoryDir(t), f.sealer)
+	ftp := f.createFTPRepositoryRow(t, t.Context(), "ftp-a", "{{SECRET_policy_ftp}}", f.sealer)
+
+	for name, body := range map[string]string{
+		"bad full cron":     strings.Replace(policyBody("p", source, local), `"full_cron":"0 2 * * *"`, `"full_cron":"not a cron"`, 1),
+		"bad incremental":   strings.Replace(policyBody("p", source, local), `"incremental_cron":"0 * * * *"`, `"incremental_cron":"61 * * * *"`, 1),
+		"bad timezone":      strings.Replace(policyBody("p", source, local), `"timezone":"UTC"`, `"timezone":"Mars/Base"`, 1),
+		"missing source":    strings.Replace(policyBody("p", source, local), `"source_id":"`+source+`"`, `"source_id":"missing"`, 1),
+		"missing local":     strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"missing"`, 1),
+		"local is ftp":      strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"`+ftp+`"`, 1),
+		"replica is local":  strings.Replace(policyBody("p", source, local), `"page_tracking":false`, `"replica_repository_id":"`+local+`","page_tracking":false`, 1),
+		"zero chain length": strings.Replace(policyBody("p", source, local), `"max_chain_length":3`, `"max_chain_length":0`, 1),
+		"zero parallel":     strings.Replace(policyBody("p", source, local), `"parallel":2`, `"parallel":0`, 1),
+		"negative throttle": strings.Replace(policyBody("p", source, local), `"throttle":0`, `"throttle":-1`, 1),
+		"zstd out of range": strings.Replace(policyBody("p", source, local), `"zstd_level":3`, `"zstd_level":23`, 1),
+		"empty name":        strings.Replace(policyBody("p", source, local), `"name":"p"`, `"name":""`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := f.requestRejected(t, "POST", "/api/v1/policies", body, cookie, http.StatusBadRequest)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	created := f.request(t, "POST", "/api/v1/policies", policyBody("policy-a", source, local), cookie, http.StatusCreated)
+	policy := decodeResponse[store.Policy](t, created)
+	if policy.Enabled || policy.ReplicaRepositoryID != nil || policy.LastPreflight != nil {
+		t.Fatalf("policy = %+v", policy)
+	}
+	f.request(t, "POST", "/api/v1/policies", policyBody("POLICY-A", source, local), cookie, http.StatusConflict)
+	replica := strings.Replace(policyBody("policy-b", source, local), `"page_tracking":false`,
+		`"replica_repository_id":"`+ftp+`","page_tracking":false`, 1)
+	withReplica := decodeResponse[store.Policy](t, f.request(t, "POST", "/api/v1/policies", replica, cookie, http.StatusCreated))
+	if withReplica.ReplicaRepositoryID == nil || *withReplica.ReplicaRepositoryID != ftp {
+		t.Fatalf("replica = %+v", withReplica.ReplicaRepositoryID)
+	}
+	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/disable", "", cookie, http.StatusOK)
+	assertNoSecrets(t, f, created.Body.String()+replica, "{{SECRET_policy_ftp}}")
+	expectAuditCount(t, f.dir, "policies.create", "success", 2)
+	expectAuditCount(t, f.dir, "policies.disable", "success", 1)
+}
+
+// TestPolicyEnableRequiresPreflight covers the deployment that has no preflight
+// inputs: enable must not silently flip the flag on.
+func TestPolicyEnableRequiresPreflight(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "operator", "operator")
+	cookie := f.login(t, "operator", testPassword)
+	source := f.createSourceRow(t, t.Context(), "source-a", f.sealer)
+	local := f.createRepositoryRow(t, t.Context(), "local-a", newRepositoryDir(t), f.sealer)
+	// enabled=true cannot be satisfied without preflight inputs.
+	enabled := strings.Replace(policyBody("policy-a", source, local), `"enabled":false`, `"enabled":true`, 1)
+	f.request(t, "POST", "/api/v1/policies", enabled, cookie, http.StatusServiceUnavailable)
+	policy := decodeResponse[store.Policy](t,
+		f.request(t, "POST", "/api/v1/policies", policyBody("policy-a", source, local), cookie, http.StatusCreated))
+	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/enable", "", cookie, http.StatusServiceUnavailable)
+	reloaded, err := f.database.Policy(t.Context(), policy.ID)
+	if err != nil || reloaded.Enabled || reloaded.LastPreflight != nil {
+		t.Fatalf("enable persisted without preflight: %+v %v", reloaded, err)
+	}
+	expectAuditCount(t, f.dir, "policies.enable", "success", 0)
+	// Disable is always allowed.
+	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/disable", "", cookie, http.StatusOK)
+}
+
+func TestResourceListsAreBoundedAndSecretFree(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	f.seedResources(t)
+	for _, path := range []string{"/api/v1/repositories", "/api/v1/sources", "/api/v1/policies"} {
+		assertListRejectsBadPagination(t, f, path, cookie)
+		assertListIsSecretFree(t, f, path, cookie)
+	}
+	assertListCursorIsExclusive(t, f, cookie)
+}
+
+// assertListRejectsBadPagination covers the limit range and the cursor form.
+func assertListRejectsBadPagination(t *testing.T, f *authFixture, path string, cookie *http.Cookie) {
+	t.Helper()
+	for _, query := range []string{"?limit=0", "?limit=201", "?limit=abc", "?before=not-a-uuid"} {
+		response := f.requestRejected(t, "GET", path+query, "", cookie, http.StatusBadRequest)
+		assertSingleError(t, response, render.ValidationFailed)
+	}
+}
+
+// assertListIsSecretFree requires one bounded page with no sealed column.
+func assertListIsSecretFree(t *testing.T, f *authFixture, path string, cookie *http.Cookie) {
+	t.Helper()
+	list := f.request(t, "GET", path+"?limit=1", "", cookie, http.StatusOK)
+	body := list.Body.String()
+	if !strings.Contains(body, `"next_before":`) {
+		t.Fatalf("%s page = %s", path, body)
+	}
+	assertNoSecrets(t, f, body, matrixSecret)
+	page := decodeResponse[struct {
+		Items      []map[string]any `json:"items"`
+		NextBefore *string          `json:"next_before"`
+	}](t, list)
+	if len(page.Items) != 1 {
+		t.Fatalf("%s items = %d", path, len(page.Items))
+	}
+	for key := range page.Items[0] {
+		if strings.Contains(key, "secret") && key != "has_secret" {
+			t.Fatalf("%s exposed %q", path, key)
+		}
+	}
+}
+
+// assertListCursorIsExclusive proves the before cursor never repeats a row.
+func assertListCursorIsExclusive(t *testing.T, f *authFixture, cookie *http.Cookie) {
+	t.Helper()
+	type page struct {
+		Items      []store.Repository `json:"items"`
+		NextBefore *string            `json:"next_before"`
+	}
+	only := decodeResponse[page](t, f.request(t, "GET", "/api/v1/repositories?limit=1", "", cookie, http.StatusOK))
+	if len(only.Items) != 1 {
+		t.Fatalf("repositories = %d", len(only.Items))
+	}
+	next := decodeResponse[page](t, f.request(t, "GET", "/api/v1/repositories?before="+only.Items[0].ID, "", cookie, http.StatusOK))
+	for _, item := range next.Items {
+		if item.ID == only.Items[0].ID {
+			t.Fatal("cursor repeated a row")
+		}
+	}
+}

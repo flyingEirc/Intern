@@ -333,7 +333,10 @@ func countAudit(t *testing.T, dir, action, result string) int {
 func setSuccessAuditAbort(t *testing.T, dir, action string) {
 	t.Helper()
 	switch action {
-	case "", "users.create", "users.update", "auth.password", "users.revoke_sessions", "auth.logout", "auth.login":
+	case "", "users.create", "users.update", "auth.password", "users.revoke_sessions", "auth.logout", "auth.login",
+		"repositories.create", "repositories.update", "repositories.delete",
+		"sources.create", "sources.update", "sources.delete", "sources.preflight",
+		"policies.create", "policies.update", "policies.delete", "policies.enable", "policies.disable":
 	default:
 		t.Fatalf("refusing audit trigger for %q", action)
 	}
