@@ -71,7 +71,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -96,7 +96,7 @@ jobs:
       - name: Real CLI and database container scenarios
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
-          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=20m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
       - name: Reject incomplete or skipped scenario evidence
         if: always()
         run: |

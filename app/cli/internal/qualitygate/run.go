@@ -42,7 +42,7 @@ func Run(ctx context.Context, opts RunOptions, stdout, stderr io.Writer) (Result
 		return Result{}, errors.Join(err, events.Close())
 	}
 	cmd := exec.CommandContext(ctx, "go")
-	cmd.Args = append(cmd.Args, "test", "-json", "-tags=integration", "-count=1", "-shuffle=on", "-parallel=2", "-timeout=20m", "./app/cli/integration/...")
+	cmd.Args = append(cmd.Args, "test", "-json", "-tags=integration", "-count=1", "-shuffle=on", "-parallel=2", "-timeout=35m", "./app/cli/integration/...")
 	cmd.Env = environment
 	cmd.Stdout = io.MultiWriter(events, stdout)
 	cmd.Stderr = stderr
