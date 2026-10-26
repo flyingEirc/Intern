@@ -184,9 +184,42 @@ jobs:
           include-hidden-files: true
           path: .cache/quality/ftp/events.jsonl
 
+  container-replication:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native replication, authentication and retention acceptance
+        run: |
+          mkdir -p .cache/quality/replication
+          go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run '^TestR1NativeContainers$' | tee .cache/quality/replication/events.jsonl
+      - name: Reject incomplete or skipped replication evidence
+        if: always()
+        run: .github/scripts/verify-replication-evidence.sh .cache/quality/replication/events.jsonl
+      - name: Retain allowlisted replication evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: replication-r1-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/replication/events.jsonl
+
   quality-gate:
     name: quality-gate
-    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp]
+    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -199,12 +232,13 @@ jobs:
           CONTAINERS: ${{ needs.container-mysql.result }}
           PHYSICAL: ${{ needs.container-physical.result }}
           FTP: ${{ needs.container-ftp.result }}
+          REPLICATION: ${{ needs.container-replication.result }}
         working-directory: .
         run: |
           test "$SCOPE" = success
           case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
