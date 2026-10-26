@@ -761,8 +761,8 @@ func assertRetainedOlderChain(t *testing.T, w *worker, older []producedFile) {
 		t.Fatalf("retained chain seq = %d/%d/%d, want 1/2/3", older[0].Seq, older[1].Seq, older[2].Seq)
 	}
 	kinds := []string{w.backup(t, older[0].BackupID).Kind, w.backup(t, older[1].BackupID).Kind, w.backup(t, older[2].BackupID).Kind}
-	if kinds[0] != "full" || kinds[1] != "incremental" || kinds[2] != "incremental" {
-		t.Fatalf("retained chain kinds = %v, want full, incremental, incremental", kinds)
+	if kinds[0] != "physical-full" || kinds[1] != "physical-incremental" || kinds[2] != "physical-incremental" {
+		t.Fatalf("retained chain kinds = %v, want physical-full, physical-incremental, physical-incremental", kinds)
 	}
 }
 
