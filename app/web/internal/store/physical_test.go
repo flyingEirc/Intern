@@ -69,7 +69,8 @@ func TestPhysicalPendingMigrationAndFutureReadiness(t *testing.T) {
 func TestPhysicalStatusBeforeDatabaseCreation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not-created")
 	status, err := ReadStatus(t.Context(), dir)
-	if err != nil || status.PhysicalCurrentVersion != 0 || status.PhysicalLatestVersion != 1 || status.PhysicalPendingMigrations != 1 {
+	if err != nil || status.PhysicalCurrentVersion != 0 || status.PhysicalLatestVersion != 1 || status.PhysicalPendingMigrations != 1 ||
+		status.ReplicationCurrentVersion != 0 || status.ReplicationLatestVersion != 1 || status.ReplicationPending != 1 {
 		t.Fatalf("uninitialized status: %+v %v", status, err)
 	}
 	if _, err = os.Stat(dir); !os.IsNotExist(err) {
@@ -79,7 +80,7 @@ func TestPhysicalStatusBeforeDatabaseCreation(t *testing.T) {
 
 func assertSharedTables(t *testing.T, s *Store) {
 	t.Helper()
-	for _, table := range []string{"instance", "users", "sessions", "web_goose_db_version", "chains", "backups", "cleanup_ledger", "physical_goose_db_version"} {
+	for _, table := range []string{"instance", "users", "sessions", "web_goose_db_version", "chains", "backups", "cleanup_ledger", "physical_goose_db_version", "replicas", "replica_members", "replica_parts", "replication_goose_db_version"} {
 		present, err := tableExists(t.Context(), s.db, table)
 		if err != nil || !present {
 			t.Fatalf("same intern.db table %s: %v %v", table, present, err)
@@ -111,6 +112,60 @@ func assertPhysicalStatus(t *testing.T, dir string, current int64, pending int) 
 	if err != nil || status.PhysicalCurrentVersion != current || status.PhysicalLatestVersion != 1 ||
 		status.PhysicalPendingMigrations != pending || status.CurrentVersion != status.LatestVersion {
 		t.Fatalf("physical status: %+v %v", status, err)
+	}
+}
+
+// TestReplicationPendingMigrationAndFutureReadiness mirrors the physical cases
+// for the replication migration set, so Ready and ReadStatus agree about it.
+func TestReplicationPendingMigrationAndFutureReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		query   string
+		current int64
+		pending int
+	}{
+		{"pending", "DELETE FROM replication_goose_db_version WHERE version_id = 1", 0, 1},
+		{"missing table", "DROP TABLE replication_goose_db_version", 0, 1},
+		{"future", "INSERT INTO replication_goose_db_version (version_id, is_applied) VALUES (42, 1)", 42, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertReplicationSchemaState(t, tc.name, tc.query, tc.current, tc.pending)
+		})
+	}
+}
+
+func assertReplicationSchemaState(t *testing.T, name, query string, current int64, pending int) {
+	t.Helper()
+	dir := privateTempDir(t)
+	s := openTestStore(t, dir)
+	if _, err := s.db.ExecContext(t.Context(), query); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ready(t.Context()); err == nil || !strings.Contains(err.Error(), "replication database version") {
+		t.Fatalf("unready replication schema: %v", err)
+	}
+	assertReplicationStatus(t, dir, current, pending)
+	if name == "future" {
+		assertReplicationDowngradeRejected(t, s, dir)
+	}
+}
+
+func assertReplicationStatus(t *testing.T, dir string, current int64, pending int) {
+	t.Helper()
+	status, err := ReadStatus(t.Context(), dir)
+	if err != nil || status.ReplicationCurrentVersion != current ||
+		status.ReplicationLatestVersion != 1 || status.ReplicationPending != pending {
+		t.Fatalf("replication status: %+v %v", status, err)
+	}
+}
+
+func assertReplicationDowngradeRejected(t *testing.T, s *Store, dir string) {
+	t.Helper()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(t.Context(), dir); err == nil || !strings.Contains(err.Error(), "replication database version 42") {
+		t.Fatalf("replication downgrade accepted: %v", err)
 	}
 }
 

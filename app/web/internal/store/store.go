@@ -18,6 +18,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
 	"github.com/flyingEirc/Intern/internal/fsutil"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication"
 )
 
 // BusyTimeout is the SQLite busy_timeout on every control-plane connection.
@@ -78,6 +79,11 @@ func openStore(ctx context.Context, dir string) (_ *Store, retErr error) {
 		return nil, err
 	}
 	if err = physicalstore.Migrate(ctx, db); err != nil {
+		return nil, err
+	}
+	// Replication owns its own goose table and refers to the physical backups
+	// table, so it migrates after the physical schema.
+	if err = replication.Migrate(ctx, db); err != nil {
 		return nil, err
 	}
 	s.instanceID, err = ensureInstance(ctx, db)
@@ -189,6 +195,13 @@ func (s *Store) Ready(ctx context.Context) error {
 	}
 	if physicalCurrent != physicalLatest {
 		return fmt.Errorf("physical database version %d does not match embedded latest version %d", physicalCurrent, physicalLatest)
+	}
+	replicationCurrent, replicationLatest, err := replication.Version(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if replicationCurrent != replicationLatest {
+		return fmt.Errorf("replication database version %d does not match embedded latest version %d", replicationCurrent, replicationLatest)
 	}
 	return nil
 }

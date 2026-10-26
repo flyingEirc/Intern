@@ -10,6 +10,36 @@ SELECT * FROM backups WHERE id = ?;
 -- name: ChainBackups :many
 SELECT * FROM backups WHERE chain_id = ? ORDER BY seq;
 
+-- name: Chain :one
+SELECT * FROM chains WHERE id = ?;
+
+-- name: SourceChains :many
+SELECT * FROM chains WHERE source_id = ? ORDER BY started_at, rowid;
+
+-- name: SetChainPinned :execrows
+UPDATE chains SET pinned = ? WHERE id = ?;
+
+-- name: ChainObjectCleanup :many
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l JOIN backups b ON b.id = l.backup_id
+WHERE b.chain_id = ? AND l.kind = 'object' AND b.status = 'completed' ORDER BY l.id;
+
+-- name: InstanceObjectCleanup :many
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l JOIN backups b ON b.id = l.backup_id
+WHERE l.instance_id = ? AND l.kind = 'object' AND b.status = 'completed' ORDER BY l.id;
+
+-- name: ReserveChainObject :exec
+INSERT INTO cleanup_ledger (backup_id, instance_id, run_id, kind, target, created_at)
+VALUES (?, ?, ?, 'object', ?, ?) ON CONFLICT(kind, target) DO NOTHING;
+
+-- name: ClearChainLocalPresent :execrows
+UPDATE backups SET local_present = 0 WHERE chain_id = ? AND local_present = 1;
+
+-- name: LocalDeleteDone :exec
+DELETE FROM cleanup_ledger WHERE id = ?;
+
+-- name: LocalDeleteFailed :exec
+UPDATE cleanup_ledger SET attempts = attempts + 1, last_error_code = ? WHERE id = ?;
+
 -- name: InsertBackup :exec
 INSERT INTO backups (id, chain_id, seq, parent_id, kind, status, instance_id, run_id, object_path, key_id, created_at)
 VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?);

@@ -10,6 +10,26 @@ import (
 	"database/sql"
 )
 
+const chain = `-- name: Chain :one
+SELECT id, source_id, server_uuid, server_version, tool_version, started_at, sealed_at, pinned FROM chains WHERE id = ?
+`
+
+func (q *Queries) Chain(ctx context.Context, id string) (Chain, error) {
+	row := q.db.QueryRowContext(ctx, chain, id)
+	var i Chain
+	err := row.Scan(
+		&i.ID,
+		&i.SourceID,
+		&i.ServerUuid,
+		&i.ServerVersion,
+		&i.ToolVersion,
+		&i.StartedAt,
+		&i.SealedAt,
+		&i.Pinned,
+	)
+	return i, err
+}
+
 const chainBackups = `-- name: ChainBackups :many
 SELECT id, chain_id, seq, parent_id, kind, status, instance_id, run_id, from_lsn, to_lsn, last_lsn, checkpoints, xtrabackup_info, object_path, payload_size, payload_sha256, metadata_size, metadata_sha256, key_id, local_present, failure_code, created_at, completed_at FROM backups WHERE chain_id = ? ORDER BY seq
 `
@@ -61,6 +81,40 @@ func (q *Queries) ChainBackups(ctx context.Context, chainID string) ([]Backup, e
 	return items, nil
 }
 
+const chainObjectCleanup = `-- name: ChainObjectCleanup :many
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l JOIN backups b ON b.id = l.backup_id
+WHERE b.chain_id = ? AND l.kind = 'object' AND b.status = 'completed' ORDER BY l.id
+`
+
+type ChainObjectCleanupRow struct {
+	ID       int64
+	BackupID string
+	Target   string
+}
+
+func (q *Queries) ChainObjectCleanup(ctx context.Context, chainID string) ([]ChainObjectCleanupRow, error) {
+	rows, err := q.db.QueryContext(ctx, chainObjectCleanup, chainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ChainObjectCleanupRow{}
+	for rows.Next() {
+		var i ChainObjectCleanupRow
+		if err := rows.Scan(&i.ID, &i.BackupID, &i.Target); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const cleanupDone = `-- name: CleanupDone :exec
 DELETE FROM cleanup_ledger WHERE id = ?
 `
@@ -82,6 +136,18 @@ type CleanupFailedParams struct {
 func (q *Queries) CleanupFailed(ctx context.Context, arg CleanupFailedParams) error {
 	_, err := q.db.ExecContext(ctx, cleanupFailed, arg.LastErrorCode, arg.ID)
 	return err
+}
+
+const clearChainLocalPresent = `-- name: ClearChainLocalPresent :execrows
+UPDATE backups SET local_present = 0 WHERE chain_id = ? AND local_present = 1
+`
+
+func (q *Queries) ClearChainLocalPresent(ctx context.Context, chainID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, clearChainLocalPresent, chainID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const completeBackup = `-- name: CompleteBackup :execrows
@@ -268,6 +334,40 @@ func (q *Queries) InsertCleanup(ctx context.Context, arg InsertCleanupParams) er
 	return err
 }
 
+const instanceObjectCleanup = `-- name: InstanceObjectCleanup :many
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l JOIN backups b ON b.id = l.backup_id
+WHERE l.instance_id = ? AND l.kind = 'object' AND b.status = 'completed' ORDER BY l.id
+`
+
+type InstanceObjectCleanupRow struct {
+	ID       int64
+	BackupID string
+	Target   string
+}
+
+func (q *Queries) InstanceObjectCleanup(ctx context.Context, instanceID string) ([]InstanceObjectCleanupRow, error) {
+	rows, err := q.db.QueryContext(ctx, instanceObjectCleanup, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []InstanceObjectCleanupRow{}
+	for rows.Next() {
+		var i InstanceObjectCleanupRow
+		if err := rows.Scan(&i.ID, &i.BackupID, &i.Target); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const latestChain = `-- name: LatestChain :one
 SELECT id, source_id, server_uuid, server_version, tool_version, started_at, sealed_at, pinned FROM chains WHERE source_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1
 `
@@ -286,6 +386,29 @@ func (q *Queries) LatestChain(ctx context.Context, sourceID string) (Chain, erro
 		&i.Pinned,
 	)
 	return i, err
+}
+
+const localDeleteDone = `-- name: LocalDeleteDone :exec
+DELETE FROM cleanup_ledger WHERE id = ?
+`
+
+func (q *Queries) LocalDeleteDone(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, localDeleteDone, id)
+	return err
+}
+
+const localDeleteFailed = `-- name: LocalDeleteFailed :exec
+UPDATE cleanup_ledger SET attempts = attempts + 1, last_error_code = ? WHERE id = ?
+`
+
+type LocalDeleteFailedParams struct {
+	LastErrorCode sql.NullString
+	ID            int64
+}
+
+func (q *Queries) LocalDeleteFailed(ctx context.Context, arg LocalDeleteFailedParams) error {
+	_, err := q.db.ExecContext(ctx, localDeleteFailed, arg.LastErrorCode, arg.ID)
+	return err
 }
 
 const pendingCleanup = `-- name: PendingCleanup :many
@@ -312,6 +435,83 @@ func (q *Queries) PendingCleanup(ctx context.Context, instanceID string) ([]Clea
 			&i.Attempts,
 			&i.LastErrorCode,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reserveChainObject = `-- name: ReserveChainObject :exec
+INSERT INTO cleanup_ledger (backup_id, instance_id, run_id, kind, target, created_at)
+VALUES (?, ?, ?, 'object', ?, ?) ON CONFLICT(kind, target) DO NOTHING
+`
+
+type ReserveChainObjectParams struct {
+	BackupID   string
+	InstanceID string
+	RunID      string
+	Target     string
+	CreatedAt  string
+}
+
+func (q *Queries) ReserveChainObject(ctx context.Context, arg ReserveChainObjectParams) error {
+	_, err := q.db.ExecContext(ctx, reserveChainObject,
+		arg.BackupID,
+		arg.InstanceID,
+		arg.RunID,
+		arg.Target,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const setChainPinned = `-- name: SetChainPinned :execrows
+UPDATE chains SET pinned = ? WHERE id = ?
+`
+
+type SetChainPinnedParams struct {
+	Pinned int64
+	ID     string
+}
+
+func (q *Queries) SetChainPinned(ctx context.Context, arg SetChainPinnedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setChainPinned, arg.Pinned, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const sourceChains = `-- name: SourceChains :many
+SELECT id, source_id, server_uuid, server_version, tool_version, started_at, sealed_at, pinned FROM chains WHERE source_id = ? ORDER BY started_at, rowid
+`
+
+func (q *Queries) SourceChains(ctx context.Context, sourceID string) ([]Chain, error) {
+	rows, err := q.db.QueryContext(ctx, sourceChains, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Chain{}
+	for rows.Next() {
+		var i Chain
+		if err := rows.Scan(
+			&i.ID,
+			&i.SourceID,
+			&i.ServerUuid,
+			&i.ServerVersion,
+			&i.ToolVersion,
+			&i.StartedAt,
+			&i.SealedAt,
+			&i.Pinned,
 		); err != nil {
 			return nil, err
 		}
