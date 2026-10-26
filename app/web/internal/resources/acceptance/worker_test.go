@@ -280,20 +280,26 @@ func (f *fixture) wrongVolume(t *testing.T) {
 		markerRefused, source.ID, preflight.Error.Check, preflight.Error.Code, wrongDataDir)
 }
 
-// matrixMiss points the deployment at the pinned executable under a basename that
-// is not "xtrabackup". The banner admission is the real one and no version string
-// is rewritten. The pinned image ships a single XtraBackup release, so no real
-// second-version binary exists to configure instead; that is recorded here.
+// matrixMiss points a source at a real MySQL 9.7.1 server whose version is
+// outside the pinned compatibility matrix. Identity succeeds against that
+// server and the pinned XtraBackup; admission fails in the compatibility check.
 func (f *fixture) matrixMiss(t *testing.T) {
 	f.requireBase(t)
-	policy := f.createPolicy(t, policyWrite{
-		Name: "w3-matrix", SourceID: f.source.ID, LocalRepositoryID: f.local.ID,
-		ReplicaRepositoryID: &f.replica.ID, FullCron: "0 4 * * *", IncrementalCron: "30 * * * *",
-		Timezone: "UTC", MaxChainLength: 2, Parallel: 1, Throttle: 0, ZstdLevel: 2,
+	source := f.createSource(t, sourceWrite{
+		Name: "w3-matrix", Socket: matrixSocket, Datadir: matrixDataDir, Username: backupUser, Password: &f.secret.source,
 	})
-	f.refuse(t, f.plugin, policy.ID, "tool_probe_failed", "w3-refuse-matrix", "tool")
-	t.Logf("%s case=matrix_miss source=%s check=tool code=tool_probe_failed binary=%s version_rewritten=false real_second_version_unavailable=true enabled=0 failure_audit=present",
-		markerRefused, f.source.ID, copiedToolName)
+	preflight := f.sourcePreflight(t, f.operator, source.ID, f.local.ID)
+	requireFailure(t, preflight, "compatibility", "version_unsupported")
+	persisted := f.readSource(t, source.ID)
+	if persisted.ServerVersion == nil || *persisted.ServerVersion != matrixServerVersion {
+		t.Fatalf("matrix-miss server version = %v, want %s", persisted.ServerVersion, matrixServerVersion)
+	}
+	if persisted.LastPreflight == nil || persisted.LastPreflight.OK {
+		t.Fatalf("matrix-miss last preflight = %+v", persisted.LastPreflight)
+	}
+	f.refuseEnable(t, f.refusalPolicy("w3-matrix-policy", source.ID, &f.replica.ID), "version_unsupported", "w3-refuse-matrix")
+	t.Logf("%s case=matrix_miss check=%s code=%s server_version=%s source=%s enabled=0 failure_audit=present",
+		markerRefused, preflight.Error.Check, preflight.Error.Code, *persisted.ServerVersion, source.ID)
 }
 
 // unwritableFTP refuses a replica whose server-side directory rejects the
@@ -460,8 +466,8 @@ func failureCheck(code string) string {
 		return "privileges"
 	case "datadir_mismatch":
 		return "volume"
-	case "tool_probe_failed":
-		return "tool"
+	case "version_unsupported":
+		return "compatibility"
 	default:
 		return "replica"
 	}

@@ -20,7 +20,8 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ] as $cases |
   [
     "W3-A3 pass", "W3-A3 refused", "W3-A4 atomic", "W3-A2 ciphertext",
-    "case=privileges_missing", "case=wrong_volume", "case=matrix_miss",
+    "case=privileges_missing", "case=wrong_volume",
+    "case=matrix_miss check=compatibility code=version_unsupported server_version=9.7.1",
     "case=unwritable_ftp", "reply_code=550",
     "warning=compatibility_candidate_unverified", "plaintext_ftp=audited",
     "failure_audit=present", "enabled=0",
@@ -41,14 +42,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   all($markers[]; . as $marker | $output | contains($marker)) and
   ($output | test("W3 candidate source=[0-9a-f]{40} source_dirty=false binary_sha256=[0-9a-f]{64} ")) and
   ($output | test("worker_gid=[1-9][0-9]* tool_sha256=[0-9a-f]{64} ")) and
-  ($output | test("copied_tool_sha256=[0-9a-f]{64}")) and
-  (($output | capture("copied_tool_sha256=(?<copied>[0-9a-f]{64})") | .copied) == ($output | capture("worker_gid=[0-9]+ tool_sha256=(?<tool>[0-9a-f]{64})") | .tool)) and
   ($source == "" or ($output | contains("W3 candidate source=" + $source + " source_dirty=false"))) and
   ($output | test("daemon=linux/(x86_64|amd64) platform=linux/amd64")) and
   ($output | test("worker_uid=[1-9][0-9]* worker_gid=[1-9][0-9]*")) and
   ($output | contains("server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 topology=private-network-no-NAT")) and
-  ($output | contains("case=matrix_miss")) and
-  ($output | contains("version_rewritten=false")) and
+  ($output | contains("case=matrix_miss check=compatibility code=version_unsupported server_version=9.7.1")) and
   ($output | test("W3-A3 pass source=[0-9a-f-]+ local=[0-9a-f-]+ ftp=[0-9a-f-]+ policy=[0-9a-f-]+ enabled=1 ")) and
   ($output | test("reply_code=550 code=[a-z_]+ check=replica enabled=0 failure_audit=present"))
 ' "$1"

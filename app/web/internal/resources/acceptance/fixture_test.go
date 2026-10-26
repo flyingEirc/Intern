@@ -9,10 +9,8 @@ package acceptance
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json/v2"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -41,6 +39,7 @@ import (
 
 // The fixture paths are the ones the harness mounts; the worker never guesses
 // them. wrongDataDir is a second real volume mounted for the wrong-volume case.
+// matrixSocket and matrixDataDir are the remapped MySQL 9.7.1 mounts.
 const (
 	backupUser = "intern_bkp"
 	deniedUser = "intern_denied"
@@ -49,21 +48,22 @@ const (
 	dataDir      = "/var/lib/mysql"
 	wrongDataDir = "/w3-wrong"
 
+	// matrixSocket and matrixDataDir are the worker-side mounts of the real
+	// MySQL 9.7.1 fixture. Keep them synchronized with w3MatrixSocket and
+	// w3MatrixDataDir in the harness. The server is outside the compatibility
+	// matrix, so identity succeeds and admission fails in compatibility.
+	matrixSocket        = "/w3-matrix/mysqld/mysqld.sock"
+	matrixDataDir       = "/w3-matrix/mysql"
+	matrixServerVersion = "9.7.1"
+
 	realXtrabackup = "/usr/bin/xtrabackup"
 	ftpPort        = 2121
-
-	// copiedToolName is a byte-identical copy of the pinned executable under a
-	// basename that is not "xtrabackup". The pinned image ships exactly one
-	// XtraBackup release, so no real second-version binary exists to configure;
-	// this copy makes the real banner admission fail without fabricating a
-	// version string.
-	copiedToolName = "xtrabackup-8.4.0-7"
 )
 
 // layout is the worker's private fixture tree. It lives in the container's
 // writable layer so the unprivileged mysql uid owns every path.
 type layout struct {
-	root, metadata, keys, kek, work, repository, tools string
+	root, metadata, keys, kek, work, repository string
 }
 
 // secrets holds every generated credential the harness injected. None of them
@@ -88,7 +88,6 @@ type fixture struct {
 
 	admin    *client
 	operator *client
-	plugin   *client
 
 	local, replica, locked store.Repository
 	source                 store.Source
@@ -156,14 +155,12 @@ func prepareLayout(t *testing.T) layout {
 	paths := layout{
 		root: root, metadata: filepath.Join(root, "metadata"), keys: filepath.Join(root, "keys"),
 		work: filepath.Join(root, "work"), repository: filepath.Join(root, "repository"),
-		tools: filepath.Join(root, "tools"),
 	}
 	paths.kek = filepath.Join(paths.keys, "intern.key")
-	for _, dir := range []string{paths.root, paths.metadata, paths.keys, paths.work, paths.repository, paths.tools} {
+	for _, dir := range []string{paths.root, paths.metadata, paths.keys, paths.work, paths.repository} {
 		requirePrivateDir(t, dir)
 	}
 	requireKey(t, paths.kek)
-	copyPinnedTool(t, filepath.Join(paths.tools, copiedToolName))
 	return paths
 }
 
@@ -190,63 +187,6 @@ func requireKey(t *testing.T, path string) {
 		must(t, err)
 	}
 	must(t, artifact.GenerateKey(path))
-}
-
-// copyPinnedTool copies the real binary byte for byte. The version banner is
-// never rewritten: the copy is the identical executable under another basename,
-// which is what makes the real banner admission fail.
-func copyPinnedTool(t *testing.T, path string) {
-	t.Helper()
-	if _, err := os.Lstat(path); err != nil {
-		if !os.IsNotExist(err) {
-			must(t, err)
-		}
-		copyExecutable(t, realXtrabackup, path)
-	}
-	original, err := fileDigest(realXtrabackup)
-	must(t, err)
-	copied, err := fileDigest(path)
-	must(t, err)
-	if original != copied {
-		t.Fatalf("the matrix-refusal tool copy is not byte-identical to %s", realXtrabackup)
-	}
-	t.Logf("copied_tool_sha256=%x", copied)
-}
-
-// fileDigest hashes one file in a stream, so a large executable never has to
-// fit in memory.
-func fileDigest(path string) ([sha256.Size]byte, error) {
-	var digest [sha256.Size]byte
-	file, err := os.Open(path)
-	if err != nil {
-		return digest, err
-	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
-	closeErr := file.Close()
-	if err = errors.Join(copyErr, closeErr); err != nil {
-		return digest, err
-	}
-	copy(digest[:], hash.Sum(nil))
-	return digest, nil
-}
-
-func copyExecutable(t *testing.T, from, to string) {
-	t.Helper()
-	source, err := os.Open(from)
-	must(t, err)
-	defer func() { must(t, source.Close()) }()
-	info, err := source.Stat()
-	must(t, err)
-	target, err := os.OpenFile(to, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o755)
-	must(t, err)
-	written, copyErr := io.Copy(target, source)
-	closeErr := target.Close()
-	must(t, copyErr)
-	must(t, closeErr)
-	if written != info.Size() {
-		t.Fatalf("copied tool size = %d, want %d", written, info.Size())
-	}
 }
 
 func loadSecrets(t *testing.T) secrets {
@@ -283,11 +223,11 @@ func newFixture(t *testing.T) *fixture {
 	f.sealer = openSealer(t, f.layout)
 	f.analysis = openAnalysis(t, f.layout.metadata)
 	f.auth = newAuthentication(t, f.database)
-	// One listener probes the real pinned executable and one probes a copy under
-	// a refused basename; both serve the same real handler over real TLS.
-	f.admin = startEngine(t, f, realXtrabackup, nil)
-	f.operator = startEngine(t, f, realXtrabackup, nil)
-	f.plugin = startEngine(t, f, filepath.Join(f.layout.tools, copiedToolName), nil)
+	// Admin and operator each get a real TLS listener probing the pinned
+	// XtraBackup executable. The matrix miss uses a second real MySQL server,
+	// not a second tool binary.
+	f.admin = startEngine(t, f, nil)
+	f.operator = startEngine(t, f, nil)
 	f.seedUsers(t)
 	for _, login := range []struct {
 		c        *client
@@ -296,7 +236,6 @@ func newFixture(t *testing.T) *fixture {
 	}{
 		{f.admin, "w3-admin", f.secret.admin},
 		{f.operator, "w3-operator", f.secret.operator},
-		{f.plugin, "w3-operator", f.secret.operator},
 	} {
 		f.login(t, login.c, login.username, login.password)
 	}
@@ -350,14 +289,13 @@ func newAuthentication(t *testing.T, database *store.Store) *auth.Service {
 	return service
 }
 
-// startEngine serves the real handler on a real TLS listener. xtrabackup selects
-// the deployment's probed executable, which is how the matrix refusal is
-// configured, and jar shares a session with another listener when non-nil.
-func startEngine(t *testing.T, f *fixture, xtrabackup string, jar http.CookieJar) *client {
+// startEngine serves the real handler on a real TLS listener against the pinned
+// XtraBackup executable. jar shares a session with another listener when non-nil.
+func startEngine(t *testing.T, f *fixture, jar http.CookieJar) *client {
 	t.Helper()
 	settings := resources.Settings{
 		Sealer: f.sealer, KeyFile: f.layout.kek, MetadataDir: f.layout.metadata,
-		WorkRoot: f.layout.work, XtrabackupPath: xtrabackup, MinWorkBytes: 1, MinBackupBytes: 1,
+		WorkRoot: f.layout.work, XtrabackupPath: realXtrabackup, MinWorkBytes: 1, MinBackupBytes: 1,
 	}
 	logger := slog.New(slog.NewJSONHandler(f.logs, nil))
 	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth,
