@@ -183,6 +183,30 @@ func TestKEKOutsideMetadataEnablesCredentials(t *testing.T) {
 	}
 }
 
+// TestEmptyWorkRootDoesNotResolveToCwdForKEK proves an omitted work_root is not
+// passed to credential.Open, so a KEK sitting in the process cwd is accepted.
+func TestEmptyWorkRootDoesNotResolveToCwdForKEK(t *testing.T) {
+	cleanConfigEnv(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	keyFile := filepath.Join(cwd, "kek.json")
+	if err := artifact.GenerateKey(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	metadata := privateConfigDir(t)
+	c, err := loadConfig(t, "--metadata-dir", metadata, "--kek-file", keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WorkRoot != "" {
+		t.Fatalf("work_root = %q", c.WorkRoot)
+	}
+	settings, err := c.resourceSettings()
+	if err != nil || !settings.Credentials() {
+		t.Fatalf("empty work_root treated as cwd: %+v %v", settings, err)
+	}
+}
+
 // TestAbsentKEKDisablesOnlyDependentOperations proves an absent key is not a
 // startup failure.
 func TestAbsentKEKDisablesOnlyDependentOperations(t *testing.T) {

@@ -169,7 +169,11 @@ func (c configuration) resourceSettings() (resources.Settings, error) {
 	if c.KEKFile == "" {
 		return settings, nil
 	}
-	sealer, err := credential.Open(c.KEKFile, c.MetadataDir, c.WorkRoot)
+	forbidden := []string{c.MetadataDir}
+	if c.WorkRoot != "" {
+		forbidden = append(forbidden, c.WorkRoot)
+	}
+	sealer, err := credential.Open(c.KEKFile, forbidden...)
 	if err != nil {
 		return resources.Settings{}, err
 	}

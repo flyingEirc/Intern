@@ -75,6 +75,8 @@ Web 默认只监听 `127.0.0.1:8080`。登录 Cookie 固定带 `Secure`；非回
 
 同机 HTTPS 反向代理也应显式配置，例如 `--listen 127.0.0.1:8080 --tls-terminated-by-proxy --trusted-proxies 127.0.0.1,::1`；未信任代理时所有转发请求都使用代理地址，登录限流会被所有用户共享。只有实际的代理地址才应加入信任范围。
 
+仓库、数据源与策略 API 的凭据与预检设置全部可选：`--kek-file`（密封数据源与 FTP 密码的独立 KEK）、`--work-root`、`--xtrabackup-path`，以及必须同时为正的 `--min-work-bytes` 与 `--min-backup-bytes`。未配置时服务启动与既有接口行为不变，只有依赖这些输入的端点返回 `503 unavailable` 与固定文案；KEK 必须位于 `metadata_dir`、`work_root` 之外，创建或修改本地仓库根目录时也会校验该根目录不包含 KEK。数据源与 FTP 密码用 Tink AES-128-GCM 加密存储，AAD 绑定 `表:行ID:字段`，因此错误 KEK、跨行或跨字段移动的密文都会失败；API 只写不读，响应仅含 `has_secret`，FTP 仓库另有 `plaintext_credentials: true`。显式明文 FTP 的创建/更新在同一事务写入 `detail.plaintext_ftp=true` 的成功审计；`tls_mode` 必须显式为 `plain`，省略或 `explicit`/`implicit`（FTPS）一律 `422`，当前仅回环开发为明文 HTTP。预检失败返回 `409 preflight_failed` 且不写库：创建或启用失败时策略保持未启用；已经启用的策略在更新预检失败时保持启用及原有设置。未配置 KEK 时写入数据源或带密码的 FTP 仓库返回 `503 unavailable`，本地仓库探测不需要 KEK。`kind` 与 `tls_mode` 在 PUT 中不可变，形状不符返回 `422 validation_failed`。时区必须是非空 IANA 名称，`Local` 与空字符串按 `validation_failed` 拒绝。数据源预检无论成败都持久化 `last_preflight_json`，仅在身份检查成功时写入服务器身份。
+
 用户创建、修改、改密、角色/禁用、会话吊销及登出的数据库变更与成功审计同事务提交；审计写入失败则变更不生效。失败/拒绝请求和登录审计仍尽力记录，Cookie 传输与改密后的 token 轮换不属于数据库事务，不承诺网络与数据库原子性。每进程密码哈希总并发为 2、匿名登录最多占 1；过载仍以 `503` 与 `Retry-After` 拒绝，不采用无界等待。会话响应缓冲最多 8 MiB，超限或尝试流式输出返回单一 `500`，不静默截断 `200`；这不是整进程内存上限，也不是 SSE 支持。
 
 `--shutdown-timeout` 是优雅关闭窗口，不是整个进程的绝对退出上限。窗口结束后取消请求并关闭连接，再等待脱离审计的截止窗口、SQLite `busy_timeout` 和少量调度余量（当前额外最多 10.5 秒）。SQLite busy 回调及内核磁盘 I/O 不保证能被 context 立即中断；超过排空窗口仍会报告错误，不承诺有限时间排空任意卡死 I/O。部署的停止宽限期应覆盖这些窗口。

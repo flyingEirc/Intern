@@ -169,6 +169,10 @@ type PolicyInput struct {
 // because their tables belong to other modules.
 var ErrReferenced = errors.New("resource is still referenced")
 
+// ErrUnavailable reports a secret write or open that needs a KEK this
+// deployment does not configure. The server maps it to 503 unavailable.
+var ErrUnavailable = errors.New("credential encryption is not configured")
+
 // resourceError maps a missing row to ErrNotFound and a unique-name violation
 // to ErrConflict. SQLite reports both UNIQUE and PRIMARY KEY conflicts as 2067.
 func resourceError(err error) error {
@@ -300,7 +304,7 @@ func sealSecret(sealer SecretSealer, table, id string, secret []byte) ([]byte, e
 		return nil, errors.New("a secret is required")
 	}
 	if sealer == nil {
-		return nil, errors.New("credential encryption is not configured")
+		return nil, ErrUnavailable
 	}
 	return sealer.Seal(table, id, secretField, secret)
 }
@@ -310,7 +314,7 @@ func openSecret(sealer SecretSealer, table, id string, ciphertext []byte) ([]byt
 		return nil, errors.New("no stored secret")
 	}
 	if sealer == nil {
-		return nil, errors.New("credential encryption is not configured")
+		return nil, ErrUnavailable
 	}
 	return sealer.Unseal(table, id, secretField, ciphertext)
 }
@@ -568,8 +572,11 @@ func (s *Store) SourceSecret(ctx context.Context, id string, sealer SecretSealer
 	return openSecret(sealer, "sources", row.ID, row.SecretCiphertext)
 }
 
-// RecordSourcePreflight stores the observed identity and preflight record with
-// its success audit in one transaction.
+// RecordSourcePreflight stores last_preflight_json for every completed run.
+// Server identity columns are updated only when the record carries them; a
+// failed identity check leaves the previous identity in place. A successful
+// run commits its success audit in the same transaction; a failed run persists
+// the observation without a success audit.
 func (s *Store) RecordSourcePreflight(ctx context.Context, id string, record PreflightRecord, entry AuditLog) (Source, error) {
 	encoded, err := encodePreflight(&record)
 	if err != nil {
@@ -598,6 +605,9 @@ func storeSourcePreflight(ctx context.Context, q *storesql.Queries, id string, r
 	updated, err := sourceFromRow(row)
 	if err != nil {
 		return Source{}, err
+	}
+	if !record.OK {
+		return updated, nil
 	}
 	return updated, insertSuccessAudit(ctx, q, entry, "source", updated.ID)
 }

@@ -124,8 +124,8 @@ WHERE id = sqlc.arg(id) RETURNING *;
 
 -- name: RecordSourcePreflight :one
 UPDATE sources SET
-    server_uuid = sqlc.arg(server_uuid),
-    server_version = sqlc.arg(server_version),
+    server_uuid = COALESCE(sqlc.arg(server_uuid), server_uuid),
+    server_version = COALESCE(sqlc.arg(server_version), server_version),
     last_preflight_json = sqlc.arg(last_preflight_json),
     updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id) RETURNING *;

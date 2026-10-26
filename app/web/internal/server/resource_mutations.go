@@ -90,6 +90,19 @@ func (h resourceHandlers) updateRepository(c *gin.Context) {
 		return
 	}
 	id := c.Param("id")
+	stored, err := h.database.Repository(c.Request.Context(), id)
+	if err != nil {
+		h.resourceError(c, err, "Repository")
+		return
+	}
+	if request.Kind != stored.Kind || request.TLSMode != stored.TLSMode {
+		render.Error(c, http.StatusUnprocessableEntity, render.ValidationFailed, "kind and tls_mode cannot be changed")
+		return
+	}
+	if err = repositoryConfigShape(stored.Kind, request); err != nil {
+		render.Error(c, http.StatusUnprocessableEntity, render.ValidationFailed, err.Error())
+		return
+	}
 	in, plaintextFTP, err := h.repositoryInput(request, false)
 	if err != nil {
 		repositoryValidationError(c, err)
@@ -107,6 +120,23 @@ func (h resourceHandlers) updateRepository(c *gin.Context) {
 	if c.Writer.Status() < 500 {
 		middleware.MarkAuditRecorded(c)
 	}
+}
+
+// repositoryConfigShape refuses fields that belong to the other kind. PUT uses
+// this after reading the stored row so a local-shaped body cannot be written
+// onto an FTP repository, and the reverse cannot 500 while decoding.
+func repositoryConfigShape(kind string, request repositoryRequest) error {
+	switch kind {
+	case store.RepositoryLocal:
+		if request.FTP != nil || request.Password != nil {
+			return errors.New("a local repository has no FTP configuration or password")
+		}
+	case store.RepositoryFTP:
+		if request.Root != "" {
+			return errors.New("an FTP repository has no root")
+		}
+	}
+	return nil
 }
 
 // repositoryInput validates one repository body and applies the frozen tls_mode
@@ -223,7 +253,7 @@ type probeFailureBody struct {
 func (h resourceHandlers) probeRepository(c *gin.Context) {
 	outcome, err := h.service.ProbeRepository(c.Request.Context(), c.Param("id"))
 	switch {
-	case errors.Is(err, resources.ErrUnavailable):
+	case isUnavailable(err):
 		unavailableDependency(c)
 		return
 	case errors.Is(err, store.ErrNotFound):
@@ -385,7 +415,7 @@ func (h resourceHandlers) preflightSource(c *gin.Context) {
 	}
 	outcome, err := h.service.PreflightSource(c.Request.Context(), source.ID, request.LocalRepositoryID)
 	switch {
-	case errors.Is(err, resources.ErrUnavailable):
+	case isUnavailable(err):
 		unavailableDependency(c)
 		return
 	case errors.Is(err, resources.ErrLocalRepositoryRequired):
@@ -395,23 +425,37 @@ func (h resourceHandlers) preflightSource(c *gin.Context) {
 		h.resourceError(c, err, "Source")
 		return
 	}
-	if outcome.OK() {
-		// The observed identity and record commit with the success audit.
-		if _, err = h.database.RecordSourcePreflight(c.Request.Context(), source.ID, outcome.Record(),
-			middleware.SuccessAudit(c, "sources.preflight", http.StatusOK, "source", source.ID, store.AuditDetail{})); err != nil {
-			h.resourceError(c, err, "Source")
-			return
-		}
-		middleware.AuditResource(c, "source", source.ID, store.AuditDetail{})
-		middleware.MarkAuditRecorded(c)
-	} else {
-		// A completed run whose checks failed is still a 200 with ok=false, so the
-		// middleware's status-based result would call it a success. Record the
-		// attempt as failed explicitly; the write is best-effort.
-		middleware.RecordOutcome(c, h.database, h.logger, "failed", http.StatusOK,
-			"sources.preflight", "source", source.ID, store.AuditDetail{})
+	if !h.persistSourcePreflight(c, source.ID, outcome) {
+		return
 	}
 	render.JSON(c, http.StatusOK, preflightBody(outcome))
+}
+
+// persistSourcePreflight writes last_preflight_json for every completed run.
+// Server identity is stored only when the identity check succeeded. A failed
+// run keeps the 200 body and records a failed audit instead of a success audit.
+func (h resourceHandlers) persistSourcePreflight(c *gin.Context, sourceID string, outcome resources.PreflightOutcome) bool {
+	record := outcome.Record()
+	if outcome.Failure != nil && outcome.Failure.Check == "identity" {
+		record.ServerUUID = ""
+		record.ServerVersion = ""
+	}
+	entry := store.AuditLog{}
+	if outcome.OK() {
+		entry = middleware.SuccessAudit(c, "sources.preflight", http.StatusOK, "source", sourceID, store.AuditDetail{})
+	}
+	if _, err := h.database.RecordSourcePreflight(c.Request.Context(), sourceID, record, entry); err != nil {
+		h.resourceError(c, err, "Source")
+		return false
+	}
+	if outcome.OK() {
+		middleware.AuditResource(c, "source", sourceID, store.AuditDetail{})
+		middleware.MarkAuditRecorded(c)
+		return true
+	}
+	middleware.RecordOutcome(c, h.database, h.logger, "failed", http.StatusOK,
+		"sources.preflight", "source", sourceID, store.AuditDetail{})
+	return true
 }
 
 func preflightBody(outcome resources.PreflightOutcome) preflightResponse {
@@ -488,7 +532,7 @@ func (h resourceHandlers) enablePolicy(c *gin.Context) {
 	}
 	outcome, err := h.service.PolicyPreflight(c.Request.Context(), policy)
 	switch {
-	case errors.Is(err, resources.ErrUnavailable):
+	case isUnavailable(err):
 		unavailableDependency(c)
 		return
 	case err != nil:
@@ -544,9 +588,9 @@ func (h resourceHandlers) deletePolicy(c *gin.Context) {
 // authoriseEnable runs the preflight a requested enable requires. A policy is
 // enabled only after every check passed: the source preflight against its local
 // repository, plus the replica probe when one is configured. A failed preflight
-// refuses the whole request and writes nothing, so a create leaves no enabled row
-// and an update leaves the previous row exactly as it was. The caller then
-// reports 409 preflight_failed and enabled stays 0.
+// refuses the whole request and writes nothing, so a create leaves no row and an
+// update keeps the previous row, including an already-enabled policy and its
+// settings. The caller then reports 409 preflight_failed.
 func (h resourceHandlers) authoriseEnable(c *gin.Context, in *store.PolicyInput) bool {
 	if !in.Enabled {
 		return true
@@ -560,7 +604,7 @@ func (h resourceHandlers) authoriseEnable(c *gin.Context, in *store.PolicyInput)
 	}
 	outcome, err := h.service.PolicyPreflight(c.Request.Context(), policy)
 	switch {
-	case errors.Is(err, resources.ErrUnavailable):
+	case isUnavailable(err):
 		unavailableDependency(c)
 		return false
 	case errors.Is(err, store.ErrNotFound):
@@ -622,8 +666,16 @@ func validatePolicySchedule(request policyRequest) error {
 			return errors.New(name + " must be a standard 5-field cron expression")
 		}
 	}
-	if _, err := time.LoadLocation(request.Timezone); err != nil {
-		return errors.New("timezone must be an IANA time zone name")
+	return validateTimezone(request.Timezone)
+}
+
+func validateTimezone(name string) error {
+	if name == "" || name == "Local" {
+		return errors.New("timezone must be a non-empty IANA time zone name")
+	}
+	location, err := time.LoadLocation(name)
+	if err != nil || location == time.Local {
+		return errors.New("timezone must be a non-empty IANA time zone name")
 	}
 	return nil
 }
@@ -686,11 +738,15 @@ func (h resourceHandlers) sealer() store.SecretSealer {
 }
 
 func (h resourceHandlers) resourceWriteError(c *gin.Context, err error, name string) {
-	if errors.Is(err, resources.ErrUnavailable) {
+	if isUnavailable(err) {
 		unavailableDependency(c)
 		return
 	}
 	h.resourceError(c, err, name)
+}
+
+func isUnavailable(err error) bool {
+	return errors.Is(err, resources.ErrUnavailable) || errors.Is(err, store.ErrUnavailable)
 }
 
 // unavailableDependency is the fixed response for an operation whose deployment

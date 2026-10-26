@@ -82,11 +82,53 @@ func TestUnconfiguredServiceRefusesDependentOperations(t *testing.T) {
 	if _, err := service.PreflightSource(t.Context(), "any", "any"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("preflight = %v", err)
 	}
-	if _, err := service.ProbeRepository(t.Context(), "any"); !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("probe = %v", err)
-	}
 	if service.Settings.Credentials() || service.Settings.Preflight() {
 		t.Fatal("an empty settings value reported capabilities")
+	}
+}
+
+// TestProbeLocalDoesNotRequireSealer proves a local repository probe writes and
+// removes a staged object without a KEK, because it carries no secret.
+func TestProbeLocalDoesNotRequireSealer(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "metadata")
+	database, err := store.Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	root := filepath.Join(t.TempDir(), "root")
+	repository, err := database.CreateRepository(t.Context(), store.RepositoryInput{
+		Name: "local", Kind: store.RepositoryLocal, TLSMode: store.TLSModeNone, Root: root,
+	}, nil, store.SystemAudit("repositories.create", store.AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Store: database}
+	outcome, err := service.ProbeRepository(t.Context(), repository.ID)
+	if err != nil || !outcome.OK() {
+		t.Fatalf("local probe without sealer = %+v %v", outcome, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("probe left entries: %v", entries)
+	}
+}
+
+// TestProbeFTPWithoutSealerIsUnavailable covers the secret-bearing probe: FTP
+// still requires a KEK, even when the row already exists.
+func TestProbeFTPWithoutSealerIsUnavailable(t *testing.T) {
+	service, sealer, _ := newService(t)
+	repository := createRepository(t, service, sealer, store.RepositoryInput{
+		Name: "ftp", Kind: store.RepositoryFTP, TLSMode: store.TLSModePlain,
+		FTP:    &store.FTPRepositoryConfig{Host: "127.0.0.1", Port: closedPort(t), BasePath: "/b", Username: "u"},
+		Secret: []byte("{{SECRET_service_ftp}}"),
+	})
+	unconfigured := &Service{Store: service.Store}
+	if _, err := unconfigured.ProbeRepository(t.Context(), repository.ID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("ftp probe without sealer = %v", err)
 	}
 }
 

@@ -1380,6 +1380,7 @@ components:
           type: string
         timezone:
           type: string
+          minLength: 1
         max_chain_length:
           type: integer
           minimum: 1
@@ -1430,7 +1431,8 @@ components:
           type: string
         timezone:
           type: string
-          description: IANA time zone name.
+          minLength: 1
+          description: Non-empty IANA time zone name. The empty string and Local are rejected.
         max_chain_length:
           type: integer
           minimum: 1

@@ -480,3 +480,186 @@ func assertListCursorIsExclusive(t *testing.T, f *authFixture, cookie *http.Cook
 		}
 	}
 }
+
+// TestSecretWritesWithoutKEKAreUnavailable covers every secret-bearing write
+// without a configured sealer: source POST/PUT with a password and FTP POST/PUT
+// with a password return 503 unavailable. Omitting the password on PUT does not
+// need a sealer.
+func TestSecretWritesWithoutKEKAreUnavailable(t *testing.T) {
+	f := newUnconfiguredAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	keyFile := filepath.Join(f.keys, "kek.json")
+	if err := artifact.GenerateKey(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := credential.Open(keyFile, f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, req := range map[string]struct{ method, path, body string }{
+		"create source": {"POST", "/api/v1/sources", sourceBody("source-a")},
+		"create ftp":    {"POST", "/api/v1/repositories", ftpRepository("ftp-a", "{{SECRET_ftp_nokek}}")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := f.request(t, req.method, req.path, req.body, cookie, http.StatusServiceUnavailable)
+			assertSingleError(t, response, render.Unavailable)
+		})
+	}
+	source := f.createSourceRow(t, t.Context(), "existing-source", sealer)
+	ftp := f.createFTPRepositoryRow(t, t.Context(), "existing-ftp", "{{SECRET_ftp_existing}}", sealer)
+	putSource := `{"name":"existing-source","socket":"/run/mysqld/mysqld.sock","datadir":"/var/lib/mysql","username":"backup","password":"{{SECRET_source_put}}"}`
+	putFTP := ftpRepository("existing-ftp", "{{SECRET_ftp_put}}")
+	for name, req := range map[string]struct{ method, path, body string }{
+		"put source password": {"PUT", "/api/v1/sources/" + source, putSource},
+		"put ftp password":    {"PUT", "/api/v1/repositories/" + ftp, putFTP},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := f.request(t, req.method, req.path, req.body, cookie, http.StatusServiceUnavailable)
+			assertSingleError(t, response, render.Unavailable)
+		})
+	}
+	f.request(t, "PUT", "/api/v1/sources/"+source,
+		`{"name":"existing-source","socket":"/run/mysqld/other.sock","datadir":"/var/lib/mysql","username":"backup"}`,
+		cookie, http.StatusOK)
+	f.request(t, "PUT", "/api/v1/repositories/"+ftp,
+		`{"name":"existing-ftp","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/backups","username":"backup"}}`,
+		cookie, http.StatusOK)
+}
+
+// TestLocalProbeDoesNotRequireKEK proves a local repository can be created and
+// probed in a deployment that has no sealer.
+func TestLocalProbeDoesNotRequireKEK(t *testing.T) {
+	f := newUnconfiguredAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	root := newRepositoryDir(t)
+	created := decodeResponse[store.Repository](t,
+		f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", root), cookie, http.StatusCreated))
+	response := f.request(t, "POST", "/api/v1/repositories/"+created.ID+"/probe", "", cookie, http.StatusOK)
+	if body := decodeResponse[probeResponse](t, response); !body.OK || body.Error != nil {
+		t.Fatalf("probe = %+v", body)
+	}
+}
+
+// TestRepositoryPutRejectsKindAndShapeChanges reads the stored repository first:
+// a kind or tls_mode change, a local-shaped body against FTP, and a local→FTP
+// replacement are 422 validation_failed and leave the row unchanged.
+func TestRepositoryPutRejectsKindAndShapeChanges(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	root := newRepositoryDir(t)
+	local := decodeResponse[store.Repository](t,
+		f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", root), cookie, http.StatusCreated))
+	ftp := decodeResponse[store.Repository](t,
+		f.request(t, "POST", "/api/v1/repositories", ftpRepository("ftp-a", "{{SECRET_ftp_shape}}"), cookie, http.StatusCreated))
+	localCiphertext := storedCiphertext(t, f.dir, "repositories", local.ID)
+	ftpCiphertext := storedCiphertext(t, f.dir, "repositories", ftp.ID)
+	rejects := map[string]struct{ id, body string }{
+		"local to ftp": {local.ID, ftpRepository("local-a", "{{SECRET_ftp_put_never}}")},
+		"ftp root":     {ftp.ID, `{"name":"ftp-a","kind":"ftp","tls_mode":"plain","root":"` + root + `"}`},
+		"local tls":    {local.ID, `{"name":"local-a","kind":"local","tls_mode":"plain","root":"` + root + `"}`},
+		"ftp kind":     {ftp.ID, localRepository("ftp-a", root)},
+	}
+	for name, req := range rejects {
+		t.Run(name, func(t *testing.T) {
+			response := f.requestRejected(t, "PUT", "/api/v1/repositories/"+req.id, req.body, cookie, http.StatusUnprocessableEntity)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	assertRepositoryPutUnchanged(t, f, local.ID, ftp.ID, root, localCiphertext, ftpCiphertext)
+}
+
+func assertRepositoryPutUnchanged(t *testing.T, f *authFixture, localID, ftpID, root, localCiphertext, ftpCiphertext string) {
+	t.Helper()
+	unchangedLocal, err := f.database.Repository(t.Context(), localID)
+	if err != nil || unchangedLocal.Kind != store.RepositoryLocal || unchangedLocal.Local == nil || unchangedLocal.Local.Root != root {
+		t.Fatalf("local after rejected put: %+v %v", unchangedLocal, err)
+	}
+	unchangedFTP, err := f.database.Repository(t.Context(), ftpID)
+	if err != nil || unchangedFTP.Kind != store.RepositoryFTP || unchangedFTP.Local != nil {
+		t.Fatalf("ftp after rejected put: %+v %v", unchangedFTP, err)
+	}
+	if storedCiphertext(t, f.dir, "repositories", localID) != localCiphertext {
+		t.Fatal("rejected put wrote a local secret")
+	}
+	if storedCiphertext(t, f.dir, "repositories", ftpID) != ftpCiphertext {
+		t.Fatal("rejected put replaced the ftp secret")
+	}
+}
+
+// TestPolicyTimezoneRejectsLocalAndEmpty requires a non-empty IANA name.
+func TestPolicyTimezoneRejectsLocalAndEmpty(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "operator", "operator")
+	cookie := f.login(t, "operator", testPassword)
+	source := f.createSourceRow(t, t.Context(), "source-a", f.sealer)
+	local := f.createRepositoryRow(t, t.Context(), "local-a", newRepositoryDir(t), f.sealer)
+	for name, timezone := range map[string]string{"Local": "Local", "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(policyBody("policy-tz", source, local), `"timezone":"UTC"`, `"timezone":"`+timezone+`"`, 1)
+			response := f.requestRejected(t, "POST", "/api/v1/policies", body, cookie, http.StatusBadRequest)
+			assertSingleError(t, response, render.ValidationFailed)
+		})
+	}
+	var count int
+	if err := queryOne(t, f.dir, `SELECT COUNT(*) FROM policies`, &count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("rejected timezone persisted %d policies", count)
+	}
+}
+
+// TestDeleteRefusesReplicaReferencedRepository covers a repository referenced
+// only by a replicas row created through the real replication migration.
+func TestDeleteRefusesReplicaReferencedRepository(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	repository := f.createRepositoryRow(t, t.Context(), "replica-target", newRepositoryDir(t), f.sealer)
+	insertReplica(t, f.dir, repository)
+	response := f.request(t, "DELETE", "/api/v1/repositories/"+repository, "", cookie, http.StatusConflict)
+	assertSingleError(t, response, render.Conflict)
+	if _, err := f.database.Repository(t.Context(), repository); err != nil {
+		t.Fatalf("replica-referenced repository was deleted: %v", err)
+	}
+	expectAuditCount(t, f.dir, "repositories.delete", "success", 0)
+}
+
+// insertReplica adds one replicas row that refers to repositoryID. replicas is
+// owned by the replication migration; backups.chain_id belongs to the physical
+// migration, so this uses the shared intern.db file directly.
+func insertReplica(t *testing.T, dir, repositoryID string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := t.Context()
+	_, err = db.ExecContext(ctx, `INSERT INTO chains
+		(id, source_id, server_uuid, server_version, tool_version, started_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		"replica-chain", "replica-source", "00000000-0000-0000-0000-000000000000", "8.4.11", "8.4.0-7", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO backups
+		(id, chain_id, seq, kind, status, instance_id, run_id, object_path, key_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"replica-backup", "replica-chain", 1, "physical-full", "completed", "instance", "run",
+		"instance/source/chain/backup", "key", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO replicas
+		(backup_id, repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"replica-backup", repositoryID, "replicate:replica-backup:"+repositoryID, "pending",
+		"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+}

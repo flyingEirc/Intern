@@ -327,3 +327,31 @@ func writeCiphertext(t *testing.T, dir, table, id string, ciphertext []byte) {
 		t.Fatal(err)
 	}
 }
+
+func TestSecretWriteWithoutSealerIsUnavailable(t *testing.T) {
+	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	_, err := s.CreateSource(t.Context(), SourceInput{
+		Name: "source", Socket: "/run/mysqld/mysqld.sock", Datadir: "/var/lib/mysql",
+		Username: "backup", Secret: []byte("{{SECRET_unconfigured}}"),
+	}, nil, SystemAudit("sources.create", AuditDetail{}))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("create source without sealer = %v", err)
+	}
+	_, err = s.CreateRepository(t.Context(), RepositoryInput{
+		Name: "ftp", Kind: RepositoryFTP, TLSMode: TLSModePlain,
+		FTP:    &FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/b", Username: "u"},
+		Secret: []byte("{{SECRET_unconfigured_ftp}}"),
+	}, nil, SystemAudit("repositories.create", AuditDetail{}))
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("create ftp without sealer = %v", err)
+	}
+	local, err := s.CreateRepository(t.Context(), RepositoryInput{
+		Name: "local", Kind: RepositoryLocal, TLSMode: TLSModeNone, Root: filepath.Join(t.TempDir(), "root"),
+	}, nil, SystemAudit("repositories.create", AuditDetail{}))
+	if err != nil {
+		t.Fatalf("create local without sealer = %v", err)
+	}
+	if local.HasSecret {
+		t.Fatal("local repository stored a secret")
+	}
+}

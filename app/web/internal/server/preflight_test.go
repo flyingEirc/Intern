@@ -86,8 +86,9 @@ func closedAddress(t *testing.T) (string, int64) {
 }
 
 // TestSourcePreflightMapsRealFailures runs the real physical preflight against an
-// unreachable MySQL socket. It must report a structured failure and persist
-// nothing, and the audit must record the attempt without a secret.
+// unreachable MySQL socket. It must report a structured failure, persist
+// last_preflight_json for the failed outcome, leave server identity unset, and
+// audit the attempt without a secret.
 func TestSourcePreflightMapsRealFailures(t *testing.T) {
 	f := newPreflightFixture(t)
 	f.seed(t, "operator", "operator")
@@ -110,8 +111,11 @@ func TestSourcePreflightMapsRealFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted.LastPreflight != nil || persisted.ServerUUID != nil || persisted.ServerVersion != nil {
-		t.Fatalf("failed preflight persisted state: %+v", persisted)
+	if persisted.LastPreflight == nil || persisted.LastPreflight.OK {
+		t.Fatalf("failed preflight was not persisted: %+v", persisted.LastPreflight)
+	}
+	if persisted.ServerUUID != nil || persisted.ServerVersion != nil {
+		t.Fatalf("failed identity check persisted server identity: %+v", persisted)
 	}
 	expectAuditCount(t, f.dir, "sources.preflight", "success", 0)
 	// The contract permits paths the client supplied; it forbids the secret and

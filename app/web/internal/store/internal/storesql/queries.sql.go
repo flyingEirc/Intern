@@ -759,8 +759,8 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 
 const recordSourcePreflight = `-- name: RecordSourcePreflight :one
 UPDATE sources SET
-    server_uuid = ?1,
-    server_version = ?2,
+    server_uuid = COALESCE(?1, server_uuid),
+    server_version = COALESCE(?2, server_version),
     last_preflight_json = ?3,
     updated_at = ?4
 WHERE id = ?5 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at

@@ -179,12 +179,10 @@ func (s *Service) PreflightSource(ctx context.Context, sourceID, localRepository
 }
 
 // ProbeRepository writes, reads and removes a temporary object on the target
-// repository. Local repositories are probed through the local storage package;
-// FTP repositories are opened with this instance's namespace marker.
+// repository. Local repositories are probed through the local storage package
+// and need no sealer. FTP repositories decrypt the stored password and are
+// opened with this instance's namespace marker.
 func (s *Service) ProbeRepository(ctx context.Context, repositoryID string) (ProbeOutcome, error) {
-	if !s.Settings.Credentials() {
-		return ProbeOutcome{}, ErrUnavailable
-	}
 	repository, err := s.Store.Repository(ctx, repositoryID)
 	if err != nil {
 		return ProbeOutcome{}, err
@@ -198,6 +196,9 @@ func (s *Service) ProbeRepository(ctx context.Context, repositoryID string) (Pro
 		}
 		return probeLocal(ctx, repository.Local.Root), nil
 	case store.RepositoryFTP:
+		if !s.Settings.Credentials() {
+			return ProbeOutcome{}, ErrUnavailable
+		}
 		return s.probeFTP(ctx, repository)
 	default:
 		return ProbeOutcome{}, fmt.Errorf("unsupported repository kind %q", repository.Kind)
