@@ -94,16 +94,16 @@ func TestR1RestartChildWorker(t *testing.T) {
 	w.loadManifest()
 	r := w.replicator(repositoryID, replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	must(t, r.Recover(t.Context()))
-	if rows := w.partRows(repositoryID); rows != 0 {
+	if rows := w.partRows(t, repositoryID); rows != 0 {
 		t.Fatalf("recovery kept %d part rows", rows)
 	}
-	w.rawNormal().absent(t, part)
+	w.rawNormal(t).absent(t, part)
 	processed, err := r.Step(t.Context())
 	if !processed {
 		t.Fatalf("no item was attemptable after recovery: %v", err)
 	}
 	must(t, err)
-	if status := w.replica(r, backupID).Status; status != replication.StatusVerified {
+	if status := w.replica(t, r, backupID).Status; status != replication.StatusVerified {
 		t.Fatalf("the recovered item is %q, want verified", status)
 	}
 	must(t, r.Recover(t.Context()))

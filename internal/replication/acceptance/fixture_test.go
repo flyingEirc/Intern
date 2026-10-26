@@ -259,101 +259,102 @@ func (w *worker) primary(policy replication.Policy) *replication.Replicator {
 }
 
 // produced returns the producer's own record of the backups of one source.
-func (w *worker) produced(sourceID string) []producedFile {
-	w.t.Helper()
+func (w *worker) produced(t *testing.T, sourceID string) []producedFile {
+	t.Helper()
 	files := w.manifest.bySource(sourceID)
 	if len(files) == 0 {
-		w.t.Fatalf("producer recorded no backup for source %s", sourceID)
+		t.Fatalf("producer recorded no backup for source %s", sourceID)
 	}
 	return files
 }
 
 // producedOfChain narrows one source's records to a single chain.
-func (w *worker) producedOfChain(sourceID, chainID string) []producedFile {
+func (w *worker) producedOfChain(t *testing.T, sourceID, chainID string) []producedFile {
+	t.Helper()
 	var selected []producedFile
-	for _, file := range w.produced(sourceID) {
+	for _, file := range w.produced(t, sourceID) {
 		if file.ChainID == chainID {
 			selected = append(selected, file)
 		}
 	}
 	if len(selected) == 0 {
-		w.t.Fatalf("no produced backup of source %s belongs to chain %s", sourceID, chainID)
+		t.Fatalf("no produced backup of source %s belongs to chain %s", sourceID, chainID)
 	}
 	return selected
 }
 
-func (w *worker) backup(id string) physicalstore.Backup {
-	w.t.Helper()
-	record, err := w.store.Backup(w.t.Context(), id)
-	must(w.t, err)
+func (w *worker) backup(t *testing.T, id string) physicalstore.Backup {
+	t.Helper()
+	record, err := w.store.Backup(t.Context(), id)
+	must(t, err)
 	return record
 }
 
-func (w *worker) replica(replicator *replication.Replicator, backupID string) replication.Replica {
-	w.t.Helper()
-	record, err := replicator.Replica(w.t.Context(), backupID)
-	must(w.t, err)
+func (w *worker) replica(t *testing.T, replicator *replication.Replicator, backupID string) replication.Replica {
+	t.Helper()
+	record, err := replicator.Replica(t.Context(), backupID)
+	must(t, err)
 	return record
 }
 
 // replicaFor reads one replica of any repository. Only the identity matters for
 // the accessor, so no remote is attached.
-func (w *worker) replicaFor(repositoryID, backupID string) replication.Replica {
-	w.t.Helper()
-	record, err := (&replication.Replicator{DB: w.db, RepositoryID: repositoryID}).Replica(w.t.Context(), backupID)
-	must(w.t, err)
+func (w *worker) replicaFor(t *testing.T, repositoryID, backupID string) replication.Replica {
+	t.Helper()
+	record, err := (&replication.Replicator{DB: w.db, RepositoryID: repositoryID}).Replica(t.Context(), backupID)
+	must(t, err)
 	return record
 }
 
-func (w *worker) count(query string, args ...any) int {
-	w.t.Helper()
+func (w *worker) count(t *testing.T, query string, args ...any) int {
+	t.Helper()
 	var count int
-	must(w.t, w.db.QueryRowContext(w.t.Context(), query, args...).Scan(&count))
+	must(t, w.db.QueryRowContext(t.Context(), query, args...).Scan(&count))
 	return count
 }
 
-func (w *worker) partRows(repositoryID string) int {
-	return w.count("SELECT COUNT(*) FROM replica_parts WHERE repository_id = ?", repositoryID)
+func (w *worker) partRows(t *testing.T, repositoryID string) int {
+	return w.count(t, "SELECT COUNT(*) FROM replica_parts WHERE repository_id = ?", repositoryID)
 }
 
 // memberStatuses returns the per-member state of one replica.
-func (w *worker) memberStatuses(backupID, repositoryID string) map[string]string {
-	w.t.Helper()
-	rows, err := w.db.QueryContext(w.t.Context(),
+func (w *worker) memberStatuses(t *testing.T, backupID, repositoryID string) map[string]string {
+	t.Helper()
+	rows, err := w.db.QueryContext(t.Context(),
 		"SELECT member, status FROM replica_members WHERE backup_id = ? AND repository_id = ?", backupID, repositoryID)
-	must(w.t, err)
-	defer func() { must(w.t, rows.Close()) }()
+	must(t, err)
+	defer func() { must(t, rows.Close()) }()
 	result := make(map[string]string, len(members))
 	for rows.Next() {
 		var member, status string
-		must(w.t, rows.Scan(&member, &status))
+		must(t, rows.Scan(&member, &status))
 		result[member] = status
 	}
-	must(w.t, rows.Err())
+	must(t, rows.Err())
 	return result
 }
 
 // alertSince reads the durable alert time of one replica, nil when cleared.
-func (w *worker) alertSince(repositoryID, backupID string) *time.Time {
-	w.t.Helper()
+func (w *worker) alertSince(t *testing.T, repositoryID, backupID string) *time.Time {
+	t.Helper()
 	var value sql.NullString
-	err := w.db.QueryRowContext(w.t.Context(),
+	err := w.db.QueryRowContext(t.Context(),
 		"SELECT alert_since FROM replicas WHERE backup_id = ? AND repository_id = ?", backupID, repositoryID).Scan(&value)
-	must(w.t, err)
+	must(t, err)
 	if !value.Valid {
 		return nil
 	}
 	parsed, parseErr := time.Parse(time.RFC3339Nano, value.String)
-	must(w.t, parseErr)
+	must(t, parseErr)
 	return &parsed
 }
 
 // nextAttempt reads the durable schedule of one replica.
-func (w *worker) nextAttempt(repositoryID, backupID string) time.Time {
-	w.t.Helper()
-	record := w.replicaFor(repositoryID, backupID)
+func (w *worker) nextAttempt(t *testing.T, repositoryID, backupID string) time.Time {
+	t.Helper()
+	record := w.replicaFor(t, repositoryID, backupID)
 	if record.NextAttemptAt == nil {
-		w.t.Fatal("replica has no schedule")
+		t.Fatal("replica has no schedule")
 	}
 	return *record.NextAttemptAt
 }
@@ -380,14 +381,14 @@ func remoteDigests(file producedFile) map[string]string {
 
 // localDigest hashes one published local member through the real repository and
 // returns its digest and byte count.
-func (w *worker) localDigest(file producedFile, member string) (string, int64) {
-	w.t.Helper()
+func (w *worker) localDigest(t *testing.T, file producedFile, member string) (string, int64) {
+	t.Helper()
 	opened, err := w.repo.Open(file.ObjectPath + "/" + member)
-	must(w.t, err)
-	defer func() { must(w.t, opened.Close()) }()
+	must(t, err)
+	defer func() { must(t, opened.Close()) }()
 	hash := sha256.New()
 	size, err := io.Copy(hash, opened)
-	must(w.t, err)
+	must(t, err)
 	return hex.EncodeToString(hash.Sum(nil)), size
 }
 
@@ -396,37 +397,37 @@ func (w *worker) localPath(file producedFile, member string) string {
 	return filepath.Join(w.paths.repo, filepath.FromSlash(file.ObjectPath), member)
 }
 
-func (w *worker) localBytes(file producedFile, member string) []byte {
-	w.t.Helper()
+func (w *worker) localBytes(t *testing.T, file producedFile, member string) []byte {
+	t.Helper()
 	data, err := os.ReadFile(w.localPath(file, member))
-	must(w.t, err)
+	must(t, err)
 	return data
 }
 
 // corruptLocal flips bytes of one member in place, keeping its size, and returns
 // the original bytes so the scenario can restore them.
-func (w *worker) corruptLocal(file producedFile, member string) []byte {
-	w.t.Helper()
-	original := w.localBytes(file, member)
+func (w *worker) corruptLocal(t *testing.T, file producedFile, member string) []byte {
+	t.Helper()
+	original := w.localBytes(t, file, member)
 	if len(original) < 64 {
-		w.t.Fatalf("local member %s is too small to corrupt", member)
+		t.Fatalf("local member %s is too small to corrupt", member)
 	}
 	corrupted := bytes.Clone(original)
 	for i := len(corrupted) / 2; i < len(corrupted)/2+16; i++ {
 		corrupted[i] ^= 0xff
 	}
-	must(w.t, os.WriteFile(w.localPath(file, member), corrupted, 0o600))
+	must(t, os.WriteFile(w.localPath(file, member), corrupted, 0o600))
 	return original
 }
 
-func (w *worker) restoreLocal(file producedFile, member string, data []byte) {
-	w.t.Helper()
-	must(w.t, os.WriteFile(w.localPath(file, member), data, 0o600))
+func (w *worker) restoreLocal(t *testing.T, file producedFile, member string, data []byte) {
+	t.Helper()
+	must(t, os.WriteFile(w.localPath(file, member), data, 0o600))
 }
 
 // published reports whether the local object directory of one backup exists.
-func (w *worker) published(file producedFile) bool {
-	w.t.Helper()
+func (w *worker) published(t *testing.T, file producedFile) bool {
+	t.Helper()
 	_, err := os.Lstat(filepath.Join(w.paths.repo, filepath.FromSlash(file.ObjectPath)))
 	if err == nil {
 		return true
@@ -434,7 +435,7 @@ func (w *worker) published(file producedFile) bool {
 	if errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	must(w.t, err)
+	must(t, err)
 	return false
 }
 
@@ -445,25 +446,25 @@ type raw struct {
 	conn *client.ServerConn
 }
 
-func (w *worker) rawNormal() *raw {
-	return w.rawAccount("normal", os.Getenv("INTERN_R1_FTP_PASSWORD"))
+func (w *worker) rawNormal(t *testing.T) *raw {
+	return w.rawAccount(t, "normal", os.Getenv("INTERN_R1_FTP_PASSWORD"))
 }
 
-func (w *worker) rawQuota() *raw {
-	return w.rawAccount("quota", os.Getenv("INTERN_R1_FTP_QUOTA_PASSWORD"))
+func (w *worker) rawQuota(t *testing.T) *raw {
+	return w.rawAccount(t, "quota", os.Getenv("INTERN_R1_FTP_QUOTA_PASSWORD"))
 }
 
-func (w *worker) rawAccount(user, password string) *raw {
-	w.t.Helper()
+func (w *worker) rawAccount(t *testing.T, user, password string) *raw {
+	t.Helper()
 	conn, err := client.Dial(os.Getenv("INTERN_R1_FTP_ADDRESS"), client.DialWithTimeout(10*time.Second))
-	must(w.t, err)
+	must(t, err)
 	if err = conn.Login(user, password); err != nil {
 		_ = conn.Quit() //nolint:errcheck // The login failure is the diagnostic.
-		must(w.t, err)
+		must(t, err)
 	}
-	w.t.Cleanup(func() {
+	t.Cleanup(func() {
 		if quitErr := conn.Quit(); quitErr != nil && !errors.Is(quitErr, io.EOF) {
-			w.t.Logf("raw FTP quit: %v", quitErr)
+			t.Logf("raw FTP quit: %v", quitErr)
 		}
 	})
 	return &raw{conn: conn}
@@ -571,5 +572,5 @@ func (r *raw) removeTree(t *testing.T, dir string) {
 // each quota scenario starts from the account's real free-file budget.
 func (w *worker) resetQuota(t *testing.T) {
 	t.Helper()
-	w.rawQuota().removeTree(t, instanceID)
+	w.rawQuota(t).removeTree(t, instanceID)
 }

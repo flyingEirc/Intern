@@ -44,7 +44,10 @@ func TestR1Worker(t *testing.T) {
 		{"a6-handoff", a6Handoff},
 	}
 	for _, step := range steps {
-		t.Run(step.name, func(t *testing.T) { step.run(t, w) })
+		t.Run(step.name, func(t *testing.T) {
+			w.t = t
+			step.run(t, w)
+		})
 	}
 }
 
@@ -118,11 +121,11 @@ func drive(t *testing.T, r *replication.Replicator) int {
 // verified replica.
 func verify(t *testing.T, w *worker, r *replication.Replicator, backupID string) replication.Replica {
 	t.Helper()
-	if next := w.nextAttempt(r.RepositoryID, backupID); next.After(w.now) {
+	if next := w.nextAttempt(t, r.RepositoryID, backupID); next.After(w.now) {
 		w.now = next
 	}
 	must(t, attemptStep(t, r))
-	record := w.replica(r, backupID)
+	record := w.replica(t, r, backupID)
 	if record.Status != replication.StatusVerified {
 		t.Fatalf("replica status = %q, want verified", record.Status)
 	}
@@ -140,7 +143,7 @@ func enqueue(t *testing.T, r *replication.Replicator, backupID string) {
 func a1(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.primary(replication.Policy{})
-	files := w.produced("r1")
+	files := w.produced(t, "r1")
 	if len(files) != 3 {
 		t.Fatalf("produced %d backups, want a full plus two incrementals", len(files))
 	}
@@ -151,15 +154,15 @@ func a1(t *testing.T, w *worker) {
 	for _, file := range files[1:] {
 		verify(t, w, r, file.BackupID)
 	}
-	raw := w.rawNormal()
+	raw := w.rawNormal(t)
 	for index, file := range files {
 		assertMembers(t, w, raw, r, file)
 		t.Logf("R1-A1 backup=%d chain=%s seq=%d keys=%s remote_sha256=exact authenticated_eof=true uploaded_before_verified=true uploaded_at=%s verified_at=%s",
 			index, file.ChainID, file.Seq, strings.Join(remoteKeys(file), ","),
-			w.replica(r, file.BackupID).UploadedAt.UTC().Format(time.RFC3339),
-			w.replica(r, file.BackupID).VerifiedAt.UTC().Format(time.RFC3339))
+			w.replica(t, r, file.BackupID).UploadedAt.UTC().Format(time.RFC3339),
+			w.replica(t, r, file.BackupID).VerifiedAt.UTC().Format(time.RFC3339))
 	}
-	if rows := w.partRows(r.RepositoryID); rows != 0 {
+	if rows := w.partRows(t, r.RepositoryID); rows != 0 {
 		t.Fatalf("committed uploads left %d temporary part rows", rows)
 	}
 	if first != files[0].BackupID {
@@ -177,7 +180,7 @@ func observeUploaded(t *testing.T, w *worker, r *replication.Replicator, files [
 			return nil
 		}
 		for _, file := range files {
-			if w.replica(r, file.BackupID).Status == replication.StatusUploaded {
+			if w.replica(t, r, file.BackupID).Status == replication.StatusUploaded {
 				if observed != "" {
 					t.Fatal("more than one item was uploaded at once")
 				}
@@ -190,7 +193,7 @@ func observeUploaded(t *testing.T, w *worker, r *replication.Replicator, files [
 	if observed == "" {
 		t.Fatal("status never passed through uploaded before verified")
 	}
-	record := w.replica(r, observed)
+	record := w.replica(t, r, observed)
 	if record.UploadedAt == nil || record.VerifiedAt == nil || record.UploadedAt.After(*record.VerifiedAt) {
 		t.Fatal("the uploaded status does not precede verification")
 	}
@@ -201,7 +204,7 @@ func observeUploaded(t *testing.T, w *worker, r *replication.Replicator, files [
 // local ciphertext, authenticate to EOF, and are recorded as verified.
 func assertMembers(t *testing.T, w *worker, client *raw, r *replication.Replicator, file producedFile) {
 	t.Helper()
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status != replication.StatusVerified || record.VerifiedAt == nil || record.UploadedAt == nil {
 		t.Fatalf("backup %s is not verified with both times", file.BackupID)
 	}
@@ -210,14 +213,14 @@ func assertMembers(t *testing.T, w *worker, client *raw, r *replication.Replicat
 	}
 	for _, member := range members {
 		remote, size := client.retrieve(t, file.ObjectPath+"/"+member)
-		local, localSize := w.localDigest(file, member)
+		local, localSize := w.localDigest(t, file, member)
 		if remote != local || size != localSize {
 			t.Fatalf("remote %s differs from the local member", member)
 		}
 		if want := remoteDigests(file)[member]; remote != want {
 			t.Fatalf("remote %s does not carry the produced ciphertext", member)
 		}
-		if status := w.memberStatuses(file.BackupID, r.RepositoryID)[member]; status != "verified" {
+		if status := w.memberStatuses(t, file.BackupID, r.RepositoryID)[member]; status != "verified" {
 			t.Fatalf("member %s status = %q, want verified", member, status)
 		}
 	}
@@ -251,28 +254,28 @@ func authenticateRemote(t *testing.T, w *worker, client *raw, file producedFile)
 func a2LocalCorrupt(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.replicator("ftp-corrupt", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
-	file := w.produced("r1-corrupt")[0]
-	original := w.corruptLocal(file, "payload.bin")
-	defer w.restoreLocal(file, "payload.bin", original)
-	corruptedDigest, corruptedSize := w.localDigest(file, "payload.bin")
+	file := w.produced(t, "r1-corrupt")[0]
+	original := w.corruptLocal(t, file, "payload.bin")
+	defer w.restoreLocal(t, file, "payload.bin", original)
+	corruptedDigest, corruptedSize := w.localDigest(t, file, "payload.bin")
 	enqueue(t, r, file.BackupID)
 	expectFailure(t, r, "corrupt local ciphertext was not refused")
 	assertLocalCorrupt(t, w, r, file)
 	// No retry is scheduled: a much later step still must not attempt the item.
 	w.now = w.now.Add(48 * time.Hour)
 	expectIdle(t, r, "local corruption was retried")
-	if after := w.replica(r, file.BackupID); after.Attempts != 1 {
+	if after := w.replica(t, r, file.BackupID); after.Attempts != 1 {
 		t.Fatalf("attempts after waiting = %d, want 1", after.Attempts)
 	}
 	// The local row, its presence flag, and the bytes the engine read are intact.
-	backup := w.backup(file.BackupID)
+	backup := w.backup(t, file.BackupID)
 	if backup.Status != "completed" || !backup.LocalPresent || backup.PayloadSHA256 != file.PayloadSHA256 {
 		t.Fatalf("local row changed: status=%q present=%t", backup.Status, backup.LocalPresent)
 	}
-	if digest, size := w.localDigest(file, "payload.bin"); digest != corruptedDigest || size != corruptedSize {
+	if digest, size := w.localDigest(t, file, "payload.bin"); digest != corruptedDigest || size != corruptedSize {
 		t.Fatal("the engine altered the local payload")
 	}
-	w.rawNormal().absent(t, file.ObjectPath+"/payload.bin")
+	w.rawNormal(t).absent(t, file.ObjectPath+"/payload.bin")
 	t.Logf("R1-A2 local_corrupt backup=%s attempts=1 retried=false alert=set local_status=completed local_present=true local_bytes_untouched=true remote_payload=absent",
 		file.BackupID)
 }
@@ -280,14 +283,14 @@ func a2LocalCorrupt(t *testing.T, w *worker) {
 // assertLocalCorrupt requires the recorded local_corrupt state and its alert.
 func assertLocalCorrupt(t *testing.T, w *worker, r *replication.Replicator, file producedFile) {
 	t.Helper()
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status != replication.StatusFailed || record.LastErrorCode != replication.CodeLocalCorrupt {
 		t.Fatalf("status=%q code=%q, want failed/local_corrupt", record.Status, record.LastErrorCode)
 	}
 	if record.Attempts != 1 {
 		t.Fatalf("attempts = %d, want one", record.Attempts)
 	}
-	if w.alertSince(r.RepositoryID, file.BackupID) == nil {
+	if w.alertSince(t, r.RepositoryID, file.BackupID) == nil {
 		t.Fatal("local corruption did not raise the alert")
 	}
 }
@@ -296,10 +299,10 @@ func assertLocalCorrupt(t *testing.T, w *worker, r *replication.Replicator, file
 // the upload and the readback, using the real FTP protocol.
 func a2RemoteTamper(t *testing.T, w *worker) {
 	fresh(w)
-	file := w.produced("r1-tamper")[0]
+	file := w.produced(t, "r1-tamper")[0]
 	r := w.replicator("ftp-tamper", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	enqueue(t, r, file.BackupID)
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	_, err := r.StepWithFault(t.Context(), func(point string) error {
 		if point == "before_verify" {
 			client.store(t, file.ObjectPath+"/payload.bin", []byte("replaced-by-the-harness"))
@@ -309,11 +312,11 @@ func a2RemoteTamper(t *testing.T, w *worker) {
 	if err == nil {
 		t.Fatal("a tampered remote member was accepted as a verified copy")
 	}
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status == replication.StatusVerified {
 		t.Fatal("a tampered copy reached verified")
 	}
-	if status := w.memberStatuses(file.BackupID, r.RepositoryID)["payload.bin"]; status == "verified" {
+	if status := w.memberStatuses(t, file.BackupID, r.RepositoryID)["payload.bin"]; status == "verified" {
 		t.Fatal("the tampered member was marked verified")
 	}
 	t.Logf("R1-A2 remote_tamper backup=%s status=%s member=payload.bin tampered_via=real-ftp", file.BackupID, record.Status)
@@ -322,10 +325,10 @@ func a2RemoteTamper(t *testing.T, w *worker) {
 // a2RemoteTruncate rewrites a committed remote member with a shorter body.
 func a2RemoteTruncate(t *testing.T, w *worker) {
 	fresh(w)
-	file := w.produced("r1-tamper")[1]
+	file := w.produced(t, "r1-tamper")[1]
 	r := w.replicator("ftp-truncate", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	enqueue(t, r, file.BackupID)
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	_, err := r.StepWithFault(t.Context(), func(point string) error {
 		if point == "before_verify" {
 			client.truncate(t, file.ObjectPath+"/metadata.bin", []byte{})
@@ -335,7 +338,7 @@ func a2RemoteTruncate(t *testing.T, w *worker) {
 	if err == nil {
 		t.Fatal("a truncated remote member was accepted as a verified copy")
 	}
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status == replication.StatusVerified {
 		t.Fatal("a truncated copy reached verified")
 	}
@@ -349,17 +352,17 @@ func a2RemoteTruncate(t *testing.T, w *worker) {
 // only authentication can fail.
 func a2WrongKEK(t *testing.T, w *worker) {
 	fresh(w)
-	file := w.produced("r1-kek")[0]
+	file := w.produced(t, "r1-kek")[0]
 	r := w.replicator("ftp-wrong-kek", replication.NewFTPRemote(w.ftp), w.paths.wrongKey, replication.Policy{})
 	enqueue(t, r, file.BackupID)
 	expectFailure(t, r, "a copy authenticated with the wrong KEK was accepted")
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status == replication.StatusVerified || record.LastErrorCode != replication.CodeVerifyArtifact {
 		t.Fatalf("status=%q code=%q, want not verified with verify_artifact", record.Status, record.LastErrorCode)
 	}
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	remote, size := client.retrieve(t, file.ObjectPath+"/payload.bin")
-	local, localSize := w.localDigest(file, "payload.bin")
+	local, localSize := w.localDigest(t, file, "payload.bin")
 	if remote != local || size != localSize {
 		t.Fatal("the wrong-KEK scenario changed the remote ciphertext")
 	}
@@ -371,25 +374,25 @@ func a2WrongKEK(t *testing.T, w *worker) {
 func a2Quota(t *testing.T, w *worker) {
 	fresh(w)
 	w.resetQuota(t)
-	file := w.produced("r1-quota")[0]
+	file := w.produced(t, "r1-quota")[0]
 	r := w.replicator(quotaRepo, replication.NewFTPRemote(w.quota), w.paths.key, replication.Policy{})
 	enqueue(t, r, file.BackupID)
 	expectFailure(t, r, "the quota account accepted the copy")
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status == replication.StatusVerified || record.LastErrorCode != replication.CodeRemoteQuota {
 		t.Fatalf("status=%q code=%q, want not verified with remote_quota", record.Status, record.LastErrorCode)
 	}
 	if record.LastReplyCode != 552 {
 		t.Fatalf("reply code = %d, want the real 552", record.LastReplyCode)
 	}
-	if rows := w.partRows(quotaRepo); rows != 0 {
+	if rows := w.partRows(t, quotaRepo); rows != 0 {
 		t.Fatalf("the quota failure left %d recorded parts", rows)
 	}
-	published := w.countRemote(t, w.rawQuota(), file)
+	published := w.countRemote(t, w.rawQuota(t), file)
 	if published == len(members) {
 		t.Fatal("the quota refusal still published every member")
 	}
-	if parts := w.rawQuota().parts(t, file.ObjectPath); len(parts) != 0 {
+	if parts := w.rawQuota(t).parts(t, file.ObjectPath); len(parts) != 0 {
 		t.Fatalf("the server still lists temporary parts: %v", parts)
 	}
 	t.Logf("R1-A2 quota_552 backup=%s code=%s reply=552 published_members=%d/%d parts=cleaned",
@@ -412,23 +415,23 @@ func (w *worker) countRemote(t *testing.T, client *raw, file producedFile) int {
 func a3Idempotent(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.replicator("ftp-idempotent", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
-	file := w.produced("r1-retry")[0]
+	file := w.produced(t, "r1-retry")[0]
 	single := "SELECT COUNT(*) FROM replicas WHERE backup_id = ? AND repository_id = ?"
 	for range 3 {
 		enqueue(t, r, file.BackupID)
 		must(t, r.EnqueueCompleted(t.Context(), "r1-retry"))
 	}
-	if rows := w.count(single, file.BackupID, r.RepositoryID); rows != 1 {
+	if rows := w.count(t, single, file.BackupID, r.RepositoryID); rows != 1 {
 		t.Fatalf("replica rows for one backup = %d, want 1", rows)
 	}
 	verify(t, w, r, file.BackupID)
 	// A repeated trigger after verification changes nothing.
 	enqueue(t, r, file.BackupID)
 	must(t, r.EnqueueCompleted(t.Context(), "r1-retry"))
-	if rows := w.count(single, file.BackupID, r.RepositoryID); rows != 1 {
+	if rows := w.count(t, single, file.BackupID, r.RepositoryID); rows != 1 {
 		t.Fatalf("rows after repeated triggers = %d, want 1", rows)
 	}
-	if record := w.replica(r, file.BackupID); record.Status != replication.StatusVerified {
+	if record := w.replica(t, r, file.BackupID); record.Status != replication.StatusVerified {
 		t.Fatalf("repeated trigger changed the status to %q", record.Status)
 	}
 	t.Logf("R1-A3 idempotent backup=%s rows=1 triggers=8 status=verified", file.BackupID)
@@ -439,27 +442,28 @@ func a3Idempotent(t *testing.T, w *worker) {
 func a3Blocked(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.replicator("ftp-blocked", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
-	files := w.produced("r1-blocked")
+	files := w.produced(t, "r1-blocked")
 	if len(files) != 3 {
 		t.Fatalf("produced %d backups for the blocking scenario, want 3", len(files))
 	}
 	first, second, successor := files[0], files[1], files[2]
-	verify(t, w, r, first.BackupID)
-	original := w.corruptLocal(second, "payload.bin")
+	enqueue(t, r, first.BackupID)
 	enqueue(t, r, second.BackupID)
 	enqueue(t, r, successor.BackupID)
+	verify(t, w, r, first.BackupID)
+	original := w.corruptLocal(t, second, "payload.bin")
 	expectFailure(t, r, "the corrupt middle member was not refused")
-	if status := w.replica(r, second.BackupID).Status; status != replication.StatusFailed {
+	if status := w.replica(t, r, second.BackupID).Status; status != replication.StatusFailed {
 		t.Fatalf("predecessor status = %q, want failed", status)
 	}
 	// The successor is never attempted while its predecessor is unverified.
 	w.now = w.now.Add(72 * time.Hour)
 	expectIdle(t, r, "a blocked successor was attempted")
-	if status := w.replica(r, successor.BackupID).Status; status != replication.StatusPending {
+	if status := w.replica(t, r, successor.BackupID).Status; status != replication.StatusPending {
 		t.Fatalf("successor status = %q, want pending", status)
 	}
 	assertPoint(t, w, r, "r1-blocked", first.BackupID, "the remote point did not stop at the prefix")
-	w.restoreLocal(second, "payload.bin", original)
+	w.restoreLocal(t, second, "payload.bin", original)
 	must(t, r.Retry(t.Context(), second.BackupID))
 	verify(t, w, r, second.BackupID)
 	verify(t, w, r, successor.BackupID)
@@ -482,11 +486,11 @@ func assertPoint(t *testing.T, w *worker, r *replication.Replicator, sourceID, b
 // restarted process recovers on the real FTP and the item verifies.
 func a3KillRecover(t *testing.T, w *worker) {
 	fresh(w)
-	file := w.produced("r1-kill")[0]
+	file := w.produced(t, "r1-kill")[0]
 	repositoryID := "ftp-kill"
 	marker := filepath.Join(w.paths.work, "kill-child.written")
 	must(t, os.RemoveAll(marker))
-	if rows := w.partRows(repositoryID); rows != 0 {
+	if rows := w.partRows(t, repositoryID); rows != 0 {
 		t.Fatalf("the kill repository already holds %d part rows", rows)
 	}
 	executable, err := os.Executable()
@@ -501,7 +505,7 @@ func a3KillRecover(t *testing.T, w *worker) {
 	)
 	must(t, child.Start())
 	waitMarker(t, marker)
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	part := w.recordedPart(t, repositoryID, file.BackupID)
 	if size := client.exists(t, part); size == 0 {
 		t.Fatal("the killed worker never transferred real payload bytes")
@@ -522,10 +526,10 @@ func a3KillRecover(t *testing.T, w *worker) {
 		t.Fatalf("the restarted worker did not recover: %v\n%s", err, text)
 	}
 	client.absent(t, part)
-	if rows := w.partRows(repositoryID); rows != 0 {
+	if rows := w.partRows(t, repositoryID); rows != 0 {
 		t.Fatalf("recovery kept %d part rows", rows)
 	}
-	if status := w.replicaFor(repositoryID, file.BackupID).Status; status != replication.StatusVerified {
+	if status := w.replicaFor(t, repositoryID, file.BackupID).Status; status != replication.StatusVerified {
 		t.Fatalf("the recovered item is %q, want verified", status)
 	}
 	t.Logf("R1-A3 kill=SIGKILL part=%s part_bytes_before_kill=nonzero cleaned=real-ftp recovered=verified restart=separate-process repository=%s",
@@ -549,7 +553,7 @@ func (w *worker) recordedPart(t *testing.T, repositoryID, backupID string) strin
 func a4Backoff(t *testing.T, w *worker) {
 	fresh(w)
 	w.resetQuota(t)
-	file := w.produced("r1-backoff")[0]
+	file := w.produced(t, "r1-backoff")[0]
 	policy := replication.Policy{BaseDelay: time.Minute, MaxDelay: 5 * time.Minute, AlertAfter: 90 * time.Second, MaxAttempts: 4}
 	repositoryID := quotaRepo + "-backoff"
 	r := w.replicator(repositoryID, replication.NewFTPRemote(w.quota), w.paths.key, policy)
@@ -561,20 +565,20 @@ func a4Backoff(t *testing.T, w *worker) {
 		want := backoff(policy, attempt)
 		assertAttempt(t, w, r, file, attempt, want, start, policy)
 		delays = append(delays, want)
-		w.now = w.nextAttempt(repositoryID, file.BackupID)
+		w.now = w.nextAttempt(t, repositoryID, file.BackupID)
 	}
 	expectFailure(t, r, "the last attempt did not fail")
-	final := w.replica(r, file.BackupID)
+	final := w.replica(t, r, file.BackupID)
 	if final.Attempts != policy.MaxAttempts || final.Status != replication.StatusExhausted {
 		t.Fatalf("final attempts=%d status=%q, want exhausted after %d", final.Attempts, final.Status, policy.MaxAttempts)
 	}
-	if w.alertSince(repositoryID, file.BackupID) == nil {
+	if w.alertSince(t, repositoryID, file.BackupID) == nil {
 		t.Fatal("exhaustion did not keep the alert")
 	}
 	// An exhausted item is never attempted again, at any later time.
 	w.now = w.now.Add(30 * 24 * time.Hour)
 	expectIdle(t, r, "an exhausted item was attempted again")
-	if after := w.replica(r, file.BackupID); after.Attempts != policy.MaxAttempts {
+	if after := w.replica(t, r, file.BackupID); after.Attempts != policy.MaxAttempts {
 		t.Fatalf("attempts after exhaustion = %d, want %d", after.Attempts, policy.MaxAttempts)
 	}
 	t.Logf("R1-A4 backoff delays=%s cap=%s alert_after=%s exhausted_attempts=%d alert=set retried_after_exhausted=false",
@@ -584,14 +588,14 @@ func a4Backoff(t *testing.T, w *worker) {
 // assertAttempt requires one failure attempt's count, schedule and alert state.
 func assertAttempt(t *testing.T, w *worker, r *replication.Replicator, file producedFile, attempt int, want time.Duration, start time.Time, policy replication.Policy) {
 	t.Helper()
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Attempts != attempt || record.Status != replication.StatusFailed {
 		t.Fatalf("attempt %d recorded as attempts=%d status=%q", attempt, record.Attempts, record.Status)
 	}
-	if got := w.nextAttempt(r.RepositoryID, file.BackupID).Sub(w.now); got != want {
+	if got := w.nextAttempt(t, r.RepositoryID, file.BackupID).Sub(w.now); got != want {
 		t.Fatalf("attempt %d delay = %s, want %s", attempt, got, want)
 	}
-	alerted := w.alertSince(r.RepositoryID, file.BackupID) != nil
+	alerted := w.alertSince(t, r.RepositoryID, file.BackupID) != nil
 	if want := w.now.Sub(start) >= policy.AlertAfter; alerted != want {
 		t.Fatalf("attempt %d alert = %t, want %t", attempt, alerted, want)
 	}
@@ -601,12 +605,12 @@ func assertAttempt(t *testing.T, w *worker, r *replication.Replicator, file prod
 // requires the manual retry to verify and clear the alert while keeping history.
 func a4ManualRetry(t *testing.T, w *worker) {
 	fresh(w)
-	file := w.produced("r1-conflict")[0]
+	file := w.produced(t, "r1-conflict")[0]
 	repositoryID := "ftp-conflict"
 	r := w.replicator(repositoryID, replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{MaxAttempts: 2})
 	key := file.ObjectPath + "/payload.bin"
 	conflicting := []byte("a-different-object-at-the-final-key")
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	client.mkdirs(t, file.ObjectPath)
 	// The final key already holds a different object, so the real sink must refuse
 	// to overwrite it.
@@ -620,11 +624,11 @@ func a4ManualRetry(t *testing.T, w *worker) {
 	must(t, r.Retry(t.Context(), file.BackupID))
 	assertRetried(t, w, r, file)
 	verify(t, w, r, file.BackupID)
-	if w.alertSince(repositoryID, file.BackupID) != nil {
+	if w.alertSince(t, repositoryID, file.BackupID) != nil {
 		t.Fatal("verified did not clear the alert")
 	}
 	remote, _ := client.retrieve(t, key)
-	local, _ := w.localDigest(file, "payload.bin")
+	local, _ := w.localDigest(t, file, "payload.bin")
 	if remote != local {
 		t.Fatal("the recovered member does not carry the local ciphertext")
 	}
@@ -635,14 +639,14 @@ func a4ManualRetry(t *testing.T, w *worker) {
 // assertConflict requires the non-retryable conflict state and the untouched key.
 func assertConflict(t *testing.T, w *worker, r *replication.Replicator, file producedFile, client *raw, key string, conflicting []byte) {
 	t.Helper()
-	record := w.replica(r, file.BackupID)
+	record := w.replica(t, r, file.BackupID)
 	if record.Status != replication.StatusFailed || record.LastErrorCode != replication.CodeRemoteConflict {
 		t.Fatalf("status=%q code=%q, want failed/remote_conflict", record.Status, record.LastErrorCode)
 	}
 	if record.Attempts != 1 {
 		t.Fatalf("attempts = %d, want 1", record.Attempts)
 	}
-	if w.alertSince(r.RepositoryID, file.BackupID) == nil {
+	if w.alertSince(t, r.RepositoryID, file.BackupID) == nil {
 		t.Fatal("a remote conflict did not raise the alert")
 	}
 	if size := client.exists(t, key); size != int64(len(conflicting)) {
@@ -653,7 +657,7 @@ func assertConflict(t *testing.T, w *worker, r *replication.Replicator, file pro
 // assertRetried requires the manual retry's reset state and kept history.
 func assertRetried(t *testing.T, w *worker, r *replication.Replicator, file producedFile) {
 	t.Helper()
-	retried := w.replica(r, file.BackupID)
+	retried := w.replica(t, r, file.BackupID)
 	if retried.Status != replication.StatusPending || retried.Attempts != 0 {
 		t.Fatalf("after manual retry status=%q attempts=%d", retried.Status, retried.Attempts)
 	}
@@ -669,16 +673,17 @@ func assertRetried(t *testing.T, w *worker, r *replication.Replicator, file prod
 // prefix: local completion and the remote verified prefix.
 func a4Points(t *testing.T, w *worker) {
 	fresh(w)
-	files := w.produced("r1-points")
+	files := w.produced(t, "r1-points")
 	r := w.replicator("ftp-points", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	last := files[len(files)-1]
 	assertLocalPoint(t, w, "r1-points", last)
 	// A real verified prefix, then a real gap: a failed predecessor never lets a
 	// successor extend the remote point.
+	enqueue(t, r, files[0].BackupID)
 	verify(t, w, r, files[0].BackupID)
 	assertPoint(t, w, r, "r1-points", files[0].BackupID, "the remote point is not the last verified replica")
-	original := w.corruptLocal(files[1], "payload.bin")
-	defer w.restoreLocal(files[1], "payload.bin", original)
+	original := w.corruptLocal(t, files[1], "payload.bin")
+	defer w.restoreLocal(t, files[1], "payload.bin", original)
 	enqueue(t, r, files[1].BackupID)
 	enqueue(t, r, files[2].BackupID)
 	expectFailure(t, r, "the corrupt member was accepted")
@@ -706,11 +711,11 @@ func assertLocalPoint(t *testing.T, w *worker, sourceID string, last producedFil
 func a5Retention(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.replicator("ftp-ret", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
-	files := w.produced("r1-ret")
+	files := w.produced(t, "r1-ret")
 	must(t, r.EnqueueCompleted(t.Context(), "r1-ret"))
 	drive(t, r)
 	for _, file := range files {
-		if status := w.replica(r, file.BackupID).Status; status != replication.StatusVerified {
+		if status := w.replica(t, r, file.BackupID).Status; status != replication.StatusVerified {
 			t.Fatalf("backup %s is %q, want verified", file.BackupID, status)
 		}
 	}
@@ -718,12 +723,12 @@ func a5Retention(t *testing.T, w *worker) {
 	if olderID == newerID {
 		t.Fatal("the retention scenario needs two distinct chains")
 	}
-	older, newer := w.producedOfChain("r1-ret", olderID), w.producedOfChain("r1-ret", newerID)
+	older, newer := w.producedOfChain(t, "r1-ret", olderID), w.producedOfChain(t, "r1-ret", newerID)
 	assertRetainedOlderChain(t, w, older)
 	assertEligible(t, r, olderID, true, "")
 	// Eligibility alone deletes nothing.
 	for _, file := range files {
-		if !w.published(file) || !w.backup(file.BackupID).LocalPresent {
+		if !w.published(t, file) || !w.backup(t, file.BackupID).LocalPresent {
 			t.Fatal("eligibility removed a local payload")
 		}
 	}
@@ -755,22 +760,25 @@ func assertRetainedOlderChain(t *testing.T, w *worker, older []producedFile) {
 	if older[0].Seq != 1 || older[1].Seq != 2 || older[2].Seq != 3 {
 		t.Fatalf("retained chain seq = %d/%d/%d, want 1/2/3", older[0].Seq, older[1].Seq, older[2].Seq)
 	}
-	kinds := []string{w.backup(older[0].BackupID).Kind, w.backup(older[1].BackupID).Kind, w.backup(older[2].BackupID).Kind}
+	kinds := []string{w.backup(t, older[0].BackupID).Kind, w.backup(t, older[1].BackupID).Kind, w.backup(t, older[2].BackupID).Kind}
 	if kinds[0] != "full" || kinds[1] != "incremental" || kinds[2] != "incremental" {
 		t.Fatalf("retained chain kinds = %v, want full, incremental, incremental", kinds)
 	}
 }
 
-func memberGone(w *worker, file producedFile) bool {
-	return !w.published(file) && !w.backup(file.BackupID).LocalPresent
+func memberGone(t *testing.T, w *worker, file producedFile) bool {
+	t.Helper()
+	return !w.published(t, file) && !w.backup(t, file.BackupID).LocalPresent
 }
 
-func memberPresent(w *worker, file producedFile) bool {
-	return w.published(file) && w.backup(file.BackupID).LocalPresent
+func memberPresent(t *testing.T, w *worker, file producedFile) bool {
+	t.Helper()
+	return w.published(t, file) && w.backup(t, file.BackupID).LocalPresent
 }
 
-func memberRowRetained(w *worker, file producedFile) bool {
-	backup := w.backup(file.BackupID)
+func memberRowRetained(t *testing.T, w *worker, file producedFile) bool {
+	t.Helper()
+	backup := w.backup(t, file.BackupID)
 	return backup.Status == "completed" && len(backup.CheckpointsRaw) != 0 && len(backup.InfoRaw) != 0
 }
 
@@ -785,10 +793,10 @@ func assertOlderChainReclaimedTogether(t *testing.T, w *worker, older, newer []p
 	gone := 0
 	rowsRetained = true
 	for _, file := range older {
-		if memberGone(w, file) {
+		if memberGone(t, w, file) {
 			gone++
 		}
-		if !memberRowRetained(w, file) {
+		if !memberRowRetained(t, w, file) {
 			rowsRetained = false
 		}
 	}
@@ -796,13 +804,13 @@ func assertOlderChainReclaimedTogether(t *testing.T, w *worker, older, newer []p
 	if !wholeChainOnly {
 		t.Fatalf("older chain reclaim was partial: gone=%d, want all %d members removed together", gone, len(older))
 	}
-	middleReclaimed = memberGone(w, older[1])
+	middleReclaimed = memberGone(t, w, older[1])
 	if !middleReclaimed {
 		t.Fatal("middle link remained after whole-chain delete")
 	}
 	keptUntouched = true
 	for _, file := range newer {
-		if memberPresent(w, file) {
+		if memberPresent(t, w, file) {
 			continue
 		}
 		keptUntouched = false
@@ -830,10 +838,10 @@ func assertReclaimedChain(t *testing.T, w *worker, files []producedFile, chainID
 	t.Helper()
 	for _, file := range files {
 		deleted := file.ChainID == chainID
-		if w.published(file) == deleted {
+		if w.published(t, file) == deleted {
 			t.Fatalf("member %s local payload presence = %t, want %t", file.BackupID, !deleted, deleted)
 		}
-		backup := w.backup(file.BackupID)
+		backup := w.backup(t, file.BackupID)
 		if backup.LocalPresent == deleted {
 			t.Fatalf("member %s local_present = %t, want %t", file.BackupID, backup.LocalPresent, !deleted)
 		}
@@ -855,7 +863,7 @@ func assertPinned(t *testing.T, w *worker, r *replication.Replicator, chainID st
 	if err := r.DeleteLocalChain(t.Context(), chainID); err == nil {
 		t.Fatal("a pinned chain was deleted")
 	}
-	if !w.published(w.producedOfChain("r1-ret", chainID)[0]) {
+	if !w.published(t, w.producedOfChain(t, "r1-ret", chainID)[0]) {
 		t.Fatal("a refused pinned delete removed the chain payload")
 	}
 }
@@ -867,7 +875,7 @@ func assertLatest(t *testing.T, w *worker, r *replication.Replicator, chainID st
 	if err := r.DeleteLocalChain(t.Context(), chainID); err == nil {
 		t.Fatal("the source's latest chain was deleted")
 	}
-	if !w.published(w.producedOfChain("r1-ret", chainID)[0]) {
+	if !w.published(t, w.producedOfChain(t, "r1-ret", chainID)[0]) {
 		t.Fatal("a refused latest delete removed the chain payload")
 	}
 }
@@ -878,15 +886,15 @@ func assertUnverifiedRefused(t *testing.T, w *worker, chainID string) {
 	t.Helper()
 	unverified := w.replicator("ftp-ret-unverified", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	must(t, unverified.EnqueueCompleted(t.Context(), "r1-ret"))
-	members := w.producedOfChain("r1-ret", chainID)
-	if status := w.replica(unverified, members[0].BackupID).Status; status != replication.StatusPending {
+	members := w.producedOfChain(t, "r1-ret", chainID)
+	if status := w.replica(t, unverified, members[0].BackupID).Status; status != replication.StatusPending {
 		t.Fatalf("the fresh repository already reports %q", status)
 	}
 	assertEligible(t, unverified, chainID, false, replication.RetentionUnverified)
 	if err := unverified.DeleteLocalChain(t.Context(), chainID); err == nil {
 		t.Fatal("an unverified chain was deleted")
 	}
-	if !w.published(members[0]) {
+	if !w.published(t, members[0]) {
 		t.Fatal("a refused unverified delete removed the chain payload")
 	}
 }
@@ -895,7 +903,7 @@ func assertUnverifiedRefused(t *testing.T, w *worker, chainID string) {
 // repository alone.
 func a6Handoff(t *testing.T, w *worker) {
 	fresh(w)
-	client := w.rawNormal()
+	client := w.rawNormal(t)
 	lines := 0
 	// Two replicated chains: the continuous one from A1 and the retention source.
 	handoff := []struct{ sourceID, repositoryID string }{
@@ -904,8 +912,8 @@ func a6Handoff(t *testing.T, w *worker) {
 	}
 	for _, entry := range handoff {
 		sourceID := entry.sourceID
-		for _, file := range w.produced(sourceID) {
-			record := w.replicaFor(entry.repositoryID, file.BackupID)
+		for _, file := range w.produced(t, sourceID) {
+			record := w.replicaFor(t, entry.repositoryID, file.BackupID)
 			if record.Status != replication.StatusVerified || record.VerifiedAt == nil {
 				continue
 			}
