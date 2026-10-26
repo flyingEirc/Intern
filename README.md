@@ -21,7 +21,7 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线；阶段 B 后端基础已随 [PR #26](https://github.com/flyingEirc/Intern/pull/26) 合入并闭环（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）。阶段 C 按 [#27–#32](https://github.com/flyingEirc/Intern/issues/13) 推进：P2 物理运行器/预检、S1 明文 FTP 仓库、P3 物理全量/增量链本地发布与 R1 FTP 副本复制认证已在阶段分支通过原生 CI 和独立验收；业务 API 尚未交付；恢复与部署仍属后续阶段，前端暂缓，Web 产品未交付。 |
+| `app/web/` | 当前产品主线；阶段 B 后端基础已随 [PR #26](https://github.com/flyingEirc/Intern/pull/26) 合入并闭环（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）。阶段 C 按 [#27–#32](https://github.com/flyingEirc/Intern/issues/13) 推进：P2 物理运行器/预检、S1 明文 FTP 仓库、P3 物理全量/增量链本地发布、R1 FTP 副本复制认证与 W3 仓库/数据源/策略 API 已在阶段分支通过原生 CI 和独立验收；调度、运行与 SSE API 尚未交付；恢复与部署仍属后续阶段，前端暂缓，Web 产品未交付。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
