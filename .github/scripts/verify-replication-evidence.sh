@@ -43,6 +43,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | contains("exhausted_attempts=")) and
   ($output | contains("R1-A5 chains")) and
   ($output | contains("refused=pinned,latest,unverified")) and
+  ($output | contains("older_members=3")) and
+  ($output | contains("middle_link_reclaimed=true")) and
+  ($output | contains("whole_chain_only=true")) and
+  ($output | contains("rows_retained=true")) and
+  ($output | contains("kept_untouched=true")) and
   ($output | contains("automatic=none")) and
   ($output | test("R1-A6 handoff source=[a-z0-9-]+ chain=[0-9a-f]+ backup=[0-9a-f]+ seq=[0-9]+ keys=[^ ]+ members=[^ ]+ snapshot_sha256=[0-9a-f]{64} mysql=[0-9.]+ pxb=[0-9.-]+ point="))
 ' "$1"

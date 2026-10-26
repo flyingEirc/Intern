@@ -14,14 +14,13 @@ import (
 	"github.com/flyingEirc/Intern/internal/replication"
 )
 
-// childCommand builds one separate worker process running a single test. Its
-// output goes to this process's stderr so it is part of the same evidence.
+// childCommand builds one separate worker process running a single test. It
+// leaves Stdout and Stderr unset so a live child can attach them, and so
+// CombinedOutput can capture a restarted child's evidence.
 func childCommand(t *testing.T, executable, name string) *exec.Cmd {
 	t.Helper()
 	command := exec.CommandContext(t.Context(), executable, "-test.v", "-test.run=^"+name+"$", "-test.timeout=4m")
 	command.Env = os.Environ()
-	command.Stdout = os.Stderr
-	command.Stderr = os.Stderr
 	return command
 }
 

@@ -43,8 +43,9 @@ var producerSpecs = []producerSpec{
 	// belong to exactly one repository.
 	{SourceID: "r1-points", Chains: []int{3}},
 	{SourceID: "r1-blocked", Chains: []int{3}},
-	// Two independent chains: the older one is what retention may reclaim.
-	{SourceID: "r1-ret", Chains: []int{2, 2}},
+	// Two independent chains: the older full+inc+inc is reclaimed as a whole,
+	// including its middle link; the newer chain stays.
+	{SourceID: "r1-ret", Chains: []int{3, 2}},
 	{SourceID: "r1-corrupt", Chains: []int{1}},
 	// Two backups: one is tampered with, one is truncated.
 	{SourceID: "r1-tamper", Chains: []int{1, 1}},

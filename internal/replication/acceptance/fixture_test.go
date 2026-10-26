@@ -26,6 +26,7 @@ import (
 	"time"
 
 	client "github.com/jlaffaye/ftp"
+	_ "modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"

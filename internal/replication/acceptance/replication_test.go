@@ -492,6 +492,8 @@ func a3KillRecover(t *testing.T, w *worker) {
 	executable, err := os.Executable()
 	must(t, err)
 	child := childCommand(t, executable, "TestR1KillChildWorker")
+	child.Stdout = os.Stderr
+	child.Stderr = os.Stderr
 	child.Env = append(child.Env,
 		"INTERN_R1_KILL_REPOSITORY="+repositoryID,
 		"INTERN_R1_KILL_BACKUP="+file.BackupID,
@@ -506,8 +508,8 @@ func a3KillRecover(t *testing.T, w *worker) {
 	}
 	killChild(t, child)
 	// A restarted process reopens the committed database and cleans by the ledger.
+	// CombinedOutput requires unset Stdout/Stderr; childCommand leaves them unset.
 	restart := childCommand(t, executable, "TestR1RestartChildWorker")
-	restart.Stdout = io.Discard
 	restart.Env = append(restart.Env,
 		"INTERN_R1_KILL_REPOSITORY="+repositoryID,
 		"INTERN_R1_KILL_BACKUP="+file.BackupID,
@@ -515,7 +517,8 @@ func a3KillRecover(t *testing.T, w *worker) {
 	)
 	output, err := restart.CombinedOutput()
 	text := string(output)
-	if err != nil || !strings.Contains(text, "R1-A3 restart recovery completed") || strings.Contains(text, "SKIP") {
+	if err != nil || !strings.Contains(text, "R1-A3 restart recovery completed") ||
+		!strings.Contains(text, "second_recover=noop") || strings.Contains(text, "SKIP") {
 		t.Fatalf("the restarted worker did not recover: %v\n%s", err, text)
 	}
 	client.absent(t, part)
@@ -711,32 +714,104 @@ func a5Retention(t *testing.T, w *worker) {
 			t.Fatalf("backup %s is %q, want verified", file.BackupID, status)
 		}
 	}
-	older, newer := files[0], files[len(files)-1]
-	if older.ChainID == newer.ChainID {
+	olderID, newerID := files[0].ChainID, files[len(files)-1].ChainID
+	if olderID == newerID {
 		t.Fatal("the retention scenario needs two distinct chains")
 	}
-	assertEligible(t, r, older.ChainID, true, "")
+	older, newer := w.producedOfChain("r1-ret", olderID), w.producedOfChain("r1-ret", newerID)
+	assertRetainedOlderChain(t, w, older)
+	assertEligible(t, r, olderID, true, "")
 	// Eligibility alone deletes nothing.
-	if !w.published(older) || !w.published(newer) {
-		t.Fatal("eligibility removed a local payload")
+	for _, file := range files {
+		if !w.published(file) || !w.backup(file.BackupID).LocalPresent {
+			t.Fatal("eligibility removed a local payload")
+		}
 	}
-	must(t, r.DeleteLocalChain(t.Context(), older.ChainID))
-	assertReclaimedChain(t, w, files, older.ChainID)
+	must(t, r.DeleteLocalChain(t.Context(), olderID))
+	assertReclaimedChain(t, w, files, olderID)
+	assertOlderChainReclaimedTogether(t, w, older, newer)
 	// Refusals on the still-present chain: pinned, then latest.
-	assertPinned(t, w, r, newer.ChainID)
-	assertLatest(t, w, r, newer.ChainID)
-	assertUnverifiedRefused(t, w, newer.ChainID)
+	assertPinned(t, w, r, newerID)
+	assertLatest(t, w, r, newerID)
+	assertUnverifiedRefused(t, w, newerID)
 	// A chain is deleted whole: repeating the completed deletion is idempotent
 	// and never touches the kept chain, and recovery reclaims nothing extra.
-	if err := r.DeleteLocalChain(t.Context(), older.ChainID); err != nil {
+	if err := r.DeleteLocalChain(t.Context(), olderID); err != nil {
 		t.Fatalf("repeating a completed whole-chain delete failed: %v", err)
 	}
 	must(t, r.Recover(t.Context()))
-	if !w.published(newer) {
-		t.Fatal("recovery or a repeated delete removed the kept chain payload")
+	wholeChainOnly, middleReclaimed, keptUntouched, rowsRetained := assertOlderChainReclaimedTogether(t, w, older, newer)
+	t.Logf("R1-A5 chains older=%s newer=%s deleted=%s kept=%s older_members=%d middle_link=%s middle_link_reclaimed=%t refused=pinned,latest,unverified whole_chain_only=%t rows_retained=%t kept_untouched=%t automatic=none",
+		olderID, newerID, olderID, newerID, len(older), older[1].BackupID, middleReclaimed, wholeChainOnly, rowsRetained, keptUntouched)
+}
+
+// assertRetainedOlderChain requires the produced older chain to be a real
+// full+inc+inc from chain.Run, so a middle link exists to reclaim with the rest.
+func assertRetainedOlderChain(t *testing.T, w *worker, older []producedFile) {
+	t.Helper()
+	if len(older) != 3 {
+		t.Fatalf("retained chain has %d members, want full+inc+inc", len(older))
 	}
-	t.Logf("R1-A5 chains older=%s newer=%s deleted=%s kept=%s refused=pinned,latest,unverified whole_chain_only=true rows_retained=true automatic=none",
-		older.ChainID, newer.ChainID, older.ChainID, newer.ChainID)
+	if older[0].Seq != 1 || older[1].Seq != 2 || older[2].Seq != 3 {
+		t.Fatalf("retained chain seq = %d/%d/%d, want 1/2/3", older[0].Seq, older[1].Seq, older[2].Seq)
+	}
+	kinds := []string{w.backup(older[0].BackupID).Kind, w.backup(older[1].BackupID).Kind, w.backup(older[2].BackupID).Kind}
+	if kinds[0] != "full" || kinds[1] != "incremental" || kinds[2] != "incremental" {
+		t.Fatalf("retained chain kinds = %v, want full, incremental, incremental", kinds)
+	}
+}
+
+func memberGone(w *worker, file producedFile) bool {
+	return !w.published(file) && !w.backup(file.BackupID).LocalPresent
+}
+
+func memberPresent(w *worker, file producedFile) bool {
+	return w.published(file) && w.backup(file.BackupID).LocalPresent
+}
+
+func memberRowRetained(w *worker, file producedFile) bool {
+	backup := w.backup(file.BackupID)
+	return backup.Status == "completed" && len(backup.CheckpointsRaw) != 0 && len(backup.InfoRaw) != 0
+}
+
+// assertOlderChainReclaimedTogether requires every older member, including the
+// middle link, to lose local_present and its directory together, while the kept
+// chain stays on disk. It returns the marker values derived from that state.
+func assertOlderChainReclaimedTogether(t *testing.T, w *worker, older, newer []producedFile) (wholeChainOnly, middleReclaimed, keptUntouched, rowsRetained bool) {
+	t.Helper()
+	if len(older) != 3 {
+		t.Fatalf("older chain has %d members, want 3", len(older))
+	}
+	gone := 0
+	rowsRetained = true
+	for _, file := range older {
+		if memberGone(w, file) {
+			gone++
+		}
+		if !memberRowRetained(w, file) {
+			rowsRetained = false
+		}
+	}
+	wholeChainOnly = gone == len(older)
+	if !wholeChainOnly {
+		t.Fatalf("older chain reclaim was partial: gone=%d, want all %d members removed together", gone, len(older))
+	}
+	middleReclaimed = memberGone(w, older[1])
+	if !middleReclaimed {
+		t.Fatal("middle link remained after whole-chain delete")
+	}
+	keptUntouched = true
+	for _, file := range newer {
+		if memberPresent(w, file) {
+			continue
+		}
+		keptUntouched = false
+		t.Fatalf("kept chain member %s was touched", file.BackupID)
+	}
+	if !rowsRetained {
+		t.Fatal("whole-chain delete dropped rows, checkpoints or metadata")
+	}
+	return wholeChainOnly, middleReclaimed, keptUntouched, rowsRetained
 }
 
 // assertEligible requires one chain's eligibility and reason code.
