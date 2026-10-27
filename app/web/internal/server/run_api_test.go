@@ -1,12 +1,15 @@
 package server
 
 import (
+	"context"
 	"encoding/json/v2"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/flyingEirc/Intern/app/web/internal/dispatch"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
@@ -348,6 +351,87 @@ func TestConcurrentHTTPTriggersCreateOneRun(t *testing.T) {
 	if runs := h.runsOf(t, policy.ID); len(runs) != 1 {
 		t.Fatalf("stored runs = %d, want 1", len(runs))
 	}
+}
+
+// TestManualTriggerReplayAfterPolicyDisabled is D9: the same key and body
+// still return 202 with the original run_id after the policy is disabled.
+func TestManualTriggerReplayAfterPolicyDisabled(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "replay-disabled", "operator")
+	policy := h.seedPolicyOnly(t, "disabled-replay")
+	h.stopRuns()
+	client := h.jsonClient(t)
+
+	created := triggerAccepted(t, h, client, cookie, policy.ID, "full", "disabled-replay-key")
+	if _, err := h.fixture.database.EnablePolicy(t.Context(), policy.ID, false, nil,
+		store.SystemAudit("policies.disable", store.AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	if replayed := triggerAccepted(t, h, client, cookie, policy.ID, "full", "disabled-replay-key"); replayed != created {
+		t.Fatalf("replay run_id = %s, want %s", replayed, created)
+	}
+	status, body := readJSONStatus(t, h.postTrigger(t, client, cookie, policy.ID, "full", "disabled-replay-new"))
+	if status != http.StatusConflict {
+		t.Fatalf("new key after disable status=%d body=%s", status, body)
+	}
+}
+
+// TestReplicaRetrySuccessWritesAudit is D10: a 202 replica retry is audited
+// as replicas.retry/success because the handler no longer marks it recorded.
+func TestReplicaRetrySuccessWritesAudit(t *testing.T) {
+	h := newControlHarness(t, retryOK{})
+	cookie := h.login(t, "retry-audit", "operator")
+	client := h.jsonClient(t)
+	backupID := uuid.Must(uuid.NewV7()).String()
+	repositoryID := uuid.Must(uuid.NewV7()).String()
+	before := countUserAudit(t, h, "replicas.retry", "success")
+	response := h.do(t, client, http.MethodPost,
+		"/api/v1/backups/"+backupID+"/replicas/"+repositoryID+"/retry", "", cookie)
+	status, body := readJSONStatus(t, response)
+	if status != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", status, body)
+	}
+	if got := countUserAudit(t, h, "replicas.retry", "success"); got != before+1 {
+		t.Fatalf("replicas.retry success audits = %d, want %d", got, before+1)
+	}
+}
+
+type retryOK struct{}
+
+func (retryOK) RequestCancel(context.Context, string) error { return store.ErrNotFound }
+
+func (retryOK) ReplicaRetry(context.Context, string, string) error { return nil }
+
+func (retryOK) Protection(context.Context, string) (dispatch.Protection, error) {
+	return dispatch.Protection{}, store.ErrNotFound
+}
+
+func (retryOK) Replicas(context.Context, dispatch.ReplicaFilter) ([]dispatch.ReplicaView, error) {
+	return nil, nil
+}
+
+func (retryOK) BackupView(context.Context, string) (*dispatch.BackupView, error) {
+	return nil, store.ErrNotFound
+}
+
+func (retryOK) ChainViews(context.Context, string) ([]dispatch.ChainView, error) {
+	return nil, store.ErrNotFound
+}
+
+func (retryOK) SourceExists(context.Context, string) (bool, error) { return false, nil }
+
+func (retryOK) TriggerRun(context.Context, string, string, string, string, string) (dispatch.TriggerOutcome, any) {
+	return dispatch.TriggerNotFound, nil
+}
+
+func countUserAudit(t *testing.T, h *runHarness, action, result string) int {
+	t.Helper()
+	var count int
+	query := `SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ?`
+	if err := h.fixture.database.DB().QueryRowContext(t.Context(), query, action, result).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 // decodeBody unmarshals one JSON body.

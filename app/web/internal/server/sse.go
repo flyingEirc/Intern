@@ -2,8 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -86,7 +86,18 @@ func (h runHandlers) streamRun(ctx context.Context, run store.Run, after int64, 
 		}
 		cursor = next
 		terminal, err := h.terminal(ctx, run.ID)
-		if err != nil || terminal != nil {
+		if err != nil {
+			return
+		}
+		if terminal != nil {
+			// The terminal log row commits with the status. Drain it before
+			// closing so a caught-up subscriber sees completed/failed/canceled
+			// /interrupted before the final end event.
+			rows, err = h.database.RunLogsAfter(ctx, run.ID, cursor, sseRecheckLogLimit)
+			if err != nil {
+				return
+			}
+			_, _ = deliverAll(rows, events, cursor, dropped)
 			return
 		}
 		select {
@@ -136,9 +147,16 @@ func (h runHandlers) terminal(ctx context.Context, runID string) (*store.Run, er
 // 60s WriteTimeout never cuts a long-lived stream. The end event is written
 // only at the single exit that observed the channel close, so an
 // already-terminal run at connect answers replay + end without a duplicate.
+func (h runHandlers) sseHeartbeatInterval() time.Duration {
+	if h.heartbeat > 0 {
+		return h.heartbeat
+	}
+	return sseHeartbeat
+}
+
 func (h runHandlers) pumpEvents(c *gin.Context, w gin.ResponseWriter, flusher http.Flusher, runID string, events <-chan store.RunLog, dropped <-chan struct{}) {
 	controller := http.NewResponseController(w)
-	recheck := time.NewTicker(sseHeartbeat)
+	recheck := time.NewTicker(h.sseHeartbeatInterval())
 	defer recheck.Stop()
 
 	for {
@@ -210,6 +228,14 @@ func sseWrite(controller *http.ResponseController, w gin.ResponseWriter, flusher
 // first event byte.
 func (h runHandlers) sessionAlive(c *gin.Context) bool {
 	ctx := c.Request.Context()
+	token := h.authentication.Sessions.Token(ctx)
+	if token == "" {
+		return false
+	}
+	_, found, err := h.authentication.Database.Sessions().FindCtx(ctx, token)
+	if err != nil || !found {
+		return false
+	}
 	id := h.authentication.Sessions.GetString(ctx, "user_id")
 	if id == "" {
 		return false
@@ -221,10 +247,22 @@ func (h runHandlers) sessionAlive(c *gin.Context) bool {
 	return auth.HasPermission(user.Role, auth.RunsRead)
 }
 
-// sseEventJSON is the fixed wire shape of one event.
+// sseEventJSON is the fixed wire shape of one event: seq, ts, level, event,
+// message and data.
 func sseEventJSON(row store.RunLog) string {
-	return fmt.Sprintf(`{"seq":%d,"ts":%q,"level":%q,"event":%q,"message":%q}`,
-		row.Seq, row.TS, row.Level, row.Event, row.Message)
+	payload := struct {
+		Seq     int64  `json:"seq"`
+		TS      string `json:"ts"`
+		Level   string `json:"level"`
+		Event   string `json:"event"`
+		Message string `json:"message"`
+		Data    any    `json:"data"`
+	}{Seq: row.Seq, TS: row.TS, Level: row.Level, Event: row.Event, Message: row.Message, Data: row.Data}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 // sourceChains serves one source's chains with their members.
@@ -345,5 +383,4 @@ func (h runHandlers) retryReplica(c *gin.Context) {
 		return
 	}
 	render.JSON(c, http.StatusAccepted, acceptedResponse{RunID: backupID})
-	middleware.MarkAuditRecorded(c)
 }

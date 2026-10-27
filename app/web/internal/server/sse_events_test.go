@@ -43,20 +43,34 @@ func TestEventStreamDeliversPromptlyThenEnds(t *testing.T) {
 	if !strings.Contains(live, "id: 2") || !strings.Contains(live, "preflight") {
 		t.Fatalf("live frame = %q", live)
 	}
+	failSeededRun(t, h, run.ID)
+	assertFailedThenEnd(t, reader)
+	assertStreamClosed(t, reader)
+}
 
-	// A terminal run ends the stream. FinishRunFailed needs a running row, so
-	// claim it first, exactly as the worker would.
+func failSeededRun(t *testing.T, h *runHarness, runID string) {
+	t.Helper()
 	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
 		t.Fatalf("claim: %v ok=%v", err, ok)
 	}
-	if err := h.fixture.database.FinishRunFailed(t.Context(), run.ID, store.RunErrorPreflight, "preflight_failed",
-		store.SystemAudit("runs.failed", store.AuditDetail{})); err != nil {
+	if err := h.fixture.database.FinishRunFailed(t.Context(), runID, store.RunErrorPreflight, "preflight_failed",
+		store.SystemAudit("runs.failed", store.AuditDetail{}), &store.RunLogWrite{
+			Level: "error", Event: "failed", Message: "run failed",
+			Data: map[string]any{"error_class": store.RunErrorPreflight, "code": "preflight_failed"},
+		}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertFailedThenEnd(t *testing.T, reader *bufio.Reader) {
+	t.Helper()
+	terminal := readFrame(t, reader)
+	if !strings.Contains(terminal, `"event":"failed"`) || !strings.Contains(terminal, `"error_class"`) {
+		t.Fatalf("terminal frame = %q", terminal)
 	}
 	if end := readFrame(t, reader); end != "event: end\ndata: failed\n\n" {
 		t.Fatalf("end frame = %q", end)
 	}
-	assertStreamClosed(t, reader)
 }
 
 // assertStreamHeaders checks the frozen response headers of the event stream.
@@ -112,10 +126,7 @@ func TestEventStreamReplaysFromTheStoredLog(t *testing.T) {
 // TestEventStreamHeartbeat proves the periodic comment frame arrives without any
 // run activity, which is what keeps a quiet stream alive through proxies.
 func TestEventStreamHeartbeat(t *testing.T) {
-	if testing.Short() {
-		t.Skip("the heartbeat interval is 15s")
-	}
-	h := newRunHarness(t)
+	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	cookie := h.login(t, "heartbeat", "operator")
 	_, run := h.seedPolicyWithRun(t, "heartbeat-stream")
 	h.stopRuns()
@@ -248,10 +259,7 @@ func (h *runHarness) logRowsFor(t *testing.T, runID string) store.RunLog {
 // is the reachable revocation variant: a demoted, disabled or logged-out session
 // is rechecked at every heartbeat.
 func TestEventStreamRevokedSessionIsToldAndClosed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("the revocation recheck runs on the 15s heartbeat")
-	}
-	h := newRunHarness(t)
+	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	user := h.fixture.seed(t, "revoked", "operator")
 	cookie := h.fixture.login(t, "revoked", testPassword)
 	_, run := h.seedPolicyWithRun(t, "revoked-stream")
@@ -271,11 +279,129 @@ func TestEventStreamRevokedSessionIsToldAndClosed(t *testing.T) {
 		store.SystemAudit("users.revoke_sessions", store.AuditDetail{})); err != nil {
 		t.Fatal(err)
 	}
-	revoked := readFrame(t, reader)
-	if !strings.Contains(revoked, "event: revoked") {
-		t.Fatalf("frame after revocation = %q", revoked)
-	}
+	readUntilRevoked(t, reader)
 	assertStreamClosed(t, reader)
+}
+
+// TestEventStreamLogoutStopsTheStream is the logout case of the heartbeat
+// recheck: destroying the session tombstones the token, so the next heartbeat
+// sends event: revoked and closes.
+func TestEventStreamLogoutStopsTheStream(t *testing.T) {
+	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
+	cookie := h.login(t, "logout-stream", "operator")
+	_, run := h.seedPolicyWithRun(t, "logout-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
+		t.Fatalf("first frame = %q", first)
+	}
+	client := h.jsonClient(t)
+	logout := h.do(t, client, http.MethodPost, "/api/v1/auth/logout", "", cookie)
+	if logout.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout status = %d", logout.StatusCode)
+	}
+	_ = logout.Body.Close()
+	readUntilRevoked(t, reader)
+	assertStreamClosed(t, reader)
+}
+
+// TestEventStreamCaughtUpSubscriberSeesTerminalBeforeEnd is the same-transaction
+// terminal log: a subscriber that has already consumed every live event receives
+// the failed row and only then the end event.
+func TestEventStreamCaughtUpSubscriberSeesTerminalBeforeEnd(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "terminal-order", "operator")
+	_, run := h.seedPolicyWithRun(t, "terminal-order")
+	h.stopRuns()
+
+	_, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if first := readFrame(t, reader); !strings.Contains(first, `"event":"queued"`) {
+		t.Fatalf("first frame = %q", first)
+	}
+	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	if err := h.fixture.database.FinishRunFailed(t.Context(), run.ID, store.RunErrorInterrupted, "interrupted",
+		store.SystemAudit("runs.interrupted", store.AuditDetail{}), &store.RunLogWrite{
+			Level: "error", Event: "interrupted", Message: "run interrupted", Data: map[string]any{},
+		}); err != nil {
+		t.Fatal(err)
+	}
+	terminal := readFrame(t, reader)
+	if !strings.Contains(terminal, `"event":"interrupted"`) {
+		t.Fatalf("terminal event = %q, want interrupted before end", terminal)
+	}
+	if end := readFrame(t, reader); end != "event: end\ndata: failed\n\n" {
+		t.Fatalf("end frame = %q", end)
+	}
+}
+
+// TestEventStreamCompletedPayloadIsStructuredAndRedacted is D1: the completed
+// SSE frame is a JSON object with seq, ts, level, event, message and data, the
+// data object carries backup identity fields, and no secret is present.
+func TestEventStreamCompletedPayloadIsStructuredAndRedacted(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "completed-payload", "operator")
+	_, run := h.seedPolicyWithRun(t, "completed-payload")
+	h.stopRuns()
+
+	_, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if first := readFrame(t, reader); !strings.Contains(first, `"event":"queued"`) {
+		t.Fatalf("first frame = %q", first)
+	}
+	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	log := &store.RunLogWrite{
+		Level: "info", Event: "completed", Message: "backup completed",
+		Data: map[string]any{
+			"backup_id": "b-1", "chain_id": "c-1", "seq": 1,
+			"payload_size": 42, "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	}
+	if err := h.fixture.database.FinishRunCompleted(t.Context(), run.ID, "b-1", "c-1", 42,
+		store.SystemAudit("runs.completed", store.AuditDetail{}), log); err != nil {
+		t.Fatal(err)
+	}
+	frame := readFrame(t, reader)
+	for _, want := range []string{
+		`"seq":`, `"ts":`, `"level":`, `"event":"completed"`, `"message":`, `"data":`,
+		`"backup_id":"b-1"`, `"chain_id":"c-1"`, `"payload_size":`, `"payload_sha256":`,
+	} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("completed frame missing %s: %q", want, frame)
+		}
+	}
+	if end := readFrame(t, reader); end != "event: end\ndata: completed\n\n" {
+		t.Fatalf("end frame = %q", end)
+	}
+	for _, secret := range []string{"{{SECRET_sse_source}}", testPassword, h.fixture.keyFile} {
+		if strings.Contains(frame, secret) {
+			t.Fatalf("completed frame leaked %q", secret)
+		}
+	}
+}
+
+func readUntilRevoked(t *testing.T, reader *bufio.Reader) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		frame := readFrame(t, reader)
+		if strings.Contains(frame, "event: revoked") {
+			return
+		}
+		if !strings.HasPrefix(strings.TrimSpace(frame), ":") {
+			t.Fatalf("frame before revoked = %q", frame)
+		}
+	}
+	t.Fatal("no revoked event arrived")
 }
 
 // TestEventStreamRejectsBeforeHeaders covers the pre-stream JSON failures: an
@@ -450,10 +576,11 @@ func TestEventStreamEndIsSentExactlyOnce(t *testing.T) {
 		t.Fatalf("claim: %v ok=%v", err, ok)
 	}
 	if err := h.fixture.database.FinishRunCanceled(t.Context(), run.ID,
-		store.SystemAudit("runs.canceled", store.AuditDetail{})); err != nil {
+		store.SystemAudit("runs.canceled", store.AuditDetail{}), &store.RunLogWrite{
+			Level: "warn", Event: "canceled", Message: "run canceled", Data: map[string]any{},
+		}); err != nil {
 		t.Fatal(err)
 	}
-	h.appendLog(t, run.ID, "canceled")
 	body := readAllFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	if count := strings.Count(body, "event: end"); count != 1 {
 		t.Fatalf("end frames = %d in %s", count, body)

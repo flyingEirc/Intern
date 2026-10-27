@@ -780,7 +780,8 @@ func (s *Store) Policies(ctx context.Context, before string, limit int) ([]Polic
 	return policies, nil
 }
 
-// DeletePolicy removes a policy. No other table references it.
+// DeletePolicy removes a policy. Runs reference it, so a policy with run
+// history is refused.
 func (s *Store) DeletePolicy(ctx context.Context, id string, entry AuditLog) error {
 	return s.withTxDB(ctx, func(q *storesql.Queries, tx *sql.Tx) error {
 		if _, err := q.GetPolicy(ctx, id); err != nil {

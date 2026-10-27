@@ -36,6 +36,7 @@ type runHandlers struct {
 	authentication *auth.Service
 	logger         logger
 	dispatcher     DispatcherControl
+	heartbeat      time.Duration
 }
 
 type logger interface {
@@ -46,8 +47,15 @@ type logger interface {
 // registerRuns wires every W4 API onto the engine.
 func registerRuns(engine *gin.Engine, database *store.Store, dispatcher DispatcherControl,
 	authentication *auth.Service, permissions middleware.Authorization, lg logger,
+	heartbeat time.Duration,
 ) {
-	h := runHandlers{database: database, authentication: authentication, logger: lg, dispatcher: dispatcher}
+	if heartbeat <= 0 {
+		heartbeat = sseHeartbeat
+	}
+	h := runHandlers{
+		database: database, authentication: authentication, logger: lg, dispatcher: dispatcher,
+		heartbeat: heartbeat,
+	}
 
 	runs := engine.Group("/api/v1/runs", permissions.RequirePermission(auth.RunsRead))
 	runs.GET("", h.runs)

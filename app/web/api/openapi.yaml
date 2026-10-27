@@ -1982,7 +1982,7 @@ components:
     RunLog:
       type: object
       additionalProperties: false
-      required: [run_id, seq, ts, level, event, message]
+      required: [run_id, seq, ts, level, event, message, data]
       properties:
         run_id:
           type: string
@@ -2001,6 +2001,11 @@ components:
           minLength: 1
         message:
           type: string
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Structured event payload. Null when the row has none.
     RunLogPage:
       type: object
       additionalProperties: false
@@ -2022,12 +2027,14 @@ components:
       description: >-
         The fixed wire shape of one streamed SSE event's data; it omits run_id
         because the stream already names the run. Event names come from the
-        dispatcher lifecycle: queued, claimed, preflight, completed, failed,
-        canceled, replication_enqueued; the per-run log cap adds one final
-        truncated marker. Heartbeats are ": ping" comments and the stream ends
-        with an end event carrying the terminal status.
+        dispatcher lifecycle: queued, claimed, preflight_ok, preflight_failed,
+        started, completed, failed, canceled, interrupted, replication_enqueued,
+        replication_step; the per-run log cap adds one final truncated marker.
+        Heartbeats are ": ping" comments and the stream ends with an end event
+        carrying the terminal status. data is the structured payload for that
+        event and contains no secrets.
       additionalProperties: false
-      required: [seq, ts, level, event, message]
+      required: [seq, ts, level, event, message, data]
       properties:
         seq:
           type: integer
@@ -2044,6 +2051,11 @@ components:
           minLength: 1
         message:
           type: string
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Structured event payload. Null when the row has none.
     ReplicaStatus:
       type: string
       enum: [pending, uploading, uploaded, verified, failed, exhausted]

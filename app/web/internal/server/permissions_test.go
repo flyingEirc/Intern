@@ -101,11 +101,22 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 	keys := map[string]string{
 		"POST /api/v1/policies/:id/runs": "matrix-trigger",
 	}
-	fixture := newAuthFixtureWithRuns(t)
-	if len(fixture.engine.Routes()) != len(cases) {
+	f := newAuthFixtureWithRuns(t)
+	hash, err := f.service.Passwords.Hash(testPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.seedHashed(t, "loginuser", "viewer", hash)
+	target := f.seedHashed(t, "target", "viewer", hash)
+	cookies := map[string]*http.Cookie{}
+	for _, role := range []string{"admin", "operator", "viewer"} {
+		f.seedHashed(t, role, role, hash)
+		cookies[role] = f.login(t, role, testPassword)
+	}
+	if len(f.engine.Routes()) != len(cases) {
 		t.Fatal("permission matrix and route counts differ")
 	}
-	for _, route := range fixture.engine.Routes() {
+	for _, route := range f.engine.Routes() {
 		key := route.Method + " " + route.Path
 		row, exists := cases[key]
 		if !exists {
@@ -118,26 +129,38 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 		}
 		headerKey := keys[key]
 		for _, role := range []string{"admin", "operator", "viewer", "anonymous"} {
-			t.Run(key+"/"+role, func(t *testing.T) { exercisePermission(t, route.Method, route.Path, role, row, headerKey) })
+			t.Run(key+"/"+role, func(t *testing.T) {
+				exercisePermission(t, f, cookies, hash, target, route.Method, route.Path, role, row, headerKey)
+			})
 		}
 	}
 }
 
-// exercisePermission runs one route as one role against freshly seeded rows, so
-// a 2xx really means the operation ran rather than only passing authorization.
-func exercisePermission(t *testing.T, method, path, role string, row permissionCase, headerKey string) {
+// exercisePermission runs one route as one role against the shared fixture.
+// Store open, password hashing and dispatcher start run once; each case reseeds
+// the rows it mutates so a 2xx still means the operation ran.
+func exercisePermission(t *testing.T, f *authFixture, cookies map[string]*http.Cookie, hash string, target store.User, method, path, role string, row permissionCase, headerKey string) {
 	t.Helper()
-	f := newAuthFixtureWithRuns(t)
-	f.seed(t, "loginuser", "viewer")
-	target := f.seed(t, "target", "viewer")
+	f.drainRuns(t)
+	f.resetResources(t)
+	f.restoreTarget(t, target, hash)
 	seeded := f.seedResources(t)
+	status := map[string]int{"admin": row.admin, "operator": row.operator, "viewer": row.viewer, "anonymous": row.anonymous}[role]
+	req := f.matrixRequest(t, seeded, target, cookies, method, path, role, row.body, headerKey)
+	assertMatrixStatus(t, f, req, method, status)
+	switch path {
+	case "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/password", "/api/v1/runs/:id/events":
+		f.restoreActor(t, cookies, role, hash)
+	}
+}
+
+func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target store.User, cookies map[string]*http.Cookie, method, path, role, body, headerKey string) *http.Request {
+	t.Helper()
 	var cookie *http.Cookie
 	if role != "anonymous" {
-		f.seed(t, "actor", role)
-		cookie = f.login(t, "actor", testPassword)
+		cookie = cookies[role]
 	}
-	status := map[string]int{"admin": row.admin, "operator": row.operator, "viewer": row.viewer, "anonymous": row.anonymous}[role]
-	if strings.HasPrefix(path, "/api/v1/runs") {
+	if strings.Contains(path, "/api/v1/runs/:id") {
 		seeded.runID = f.createRunRow(t, seeded.policyID, seeded.freeSource)
 	}
 	if path == "/api/v1/policies/:id/runs" {
@@ -149,11 +172,16 @@ func exercisePermission(t *testing.T, method, path, role string, row permissionC
 	}
 	resolved := strings.ReplaceAll(path, ":id", seeded.targetID(path, target.ID))
 	resolved = strings.ReplaceAll(resolved, ":repository_id", seeded.policyRepository)
-	req := apiRequest(method, resolved, seeded.expand(row.body), cookie)
+	req := apiRequest(method, resolved, seeded.expand(body), cookie)
 	if headerKey != "" {
 		req.Header.Set("Idempotency-Key", headerKey)
 	}
-	if method == http.MethodGet && strings.HasSuffix(resolved, "/events") {
+	return req
+}
+
+func assertMatrixStatus(t *testing.T, f *authFixture, req *http.Request, method string, status int) {
+	t.Helper()
+	if method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/events") {
 		recorder, err := f.client.roundTripStream(req)
 		if err != nil {
 			t.Fatal(err)
@@ -190,6 +218,98 @@ func newAuthFixtureWithRuns(t *testing.T) *authFixture {
 	}
 	f.engine, f.client = engine, newContractClient(t, Handler(engine))
 	return f
+}
+
+func (f *authFixture) seedHashed(t *testing.T, username, role, hash string) store.User {
+	t.Helper()
+	user, err := f.database.CreateUser(t.Context(), username, hash, role, store.SystemAudit("users.create", store.AuditDetail{Role: role}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return user
+}
+
+func (f *authFixture) resetResources(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	for _, stmt := range []string{
+		`DELETE FROM run_logs`,
+		`DELETE FROM runs`,
+		`DELETE FROM policies`,
+		`DELETE FROM sources`,
+		`DELETE FROM repositories`,
+	} {
+		if _, err := f.database.DB().ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// drainRuns stops queued runs and waits out a running one, so every matrix
+// case starts with no dispatcher activity from the previous case.
+func (f *authFixture) drainRuns(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.drainOnce(t, ctx) {
+		if time.Now().After(deadline) {
+			t.Fatal("runs still running")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// drainOnce cancels every queued row and reports whether a run is still
+// running, so the next pass waits for the dispatcher to finish it.
+func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) bool {
+	t.Helper()
+	runs, err := f.database.Runs(ctx, store.RunsFilter{Limit: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy := false
+	for _, run := range runs {
+		switch run.Status {
+		case store.RunStatusQueued:
+			f.cancelQueued(t, ctx, run.ID)
+		case store.RunStatusRunning:
+			busy = true
+		}
+	}
+	return busy
+}
+
+func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) {
+	t.Helper()
+	if _, err := f.database.CancelQueuedRun(ctx, runID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *authFixture) restoreTarget(t *testing.T, target store.User, hash string) {
+	t.Helper()
+	role := "viewer"
+	if _, err := f.database.UpdateUser(t.Context(), target.ID, store.UserChanges{Role: &role, PasswordHash: &hash},
+		store.SystemAudit("users.update", store.AuditDetail{Role: role})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f *authFixture) restoreActor(t *testing.T, cookies map[string]*http.Cookie, role, hash string) {
+	t.Helper()
+	if role == "anonymous" {
+		return
+	}
+	user, err := f.database.UserByUsername(t.Context(), role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.database.UpdateUser(t.Context(), user.ID, store.UserChanges{PasswordHash: &hash},
+		store.SystemAudit("users.update", store.AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	cookies[role] = f.login(t, role, testPassword)
 }
 
 type seededResources struct {

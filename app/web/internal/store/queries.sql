@@ -219,15 +219,16 @@ WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT
 ORDER BY id DESC LIMIT sqlc.arg(row_limit);
 
 -- name: ClaimNextRun :one
--- One claimant at a time holds the database write lock, so the UPDATE ... WHERE
--- status = 'queued' clause is the concurrency control: the loser's statement
--- runs after the winner's commit and no longer matches. No result means no
--- claimable run.
+-- Global backup concurrency is 1: a queued row is claimed only when no run is
+-- already running. That is also per-source exclusion. One claimant at a time
+-- holds the database write lock, so the loser's statement runs after the
+-- winner's commit and no longer matches. No result means no claimable run.
 UPDATE runs SET status = 'running', started_at = sqlc.arg(started_at)
 WHERE id = (
     SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
 ) AND status = 'queued'
+AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
 RETURNING *;
 
 -- name: CancelQueuedRun :execrows
@@ -258,7 +259,7 @@ WHERE id = sqlc.arg(id) AND status = 'running';
 SELECT * FROM runs WHERE status = 'running';
 
 -- name: InsertRunLog :exec
-INSERT INTO run_logs (run_id, seq, ts, level, event, message) VALUES (?, ?, ?, ?, ?, ?);
+INSERT INTO run_logs (run_id, seq, ts, level, event, message, data) VALUES (?, ?, ?, ?, ?, ?, ?);
 
 -- name: CountRunLogs :one
 SELECT COUNT(*) FROM run_logs WHERE run_id = ?;
@@ -267,7 +268,7 @@ SELECT COUNT(*) FROM run_logs WHERE run_id = ?;
 SELECT * FROM run_logs WHERE run_id = ? AND seq = ?;
 
 -- name: ReplaceRunLog :execrows
-UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?
+UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?, data = ?
 WHERE run_id = ? AND seq = ?;
 
 -- name: RunLogsAfter :many
@@ -278,3 +279,10 @@ SELECT * FROM policies WHERE enabled = 1 ORDER BY id;
 
 -- name: MaxRunLogSeq :one
 SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM run_logs WHERE run_id = ?;
+
+-- name: RunByBackupID :one
+SELECT * FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1;
+
+-- name: CountActiveFullsForSource :one
+SELECT COUNT(*) FROM runs
+WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running');

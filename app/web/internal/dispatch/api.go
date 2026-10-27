@@ -34,10 +34,12 @@ type CreatedRun struct {
 	RunID string `json:"run_id"`
 }
 
-// TriggerRun implements the frozen manual contract: the same key with the same
-// canonical body replays the same run id, the same key with a different body is
-// a 409 conflict, a disabled policy is a 409 conflict, and an unconfigured
-// runtime answers 503 immediately (cron runs are recorded as failed instead).
+// TriggerRun implements the frozen manual contract: idempotent replay of the
+// same key and body is answered before the disabled-policy conflict, so a
+// replay still returns 202 with the original run id after the policy is
+// disabled. A new key against a disabled policy is a 409 conflict, a different
+// body is a 409 conflict, and an unconfigured runtime answers 503 immediately
+// (cron runs are recorded as failed instead).
 func (d *Dispatcher) TriggerRun(ctx context.Context, policyID, kind, key, requestHash, actorID string) (TriggerOutcome, any) {
 	policy, err := d.config.Database.Policy(ctx, policyID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -47,11 +49,11 @@ func (d *Dispatcher) TriggerRun(ctx context.Context, policyID, kind, key, reques
 		d.logger.ErrorContext(ctx, "cannot load policy", "policy_id", policyID, "error", err)
 		return TriggerInternal, nil
 	}
-	if !policy.Enabled {
-		return TriggerConflict, nil
-	}
 	if outcome, payload, found := d.replay(ctx, policyID, key, requestHash); found {
 		return outcome, payload
+	}
+	if !policy.Enabled {
+		return TriggerConflict, nil
 	}
 	if !d.config.Settings.Preflight() {
 		// Decision 9: manual trigger answers 503 immediately; the cron path
@@ -73,7 +75,8 @@ func (d *Dispatcher) TriggerRun(ctx context.Context, policyID, kind, key, reques
 		d.logger.ErrorContext(ctx, "cannot create run", "policy_id", policyID, "error", err)
 		return TriggerInternal, nil
 	}
-	d.logRun(ctx, run.ID, "queued")
+	d.ensurePolicyReplicator(ctx, policy, run.ID)
+	d.logEvent(ctx, run.ID, eventQueued, nil)
 	return TriggerCreated, CreatedRun{RunID: run.ID}
 }
 
@@ -184,8 +187,13 @@ func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protectio
 	if local != nil {
 		protection.Local = &PointView{BackupID: local.BackupID, ChainID: local.ChainID, At: store.ScheduleStamp(local.At)}
 	}
-	for _, replicator := range d.replicas {
-		remote, err := replicator.RemotePoint(ctx, sourceID)
+	seen := map[string]struct{}{}
+	for _, slot := range d.replicaSnapshot() {
+		if _, ok := seen[slot.replicaID]; ok {
+			continue
+		}
+		seen[slot.replicaID] = struct{}{}
+		remote, err := slot.replicator.RemotePoint(ctx, sourceID)
 		if err != nil {
 			return Protection{}, err
 		}
@@ -193,7 +201,7 @@ func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protectio
 			continue
 		}
 		protection.Remote = append(protection.Remote, PointView{
-			RepositoryID: replicator.RepositoryID, BackupID: remote.BackupID,
+			RepositoryID: slot.replicaID, BackupID: remote.BackupID,
 			ChainID: remote.ChainID, At: store.ScheduleStamp(remote.At),
 		})
 	}
@@ -208,11 +216,16 @@ func (d *Dispatcher) Replicas(ctx context.Context, filter ReplicaFilter) ([]Repl
 		limit = 100
 	}
 	views := []ReplicaView{}
-	for _, replicator := range d.replicas {
-		if filter.RepositoryID != "" && replicator.RepositoryID != filter.RepositoryID {
+	seen := map[string]struct{}{}
+	for _, slot := range d.replicaSnapshot() {
+		if filter.RepositoryID != "" && slot.replicaID != filter.RepositoryID {
 			continue
 		}
-		extended, err := appendReplicas(ctx, replicator, filter, views, limit)
+		if _, ok := seen[slot.replicaID]; ok {
+			continue
+		}
+		seen[slot.replicaID] = struct{}{}
+		extended, err := appendReplicas(ctx, slot.replicator, filter, views, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -293,15 +306,20 @@ func (d *Dispatcher) BackupView(ctx context.Context, backupID string) (*BackupVi
 		return nil, err
 	}
 	view := backupView(backup)
-	for _, replicator := range d.replicas {
-		replica, err := replicator.Replica(ctx, backupID)
+	seen := map[string]struct{}{}
+	for _, slot := range d.replicaSnapshot() {
+		if _, ok := seen[slot.replicaID]; ok {
+			continue
+		}
+		seen[slot.replicaID] = struct{}{}
+		replica, err := slot.replicator.Replica(ctx, backupID)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		view.Replicas = append(view.Replicas, replicaView(replica, replicator.RepositoryID))
+		view.Replicas = append(view.Replicas, replicaView(replica, slot.replicaID))
 	}
 	return &view, nil
 }

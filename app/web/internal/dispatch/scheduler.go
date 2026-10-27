@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"log/slog"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -22,9 +21,13 @@ func cronKey(policyID, kind string, scheduledAt time.Time) string {
 }
 
 // admissionKey builds the frozen admission idempotency key for the coalesced
-// full a refused incremental queues: policy:full:admission:<scheduled_at>.
-func admissionKey(policyID string, scheduledAt time.Time) string {
-	return fmt.Sprintf("policy:%s:full:admission:%s", policyID, store.ScheduleStamp(scheduledAt))
+// full a refused incremental queues: policy:<id>:full:admission:<latest chain
+// id, or none>.
+func admissionKey(policyID, chainID string) string {
+	if chainID == "" {
+		chainID = "none"
+	}
+	return fmt.Sprintf("policy:%s:full:admission:%s", policyID, chainID)
 }
 
 // schedule computes the next fire time of one standard cron expression in the
@@ -198,7 +201,8 @@ func (d *Dispatcher) insertCronRun(ctx context.Context, policy store.Policy, kin
 	if err != nil {
 		return store.Run{}, false, err
 	}
-	d.logRun(ctx, run.ID, "queued")
+	d.ensurePolicyReplicator(ctx, policy, run.ID)
+	d.logEvent(ctx, run.ID, eventQueued, nil)
 	return run, true, nil
 }
 
@@ -218,21 +222,4 @@ func cronRequestHash(policy store.Policy, kind string) string {
 		policy.FullCron, policy.IncrementalCron, policy.MaxChainLength, policy.Parallel,
 		policy.Throttle, policy.ZstdLevel, policy.PageTracking)
 	return fmt.Sprintf("%x", hasher.Sum(nil))
-}
-
-// writeRunEvent appends one event to the bounded run log through the store's
-// slog handler and returns when the caller's deadline fires. A busy database
-// must not stall the worker beyond the run-log budget.
-func writeRunEvent(ctx context.Context, logger *slog.Logger, event string) error {
-	done := make(chan error, 1)
-	go func() {
-		logger.Info(event)
-		done <- nil
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		return err
-	}
 }

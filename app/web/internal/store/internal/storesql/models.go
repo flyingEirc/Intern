@@ -92,6 +92,7 @@ type RunLog struct {
 	Level   string
 	Event   string
 	Message string
+	Data    interface{}
 }
 
 type Session struct {

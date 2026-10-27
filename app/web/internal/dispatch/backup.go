@@ -15,9 +15,12 @@ import (
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
-// backupWorker claims and executes runs. Exactly one backup runs at a time:
-// this worker is the only claimer, and the claim UPDATE's status guard is the
-// concurrency control.
+const finishAttempts = 5
+
+// backupWorker claims and executes runs. Global backup concurrency is 1: the
+// claim refuses a new row while any run is still running. A FinishRun* failure
+// that leaves the row running is retried with bounded backoff; if it still
+// fails the worker stops so restart recovery can reclaim the slot.
 func (d *Dispatcher) backupWorker(ctx context.Context) {
 	for {
 		if err := d.claimAndRun(ctx); err != nil {
@@ -25,6 +28,10 @@ func (d *Dispatcher) backupWorker(ctx context.Context) {
 				return
 			}
 			d.logger.ErrorContext(ctx, "backup worker failed", "error", err)
+			if d.hasRunningRun(ctx) {
+				d.logger.ErrorContext(ctx, "a run is still running after a finish failure; stopping the backup worker so restart recovery can reclaim it")
+				return
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -32,6 +39,31 @@ func (d *Dispatcher) backupWorker(ctx context.Context) {
 		case <-time.After(workerPoll):
 		}
 	}
+}
+
+func (d *Dispatcher) hasRunningRun(ctx context.Context) bool {
+	runs, err := d.config.Database.InterruptedRuns(ctx)
+	return err == nil && len(runs) > 0
+}
+
+func (d *Dispatcher) finishWithRetry(ctx context.Context, runID string, op func() error) error {
+	var err error
+	for attempt := 1; attempt <= finishAttempts; attempt++ {
+		err = op()
+		if err == nil {
+			return nil
+		}
+		d.logger.ErrorContext(ctx, "cannot persist run outcome", "run_id", runID, "attempt", attempt, "error", err)
+		if ctx.Err() != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(claimRetry):
+		}
+	}
+	return err
 }
 
 // claimAndRun claims one queued run and executes it to a terminal status.
@@ -43,7 +75,7 @@ func (d *Dispatcher) claimAndRun(ctx context.Context) error {
 	d.logger.InfoContext(ctx, "run claimed", "run_id", run.ID, "kind", run.Kind,
 		"policy_id", run.PolicyID, "trigger", run.Trigger)
 	d.auditRun(ctx, "runs.claimed")
-	d.logRun(ctx, run.ID, "claimed")
+	d.logEvent(ctx, run.ID, eventClaimed, nil)
 	return d.executeRun(ctx, run)
 }
 
@@ -79,6 +111,7 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 	if done {
 		return err
 	}
+	d.logEvent(ctx, run.ID, eventStarted, nil)
 	result, runErr := d.runChain(ctx, run, d.chainJob(run, policy, repo, identity, connection))
 
 	if admission := (*physicalstore.AdmissionError)(nil); errors.As(runErr, &admission) {
@@ -103,11 +136,16 @@ func (d *Dispatcher) failChain(ctx context.Context, run store.Run, runErr error)
 // completeRun commits the durable success point, which wins over any cancel
 // request that arrived afterwards, then hands the backup to replication.
 func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy store.Policy, result chain.Result) error {
-	if err := d.config.Database.FinishRunCompleted(ctx, run.ID, result.BackupID, result.ChainID,
-		result.PayloadSize, store.SystemAudit("runs.completed", store.AuditDetail{})); err != nil {
+	log := runLogWrite(eventCompleted, map[string]any{
+		"backup_id": result.BackupID, "chain_id": result.ChainID, "seq": result.Seq,
+		"payload_size": result.PayloadSize, "payload_sha256": result.PayloadSHA256,
+	})
+	if err := d.finishWithRetry(ctx, run.ID, func() error {
+		return d.config.Database.FinishRunCompleted(ctx, run.ID, result.BackupID, result.ChainID,
+			result.PayloadSize, store.SystemAudit("runs.completed", store.AuditDetail{}), log)
+	}); err != nil {
 		return err
 	}
-	d.logRun(ctx, run.ID, "completed")
 	d.logger.InfoContext(ctx, "run completed", "run_id", run.ID, "backup_id", result.BackupID,
 		"chain_id", result.ChainID, "payload_size", result.PayloadSize)
 	d.enqueueReplication(ctx, run, policy, result.BackupID)
@@ -124,6 +162,9 @@ func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Poli
 	if !d.config.Settings.Preflight() {
 		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorUnavailable, "unconfigured",
 			errors.New("backup runtime is not configured"))
+	}
+	if err := d.validateKEK(ctx, run, policy); err != nil {
+		return physical.Connection{}, physical.Identity{}, true, err
 	}
 	if code, preflightErr := d.preflightRun(ctx, run, policy); code != "" {
 		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
@@ -203,15 +244,42 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 		store.SystemAudit("sources.preflight", store.AuditDetail{})); err != nil {
 		d.logger.ErrorContext(ctx, "cannot record preflight", "run_id", run.ID, "error", err)
 	}
-	d.logRun(ctx, run.ID, "preflight")
 	if outcome.OK() {
+		d.logEvent(ctx, run.ID, eventPreflightOK, nil)
 		return "", nil
 	}
 	code := "preflight_failed"
-	if outcome.Failure != nil && outcome.Failure.Code != "" {
-		code = outcome.Failure.Code
+	check := "preflight"
+	if outcome.Failure != nil {
+		if outcome.Failure.Code != "" {
+			code = outcome.Failure.Code
+		}
+		if outcome.Failure.Check != "" {
+			check = outcome.Failure.Check
+		}
 	}
+	d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{"check": check, "code": code})
 	return code, fmt.Errorf("preflight failed")
+}
+
+// validateKEK rechecks that the KEK is outside the policy's local repository
+// root before chain.Run. A violation fails the run with error_class preflight.
+func (d *Dispatcher) validateKEK(ctx context.Context, run store.Run, policy store.Policy) error {
+	repository, err := d.config.Database.Repository(ctx, policy.LocalRepositoryID)
+	if err != nil {
+		return d.failRun(ctx, run, store.RunErrorPreflight, "repository_missing", err)
+	}
+	if repository.Kind != store.RepositoryLocal || repository.Local == nil {
+		return d.failRun(ctx, run, store.RunErrorPreflight, "repository_kind",
+			errors.New("local repository required"))
+	}
+	if err := d.config.Settings.ValidateRepositoryRoot(repository.Local.Root); err != nil {
+		d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{
+			"check": "kek", "code": "kek_inside_repository",
+		})
+		return d.failRun(ctx, run, store.RunErrorPreflight, "kek_inside_repository", err)
+	}
+	return nil
 }
 
 // admissionFailure implements decision 10: an AdmissionError with RequiresFull
@@ -219,17 +287,44 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 // key, and the incremental run fails with error_class requires_full.
 func (d *Dispatcher) admissionFailure(ctx context.Context, run store.Run, policy store.Policy, admission *physicalstore.AdmissionError) error {
 	if admission.RequiresFull && run.Kind == store.RunKindIncremental {
-		scheduledAt := d.now()
-		if _, err := d.config.Database.CreateRun(ctx, store.RunInput{
-			PolicyID: policy.ID, SourceID: policy.SourceID, Kind: store.RunKindFull, Trigger: store.RunTriggerAdmission,
-			IdempotencyKey: admissionKey(policy.ID, scheduledAt), RequestHash: cronRequestHash(policy, store.RunKindFull),
-			ScheduledAt: scheduledAt,
-		}); err != nil && !errors.Is(err, store.ErrConflict) {
-			d.logger.ErrorContext(ctx, "cannot queue admission full", "run_id", run.ID, "error", err)
-		}
+		d.queueAdmissionFull(ctx, run, policy)
 		return d.failRun(ctx, run, store.RunErrorRequiresFull, admission.Code, admission)
 	}
 	return d.failRun(ctx, run, store.RunErrorBackupFailed, "admission_failed", admission)
+}
+
+func (d *Dispatcher) queueAdmissionFull(ctx context.Context, run store.Run, policy store.Policy) {
+	active, err := d.config.Database.HasActiveFull(ctx, policy.SourceID)
+	if err != nil {
+		d.logger.ErrorContext(ctx, "cannot check admission full", "run_id", run.ID, "error", err)
+		return
+	}
+	if active {
+		return
+	}
+	created, err := d.config.Database.CreateRun(ctx, store.RunInput{
+		PolicyID: policy.ID, SourceID: policy.SourceID, Kind: store.RunKindFull, Trigger: store.RunTriggerAdmission,
+		IdempotencyKey: admissionKey(policy.ID, d.latestChainID(ctx, policy.SourceID)),
+		RequestHash:    cronRequestHash(policy, store.RunKindFull),
+		ScheduledAt:    d.now(),
+	})
+	if errors.Is(err, store.ErrConflict) {
+		return
+	}
+	if err != nil {
+		d.logger.ErrorContext(ctx, "cannot queue admission full", "run_id", run.ID, "error", err)
+		return
+	}
+	d.ensurePolicyReplicator(ctx, policy, created.ID)
+	d.logEvent(ctx, created.ID, eventQueued, nil)
+}
+
+func (d *Dispatcher) latestChainID(ctx context.Context, sourceID string) string {
+	chains, err := physicalstore.New(d.config.Database.DB()).SourceChains(ctx, sourceID)
+	if err != nil || len(chains) == 0 {
+		return "none"
+	}
+	return chains[len(chains)-1].ID
 }
 
 // chainJob builds the physical chain Job for one run. validateJob rechecks
@@ -283,13 +378,15 @@ func (d *Dispatcher) failRun(ctx context.Context, run store.Run, class, code str
 	if cause != nil {
 		logger = logger.With(slog.String("cause", cause.Error()))
 	}
-	if err := d.config.Database.FinishRunFailed(ctx, run.ID, class, code,
-		store.SystemAudit("runs.failed", store.AuditDetail{})); err != nil {
+	log := runLogWrite(eventFailed, map[string]any{"error_class": class, "code": code})
+	if err := d.finishWithRetry(ctx, run.ID, func() error {
+		return d.config.Database.FinishRunFailed(ctx, run.ID, class, code,
+			store.SystemAudit("runs.failed", store.AuditDetail{}), log)
+	}); err != nil {
 		logger.ErrorContext(ctx, "cannot record failed run", "run_id", run.ID, "record_error", err)
 		return err
 	}
 	logger.ErrorContext(ctx, "run failed", "run_id", run.ID, "class", class, "code", code)
-	d.logRun(ctx, run.ID, "failed")
 	return nil
 }
 
@@ -297,15 +394,17 @@ func (d *Dispatcher) failRun(ctx context.Context, run store.Run, class, code str
 // only when the physical chain did not succeed. A nil chain.Run keeps the run
 // completed; a cancel never deletes a completed backup.
 func (d *Dispatcher) cancelRun(ctx context.Context, run store.Run) error {
-	if err := d.config.Database.FinishRunCanceled(ctx, run.ID,
-		store.SystemAudit("runs.canceled", store.AuditDetail{})); err != nil {
+	log := runLogWrite(eventCanceled, nil)
+	if err := d.finishWithRetry(ctx, run.ID, func() error {
+		return d.config.Database.FinishRunCanceled(ctx, run.ID,
+			store.SystemAudit("runs.canceled", store.AuditDetail{}), log)
+	}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			return nil
 		}
 		return err
 	}
 	d.logger.InfoContext(ctx, "run canceled", "run_id", run.ID)
-	d.logRun(ctx, run.ID, "canceled")
 	return nil
 }
 
@@ -316,7 +415,7 @@ func (d *Dispatcher) enqueueReplication(ctx context.Context, run store.Run, poli
 	if policy.ReplicaRepositoryID == nil {
 		return
 	}
-	replicator := d.replicatorFor(*policy.ReplicaRepositoryID)
+	replicator := d.ensurePolicyReplicator(ctx, policy, run.ID)
 	if replicator == nil {
 		return
 	}
@@ -325,7 +424,9 @@ func (d *Dispatcher) enqueueReplication(ctx context.Context, run store.Run, poli
 			"backup_id", backupID, "repository_id", *policy.ReplicaRepositoryID, "error", err)
 		return
 	}
-	d.logRun(ctx, run.ID, "replication_enqueued")
+	d.logEvent(ctx, run.ID, eventReplicationEnqueued, map[string]any{
+		"repository_id": *policy.ReplicaRepositoryID,
+	})
 }
 
 // RequestCancel asks a run to stop. A queued run becomes canceled without
@@ -338,12 +439,11 @@ func (d *Dispatcher) RequestCancel(ctx context.Context, runID string) error {
 	}
 	if run.Status == store.RunStatusQueued {
 		changed, err := d.config.Database.CancelQueuedRun(ctx, run.ID,
-			store.SystemAudit("runs.canceled", store.AuditDetail{}))
+			store.SystemAudit("runs.canceled", store.AuditDetail{}), runLogWrite(eventCanceled, nil))
 		if err != nil {
 			return err
 		}
 		if changed {
-			d.logRun(ctx, run.ID, "canceled")
 			return nil
 		}
 		// A claim won the race; fall through to the running-run path.
@@ -359,16 +459,4 @@ func (d *Dispatcher) RequestCancel(ctx context.Context, runID string) error {
 		cancel()
 	}
 	return nil
-}
-
-// logRun writes one fixed-format, secret-safe event into the bounded run log.
-// A full log drops events after its final truncated marker and never blocks
-// the worker beyond its short deadline.
-func (d *Dispatcher) logRun(ctx context.Context, runID, event string) {
-	logger := d.config.Database.RunLoggerFor(runID)
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runLogCapDeadline)
-	defer cancel()
-	if err := writeRunEvent(writeCtx, logger, event); err != nil {
-		d.logger.ErrorContext(ctx, "cannot append run log", "run_id", runID, "error", err)
-	}
 }

@@ -85,13 +85,14 @@ WHERE id = (
     SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
 ) AND status = 'queued'
+AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
 RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id
 `
 
-// One claimant at a time holds the database write lock, so the UPDATE ... WHERE
-// status = 'queued' clause is the concurrency control: the loser's statement
-// runs after the winner's commit and no longer matches. No result means no
-// claimable run.
+// Global backup concurrency is 1: a queued row is claimed only when no run is
+// already running. That is also per-source exclusion. One claimant at a time
+// holds the database write lock, so the loser's statement runs after the
+// winner's commit and no longer matches. No result means no claimable run.
 func (q *Queries) ClaimNextRun(ctx context.Context, startedAt sql.NullString) (Run, error) {
 	row := q.db.QueryRowContext(ctx, claimNextRun, startedAt)
 	var i Run
@@ -162,6 +163,18 @@ func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const countActiveFullsForSource = `-- name: CountActiveFullsForSource :one
+SELECT COUNT(*) FROM runs
+WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running')
+`
+
+func (q *Queries) CountActiveFullsForSource(ctx context.Context, sourceID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActiveFullsForSource, sourceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const countPoliciesByRepository = `-- name: CountPoliciesByRepository :one
@@ -733,7 +746,7 @@ func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey str
 }
 
 const getRunLog = `-- name: GetRunLog :one
-SELECT run_id, seq, ts, level, event, message FROM run_logs WHERE run_id = ? AND seq = ?
+SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? AND seq = ?
 `
 
 type GetRunLogParams struct {
@@ -751,6 +764,7 @@ func (q *Queries) GetRunLog(ctx context.Context, arg GetRunLogParams) (RunLog, e
 		&i.Level,
 		&i.Event,
 		&i.Message,
+		&i.Data,
 	)
 	return i, err
 }
@@ -942,7 +956,7 @@ func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (Run, erro
 }
 
 const insertRunLog = `-- name: InsertRunLog :exec
-INSERT INTO run_logs (run_id, seq, ts, level, event, message) VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO run_logs (run_id, seq, ts, level, event, message, data) VALUES (?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertRunLogParams struct {
@@ -952,6 +966,7 @@ type InsertRunLogParams struct {
 	Level   string
 	Event   string
 	Message string
+	Data    interface{}
 }
 
 func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) error {
@@ -962,6 +977,7 @@ func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) erro
 		arg.Level,
 		arg.Event,
 		arg.Message,
+		arg.Data,
 	)
 	return err
 }
@@ -1355,7 +1371,7 @@ func (q *Queries) RecordSourcePreflight(ctx context.Context, arg RecordSourcePre
 }
 
 const replaceRunLog = `-- name: ReplaceRunLog :execrows
-UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?
+UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?, data = ?
 WHERE run_id = ? AND seq = ?
 `
 
@@ -1364,6 +1380,7 @@ type ReplaceRunLogParams struct {
 	Level   string
 	Event   string
 	Message string
+	Data    interface{}
 	RunID   string
 	Seq     int64
 }
@@ -1374,6 +1391,7 @@ func (q *Queries) ReplaceRunLog(ctx context.Context, arg ReplaceRunLogParams) (i
 		arg.Level,
 		arg.Event,
 		arg.Message,
+		arg.Data,
 		arg.RunID,
 		arg.Seq,
 	)
@@ -1421,8 +1439,39 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 	return i, err
 }
 
+const runByBackupID = `-- name: RunByBackupID :one
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1
+`
+
+func (q *Queries) RunByBackupID(ctx context.Context, backupID sql.NullString) (Run, error) {
+	row := q.db.QueryRowContext(ctx, runByBackupID, backupID)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PolicyID,
+		&i.SourceID,
+		&i.Kind,
+		&i.Trigger,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Status,
+		&i.ScheduledAt,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.BackupID,
+		&i.ChainID,
+		&i.PayloadSize,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.CancelRequested,
+		&i.ActorID,
+	)
+	return i, err
+}
+
 const runLogsAfter = `-- name: RunLogsAfter :many
-SELECT run_id, seq, ts, level, event, message FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?
+SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?
 `
 
 type RunLogsAfterParams struct {
@@ -1447,6 +1496,7 @@ func (q *Queries) RunLogsAfter(ctx context.Context, arg RunLogsAfterParams) ([]R
 			&i.Level,
 			&i.Event,
 			&i.Message,
+			&i.Data,
 		); err != nil {
 			return nil, err
 		}

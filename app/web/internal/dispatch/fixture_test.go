@@ -160,6 +160,35 @@ func (f *fixture) policy(name string, sourceID, repositoryID string, enabled boo
 	return enabledPolicy
 }
 
+// ftpRepository creates one FTP repository row with a sealed password. Tests
+// that open a replicator replace openRemote so this never dials.
+func (f *fixture) ftpRepository(name string) store.Repository {
+	f.t.Helper()
+	created, err := f.database.CreateRepository(f.t.Context(), store.RepositoryInput{
+		Name: name, Kind: store.RepositoryFTP, TLSMode: store.TLSModePlain,
+		FTP:    &store.FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/backups", Username: "backup"},
+		Secret: []byte("{{SECRET_dispatch_ftp}}"),
+	}, f.sealer, store.SystemAudit("repositories.create", store.AuditDetail{PlaintextFTP: true}))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return created
+}
+
+// replicaPolicy creates a disabled policy that points at a replica repository.
+func (f *fixture) replicaPolicy(name, sourceID, localID, replicaID string) store.Policy {
+	f.t.Helper()
+	created, err := f.database.CreatePolicy(f.t.Context(), store.PolicyInput{
+		Name: name, SourceID: sourceID, LocalRepositoryID: localID, ReplicaRepositoryID: &replicaID,
+		FullCron: "0 * * * *", IncrementalCron: "30 * * * *", Timezone: "UTC",
+		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+	}, store.SystemAudit("policies.create", store.AuditDetail{}))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return created
+}
+
 // schedule stamps the persisted next trigger times.
 func (f *fixture) schedule(policyID string, full, incremental time.Time) {
 	f.t.Helper()
@@ -243,6 +272,7 @@ func (f *fixture) newDispatcher(now func() time.Time) *Dispatcher {
 			Preflight: &resources.Service{Store: f.database, Settings: f.runtime},
 		},
 		logger: f.logger(), now: now, cancel: cancel, done: make(chan struct{}),
+		replicatorFailed: map[string]struct{}{},
 	}
 	f.t.Cleanup(cancel)
 	return d

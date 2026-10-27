@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,19 +76,59 @@ type Dispatcher struct {
 	// the run that cancel belongs to.
 	runningCancel context.CancelFunc
 	runningRunID  string
-	replicas      []*replication.Replicator
+	replicas      []replicaHandle
+	replicaCursor int
 	closers       []func() error
+	// replicatorFailed records (local, replica) pairs whose last lazy open
+	// failed, so the replication worker retries them on the next step.
+	replicatorFailed map[string]struct{}
 }
 
-// replicatorFor returns the replicator of one repository, nil when this
-// instance does not serve that FTP repository.
+// replicaHandle is one Replicator for a distinct (local, replica) repository pair.
+type replicaHandle struct {
+	localID, replicaID string
+	replicator         *replication.Replicator
+}
+
+const replicatorUnavailable = "replicator_unavailable"
+
+func pairKey(localID, replicaID string) string {
+	return localID + "\x00" + replicaID
+}
+
+// replicatorFor returns one replicator of this FTP repository, nil when this
+// instance does not serve it.
 func (d *Dispatcher) replicatorFor(repositoryID string) *replication.Replicator {
-	for _, replicator := range d.replicas {
-		if replicator.RepositoryID == repositoryID {
-			return replicator
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, slot := range d.replicas {
+		if slot.replicaID == repositoryID {
+			return slot.replicator
 		}
 	}
 	return nil
+}
+
+// replicatorForPair returns the replicator of one policy's (local, replica) pair.
+func (d *Dispatcher) replicatorForPair(localID, replicaID string) *replication.Replicator {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.replicatorForPairLocked(localID, replicaID)
+}
+
+func (d *Dispatcher) replicatorForPairLocked(localID, replicaID string) *replication.Replicator {
+	for _, slot := range d.replicas {
+		if slot.localID == localID && slot.replicaID == replicaID {
+			return slot.replicator
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) replicaSnapshot() []replicaHandle {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.replicas)
 }
 
 // ErrWorkersStillRunning reports that a worker did not finish inside the
@@ -109,7 +151,10 @@ func Start(ctx context.Context, config Config) (*Dispatcher, error) {
 		now = time.Now
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	d := &Dispatcher{config: config, logger: logger, now: now, cancel: cancel, done: make(chan struct{})}
+	d := &Dispatcher{
+		config: config, logger: logger, now: now, cancel: cancel, done: make(chan struct{}),
+		replicatorFailed: map[string]struct{}{},
+	}
 	if err := d.recover(ctx); err != nil {
 		cancel()
 		return nil, err
@@ -146,7 +191,8 @@ func (d *Dispatcher) failInterruptedRuns(ctx context.Context) error {
 	}
 	for _, run := range runs {
 		entry := store.SystemAudit("runs.interrupted", store.AuditDetail{})
-		if failErr := d.config.Database.FinishRunFailed(ctx, run.ID, store.RunErrorInterrupted, "interrupted", entry); failErr != nil {
+		log := runLogWrite(eventInterrupted, nil)
+		if failErr := d.config.Database.FinishRunFailed(ctx, run.ID, store.RunErrorInterrupted, "interrupted", entry, log); failErr != nil {
 			return fmt.Errorf("dispatch: interrupt run %s: %w", run.ID, failErr)
 		}
 		d.logger.InfoContext(ctx, "interrupted run failed at startup",
@@ -179,8 +225,13 @@ func (d *Dispatcher) recoverPhysical(ctx context.Context, recovered []recoveredR
 
 // recoverReplication reclaims each FTP repository's interrupted copies.
 func (d *Dispatcher) recoverReplication(ctx context.Context) error {
-	for _, replicator := range d.replicas {
-		if err := replicator.Recover(ctx); err != nil {
+	seen := map[string]struct{}{}
+	for _, slot := range d.replicaSnapshot() {
+		if _, ok := seen[slot.replicaID]; ok {
+			continue
+		}
+		seen[slot.replicaID] = struct{}{}
+		if err := slot.replicator.Recover(ctx); err != nil {
 			return fmt.Errorf("dispatch: replication recovery: %w", err)
 		}
 	}
@@ -197,20 +248,20 @@ func (d *Dispatcher) openRepositories(ctx context.Context) ([]recoveredRepositor
 	}
 	var recovered []recoveredRepository
 	for _, repository := range repositories {
-		switch {
-		case repository.Kind == store.RepositoryLocal && repository.Local != nil:
-			opened, openErr := d.openLocal(repository)
-			if openErr != nil {
-				closeAll(recovered)
-				return nil, openErr
-			}
-			recovered = append(recovered, opened)
-		case repository.Kind == store.RepositoryFTP && repository.FTP != nil:
-			if openErr := d.openRemote(ctx, repository, recovered); openErr != nil {
-				closeAll(recovered)
-				return nil, openErr
-			}
+		if repository.Kind != store.RepositoryLocal || repository.Local == nil {
+			continue
 		}
+		opened, openErr := d.openLocal(repository)
+		if openErr != nil {
+			closeAll(recovered)
+			return nil, openErr
+		}
+		recovered = append(recovered, opened)
+	}
+	if openErr := d.openPolicyReplicators(ctx); openErr != nil {
+		closeAll(recovered)
+		d.stop()
+		return nil, openErr
 	}
 	return recovered, nil
 }
@@ -228,26 +279,162 @@ func (d *Dispatcher) openLocal(repository store.Repository) (recoveredRepository
 	}, nil
 }
 
-// openRemote opens one FTP repository's replicator and records its handle. A
-// deployment without the KEK cannot open a sealed FTP credential at all, so the
-// repository is skipped with a warning instead of aborting serve (decision 9).
-// No backup can complete in that state either: every run fails with error_class
-// unavailable before the replication handoff.
-func (d *Dispatcher) openRemote(ctx context.Context, repository store.Repository, _ []recoveredRepository) error {
+// openPolicyReplicators creates one Replicator per distinct
+// (local_repository_id, replica_repository_id) pair among policies that have a
+// replica, using that policy's local repository root. FTP repositories that are
+// not attached to a policy are not opened, so serve starts when the newest
+// repository is FTP.
+func (d *Dispatcher) openPolicyReplicators(ctx context.Context) error {
 	if !d.config.Settings.Credentials() {
-		d.logger.WarnContext(ctx, "replication disabled: the KEK is not configured so the FTP credential cannot be opened",
-			"repository_id", repository.ID)
+		d.logger.WarnContext(ctx, "replication disabled: the KEK is not configured so the FTP credential cannot be opened")
 		return nil
 	}
-	replicator, closer, err := d.openReplicator(ctx, repository)
+	policies, err := d.config.Database.Policies(ctx, "", 1_000_000)
+	if err != nil {
+		return fmt.Errorf("dispatch: policies: %w", err)
+	}
+	seen := map[string]struct{}{}
+	for _, policy := range policies {
+		if policy.ReplicaRepositoryID == nil {
+			continue
+		}
+		key := policy.LocalRepositoryID + "\x00" + *policy.ReplicaRepositoryID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if openErr := d.openPair(ctx, policy.LocalRepositoryID, *policy.ReplicaRepositoryID); openErr != nil {
+			return openErr
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) openPair(ctx context.Context, localID, replicaID string) error {
+	if d.replicatorForPair(localID, replicaID) != nil {
+		d.clearReplicatorFailed(localID, replicaID)
+		return nil
+	}
+	localRow, replicaRow, err := d.loadPairRepositories(ctx, localID, replicaID)
 	if err != nil {
 		return err
 	}
-	d.replicas = append(d.replicas, replicator)
+	replicator, closer, err := d.openReplicator(ctx, replicaRow, localRow.Local.Root)
+	if err != nil {
+		return err
+	}
+	d.installReplicator(localID, replicaID, replicator, closer)
+	return nil
+}
+
+func (d *Dispatcher) loadPairRepositories(ctx context.Context, localID, replicaID string) (store.Repository, store.Repository, error) {
+	localRow, err := d.config.Database.Repository(ctx, localID)
+	if err != nil {
+		return store.Repository{}, store.Repository{}, fmt.Errorf("dispatch: local repository %s: %w", localID, err)
+	}
+	if localRow.Kind != store.RepositoryLocal || localRow.Local == nil {
+		return store.Repository{}, store.Repository{}, fmt.Errorf("dispatch: repository %s is not a local repository", localID)
+	}
+	replicaRow, err := d.config.Database.Repository(ctx, replicaID)
+	if err != nil {
+		return store.Repository{}, store.Repository{}, fmt.Errorf("dispatch: replica repository %s: %w", replicaID, err)
+	}
+	if replicaRow.Kind != store.RepositoryFTP || replicaRow.FTP == nil {
+		return store.Repository{}, store.Repository{}, fmt.Errorf("dispatch: repository %s is not an FTP replica", replicaID)
+	}
+	return localRow, replicaRow, nil
+}
+
+func (d *Dispatcher) installReplicator(localID, replicaID string, replicator *replication.Replicator, closer func() error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.replicatorForPairLocked(localID, replicaID) != nil {
+		if closer != nil {
+			_ = closer() //nolint:errcheck // duplicate open; the live handle stays
+		}
+		delete(d.replicatorFailed, pairKey(localID, replicaID))
+		return
+	}
+	d.replicas = append(d.replicas, replicaHandle{
+		localID: localID, replicaID: replicaID, replicator: replicator,
+	})
 	if closer != nil {
 		d.closers = append(d.closers, closer)
 	}
-	return nil
+	delete(d.replicatorFailed, pairKey(localID, replicaID))
+}
+
+// ensurePolicyReplicator returns the replicator for a policy's (local, replica)
+// pair, opening it under the dispatcher lock if this process has not seen the
+// pair yet. A policy created after Start therefore still gets a worker. Open
+// failures are logged and retried on the next enqueue or replication step; they
+// never panic or fail the backup itself.
+func (d *Dispatcher) ensurePolicyReplicator(ctx context.Context, policy store.Policy, runID string) *replication.Replicator {
+	if policy.ReplicaRepositoryID == nil {
+		return nil
+	}
+	localID := policy.LocalRepositoryID
+	replicaID := *policy.ReplicaRepositoryID
+	if existing := d.replicatorForPair(localID, replicaID); existing != nil {
+		return existing
+	}
+	if err := d.openPair(ctx, localID, replicaID); err != nil {
+		d.markReplicatorFailed(localID, replicaID)
+		d.logReplicatorUnavailable(ctx, runID, replicaID, err)
+		return nil
+	}
+	return d.replicatorForPair(localID, replicaID)
+}
+
+func (d *Dispatcher) markReplicatorFailed(localID, replicaID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.replicatorFailed == nil {
+		d.replicatorFailed = map[string]struct{}{}
+	}
+	d.replicatorFailed[pairKey(localID, replicaID)] = struct{}{}
+}
+
+func (d *Dispatcher) clearReplicatorFailed(localID, replicaID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.replicatorFailed, pairKey(localID, replicaID))
+}
+
+func (d *Dispatcher) logReplicatorUnavailable(ctx context.Context, runID, replicaID string, err error) {
+	d.logger.ErrorContext(ctx, "replicator unavailable",
+		"repository_id", replicaID, "code", replicatorUnavailable, "error", err)
+	if runID == "" {
+		return
+	}
+	d.logEvent(ctx, runID, eventReplicationStep, map[string]any{
+		"status": "failed", "code": replicatorUnavailable, "repository_id": replicaID,
+	})
+}
+
+// retryFailedReplicators reopens pairs whose last lazy open failed. A later
+// Step therefore picks up a policy that was created after Start once the
+// remote becomes reachable.
+func (d *Dispatcher) retryFailedReplicators(ctx context.Context) {
+	d.mu.Lock()
+	keys := make([]string, 0, len(d.replicatorFailed))
+	for key := range d.replicatorFailed {
+		keys = append(keys, key)
+	}
+	d.mu.Unlock()
+	for _, key := range keys {
+		localID, replicaID, ok := strings.Cut(key, "\x00")
+		if !ok {
+			continue
+		}
+		if d.replicatorForPair(localID, replicaID) != nil {
+			d.clearReplicatorFailed(localID, replicaID)
+			continue
+		}
+		if err := d.openPair(ctx, localID, replicaID); err != nil {
+			d.logReplicatorUnavailable(ctx, "", replicaID, err)
+		}
+	}
 }
 
 // closeAll releases every repository handle opened before a startup failure.
@@ -257,7 +444,7 @@ func closeAll(recovered []recoveredRepository) {
 	}
 }
 
-func (d *Dispatcher) openReplicator(ctx context.Context, repository store.Repository) (*replication.Replicator, func() error, error) {
+func (d *Dispatcher) openReplicator(ctx context.Context, repository store.Repository, localRoot string) (*replication.Replicator, func() error, error) {
 	settings := d.config.Settings
 	if !settings.Credentials() {
 		return nil, nil, fmt.Errorf("dispatch: FTP repository %s needs a configured KEK", repository.ID)
@@ -266,40 +453,33 @@ func (d *Dispatcher) openReplicator(ctx context.Context, repository store.Reposi
 	if err != nil {
 		return nil, nil, fmt.Errorf("dispatch: FTP repository %s secret: %w", repository.ID, err)
 	}
-	repo, err := ftpOpen(ctx, ftpConfig{
+	remote, remoteClose, err := openRemote(ctx, ftpConfig{
 		Address: repository.FTP.Address(), Username: repository.FTP.Username, Password: string(password),
 		BasePath: repository.FTP.BasePath, InstanceID: d.config.Database.InstanceID(), TLSMode: repository.TLSMode,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dispatch: FTP repository %s: %w", repository.ID, err)
 	}
+	if remoteClose == nil {
+		remoteClose = func() error { return nil }
+	}
 	// Replicator.Local is the published local repository the objects are read
 	// from; Remote is this FTP repository. The handle closes at Stop.
-	localRepository, err := local.Open(d.localRoot())
+	localRepository, err := local.Open(localRoot)
 	if err != nil {
-		closeErr := repo.Close()
+		closeErr := remoteClose()
 		return nil, nil, errors.Join(fmt.Errorf("dispatch: replication local repository: %w", err), closeErr)
 	}
 	replicator := &replication.Replicator{
 		DB: d.config.Database.DB(), Store: physicalstore.New(d.config.Database.DB()),
-		Local: localRepository, Remote: replication.NewFTPRemote(repo),
+		Local: localRepository, Remote: remote,
 		RepositoryID: repository.ID, InstanceID: d.config.Database.InstanceID(),
 		KeyFile: settings.KeyFile, WorkRoot: d.workRoot(),
 		Now: d.now,
 	}
 	return replicator, func() error {
-		return errors.Join(repo.Close(), localRepository.Close())
+		return errors.Join(remoteClose(), localRepository.Close())
 	}, nil
-}
-
-// localRoot returns the root of the first local repository, which owns the
-// objects replication copies. A deployment without one has no replication.
-func (d *Dispatcher) localRoot() string {
-	repositories, err := d.config.Database.Repositories(context.Background(), "", 1)
-	if err != nil || len(repositories) == 0 || repositories[0].Local == nil {
-		return ""
-	}
-	return repositories[0].Local.Root
 }
 
 func (d *Dispatcher) workRoot() string { return d.config.Settings.WorkRoot }

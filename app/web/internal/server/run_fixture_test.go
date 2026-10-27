@@ -43,7 +43,7 @@ type runHarness struct {
 }
 
 // newRunHarness starts a real TLS listener serving the run routes.
-func newRunHarness(t *testing.T) *runHarness {
+func newRunHarness(t *testing.T, opts ...EngineOption) *runHarness {
 	t.Helper()
 	// The configured fixture (real KEK) is what a seeded source needs; the
 	// runtime settings then make the dispatcher's preflight reachable.
@@ -57,7 +57,7 @@ func newRunHarness(t *testing.T) *runHarness {
 	}
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: settings}, dispatcher)
+		&resources.Service{Store: f.database, Settings: settings}, dispatcher, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +88,23 @@ func newUnconfiguredRunHarness(t *testing.T) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, dispatcher: dispatcher, engine: engine}
+	h.listen(t, 0)
+	return h
+}
+
+// newControlHarness serves the run routes over TLS with an injected dispatcher
+// implementation. Tests that need a successful replica retry without FTP use it.
+func newControlHarness(t *testing.T, control DispatcherControl) *runHarness {
+	t.Helper()
+	f := newAuthFixture(t)
+	settings := runSettings(t, f)
+	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
+		&resources.Service{Store: f.database, Settings: settings}, control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.engine = engine
+	h := &runHarness{t: t, fixture: f, engine: engine}
 	h.listen(t, 0)
 	return h
 }
@@ -303,7 +320,7 @@ func (h *runHarness) seedPolicyWithRun(t *testing.T, key string) (store.Policy, 
 	}
 	// The stopped worker never writes the queued event, so the seed writes the
 	// same fixed-format row it would have written.
-	if err := h.fixture.database.AppendRunLog(t.Context(), run.ID, "info", "queued", "queued"); err != nil {
+	if err := h.fixture.database.AppendRunLog(t.Context(), run.ID, "info", "queued", "queued", map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 	return policy, run
@@ -347,7 +364,7 @@ func (h *runHarness) awaitTerminal(t *testing.T, id string) store.Run {
 // appendLog writes one event into the run's bounded log.
 func (h *runHarness) appendLog(t *testing.T, runID, event string) {
 	t.Helper()
-	if err := h.fixture.database.AppendRunLog(t.Context(), runID, "info", event, event); err != nil {
+	if err := h.fixture.database.AppendRunLog(t.Context(), runID, "info", event, event, map[string]any{}); err != nil {
 		t.Fatal(err)
 	}
 }

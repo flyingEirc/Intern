@@ -190,18 +190,18 @@ func TestCronInsertIsIdempotentAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestClaimRunIsExclusiveUnderConcurrency proves the UPDATE ... RETURNING claim
-// never hands one queued run to two workers: concurrent claimers over a queue of
-// runs see every run at most once.
-func TestClaimRunIsExclusiveUnderConcurrency(t *testing.T) {
+// TestClaimRunIsExclusiveWhileAnotherIsRunning proves global concurrency 1: a
+// queue of many runs yields exactly one successful claim while any row is
+// already running.
+func TestClaimRunIsExclusiveWhileAnotherIsRunning(t *testing.T) {
 	q := newQueueFixture(t)
 	const queued = 12
 	for i := range queued {
 		q.queued(fmt.Sprintf("claim-%02d", i), store.RunKindFull, store.RunTriggerCron, time.Now().UTC())
 	}
 	seen := raceClaims(q, 8)
-	if len(seen) != queued {
-		t.Fatalf("claimed %d distinct runs, want %d", len(seen), queued)
+	if len(seen) != 1 {
+		t.Fatalf("claimed %d distinct runs, want exactly 1 while a run is running", len(seen))
 	}
 	for id, count := range seen {
 		if count != 1 {
@@ -210,13 +210,16 @@ func TestClaimRunIsExclusiveUnderConcurrency(t *testing.T) {
 	}
 	running := 0
 	for _, run := range q.runs(q.policy.ID) {
-		if run.Status != store.RunStatusRunning {
-			t.Fatalf("run %s status = %s, want running", run.ID, run.Status)
+		if run.Status == store.RunStatusRunning {
+			running++
+			continue
 		}
-		running++
+		if run.Status != store.RunStatusQueued {
+			t.Fatalf("run %s status = %s, want queued or running", run.ID, run.Status)
+		}
 	}
-	if running != queued {
-		t.Fatalf("running rows = %d, want %d", running, queued)
+	if running != 1 {
+		t.Fatalf("running rows = %d, want 1", running)
 	}
 }
 
@@ -464,6 +467,9 @@ func assertInterrupted(t *testing.T, q *queueFixture, final store.Run) {
 	if got := q.systemAuditCount("runs.interrupted"); got != 1 {
 		t.Fatalf("runs.interrupted system audits = %d, want 1", got)
 	}
+	if names := q.eventNames(final.ID); len(names) != 1 || names[0] != "interrupted" {
+		t.Fatalf("run log = %v, want one interrupted event", names)
+	}
 }
 
 // TestRunLogCapWritesExactlyOneTruncatedMarker drives the bounded log past its
@@ -474,12 +480,12 @@ func TestRunLogCapWritesExactlyOneTruncatedMarker(t *testing.T) {
 	run := q.queued("cap-run", store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
 
 	for i := range store.MaxRunLogRows {
-		if err := q.database.AppendRunLog(q.t.Context(), run.ID, "info", "event", fmt.Sprintf("row %d", i)); err != nil {
+		if err := q.database.AppendRunLog(q.t.Context(), run.ID, "info", "event", fmt.Sprintf("row %d", i), nil); err != nil {
 			t.Fatalf("append %d: %v", i, err)
 		}
 	}
 	for range 5 {
-		if err := q.database.AppendRunLog(q.t.Context(), run.ID, "info", "late", "dropped"); err != nil {
+		if err := q.database.AppendRunLog(q.t.Context(), run.ID, "info", "late", "dropped", nil); err != nil {
 			t.Fatalf("overflow append: %v", err)
 		}
 	}

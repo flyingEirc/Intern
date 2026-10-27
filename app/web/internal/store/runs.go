@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,6 +77,13 @@ type RunLog struct {
 	Level   string `json:"level"`
 	Event   string `json:"event"`
 	Message string `json:"message"`
+	Data    any    `json:"data"`
+}
+
+// RunLogWrite is one event to persist. Data is marshaled as JSON; nil stores NULL.
+type RunLogWrite struct {
+	Level, Event, Message string
+	Data                  any
 }
 
 // MaxRunLogRows is the hard cap of run_logs rows per run. Further events are
@@ -121,7 +129,44 @@ func nullString(value *string) sql.NullString {
 }
 
 func runLogFromRow(row storesql.RunLog) RunLog {
-	return RunLog{RunID: row.RunID, Seq: row.Seq, TS: row.Ts, Level: row.Level, Event: row.Event, Message: row.Message}
+	return RunLog{
+		RunID: row.RunID, Seq: row.Seq, TS: row.Ts, Level: row.Level, Event: row.Event,
+		Message: row.Message, Data: decodeRunLogData(row.Data),
+	}
+}
+
+func decodeRunLogData(value any) any {
+	if value == nil {
+		return nil
+	}
+	var raw []byte
+	switch typed := value.(type) {
+	case string:
+		raw = []byte(typed)
+	case []byte:
+		raw = typed
+	default:
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var data any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil
+	}
+	return data
+}
+
+func encodeRunLogData(data any) any {
+	if data == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	return string(encoded)
 }
 
 // DB exposes the single control-plane connection so the dispatcher, the
@@ -230,8 +275,8 @@ func (s *Store) CreateRun(ctx context.Context, in RunInput) (Run, error) {
 
 // ClaimRun marks the next queued run running. Rows with a cancel request are
 // skipped: the API canceled them before execution. It returns false when no
-// claimable run exists. The single dispatcher worker is the only claimer, and
-// the UPDATE's status = 'queued' guard is the concurrency control.
+// claimable run exists. Global backup concurrency is 1: a claim is refused
+// while any run is already running, which is also per-source exclusion.
 func (s *Store) ClaimRun(ctx context.Context) (Run, bool, error) {
 	row, err := storesql.New(s.db).ClaimNextRun(ctx, nullableTime(time.Now()))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -314,7 +359,7 @@ func (s *Store) RequestCancel(ctx context.Context, id string, entry AuditLog) er
 
 // CancelQueuedRun cancels a queued run before a worker claims it. changed is
 // false when a claim won the race.
-func (s *Store) CancelQueuedRun(ctx context.Context, id string, entry AuditLog) (changed bool, err error) {
+func (s *Store) CancelQueuedRun(ctx context.Context, id string, entry AuditLog, log *RunLogWrite) (changed bool, err error) {
 	err = s.withTx(ctx, func(q *storesql.Queries) error {
 		affected, writeErr := q.CancelQueuedRun(ctx, storesql.CancelQueuedRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()),
@@ -326,13 +371,16 @@ func (s *Store) CancelQueuedRun(ctx context.Context, id string, entry AuditLog) 
 		if !changed {
 			return nil
 		}
-		return insertSuccessAudit(ctx, q, entry, "run", id)
+		if auditErr := insertSuccessAudit(ctx, q, entry, "run", id); auditErr != nil {
+			return auditErr
+		}
+		return appendRunLogTx(ctx, q, id, log)
 	})
 	return changed, err
 }
 
 // FinishRunCompleted records a completed run with its published artifact.
-func (s *Store) FinishRunCompleted(ctx context.Context, id string, backupID, chainID string, payloadSize int64, entry AuditLog) error {
+func (s *Store) FinishRunCompleted(ctx context.Context, id string, backupID, chainID string, payloadSize int64, entry AuditLog, log *RunLogWrite) error {
 	return s.withTx(ctx, func(q *storesql.Queries) error {
 		changed, err := q.CompleteRun(ctx, storesql.CompleteRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()), BackupID: nullable(backupID),
@@ -344,13 +392,16 @@ func (s *Store) FinishRunCompleted(ctx context.Context, id string, backupID, cha
 		if changed != 1 {
 			return fmt.Errorf("run %s is not running", id)
 		}
-		return insertSuccessAudit(ctx, q, entry, "run", id)
+		if err := insertSuccessAudit(ctx, q, entry, "run", id); err != nil {
+			return err
+		}
+		return appendRunLogTx(ctx, q, id, log)
 	})
 }
 
 // FinishRunFailed records a failed run. class is one of the RunError* values
 // and code the stable failure code when one exists.
-func (s *Store) FinishRunFailed(ctx context.Context, id, class, code string, entry AuditLog) error {
+func (s *Store) FinishRunFailed(ctx context.Context, id, class, code string, entry AuditLog, log *RunLogWrite) error {
 	return s.withTx(ctx, func(q *storesql.Queries) error {
 		changed, err := q.FailRun(ctx, storesql.FailRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()), ErrorClass: nullable(class), ErrorCode: nullString(&code),
@@ -361,13 +412,16 @@ func (s *Store) FinishRunFailed(ctx context.Context, id, class, code string, ent
 		if changed != 1 {
 			return fmt.Errorf("run %s is not running", id)
 		}
-		return insertSuccessAudit(ctx, q, entry, "run", id)
+		if err := insertSuccessAudit(ctx, q, entry, "run", id); err != nil {
+			return err
+		}
+		return appendRunLogTx(ctx, q, id, log)
 	})
 }
 
 // FinishRunCanceled records a canceled run. It refuses a completed run: a
 // success point never becomes a cancellation.
-func (s *Store) FinishRunCanceled(ctx context.Context, id string, entry AuditLog) error {
+func (s *Store) FinishRunCanceled(ctx context.Context, id string, entry AuditLog, log *RunLogWrite) error {
 	return s.withTx(ctx, func(q *storesql.Queries) error {
 		changed, err := q.CancelRunningRun(ctx, storesql.CancelRunningRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()),
@@ -378,7 +432,10 @@ func (s *Store) FinishRunCanceled(ctx context.Context, id string, entry AuditLog
 		if changed != 1 {
 			return ErrConflict
 		}
-		return insertSuccessAudit(ctx, q, entry, "run", id)
+		if err := insertSuccessAudit(ctx, q, entry, "run", id); err != nil {
+			return err
+		}
+		return appendRunLogTx(ctx, q, id, log)
 	})
 }
 
@@ -399,18 +456,26 @@ func (s *Store) InterruptedRuns(ctx context.Context) ([]Run, error) {
 // the log is full the event is dropped; a final truncated marker replaces the
 // newest row exactly once. The cap check and the insert share one transaction
 // on the single write connection.
-func (s *Store) AppendRunLog(ctx context.Context, runID, level, event, message string) error {
+func (s *Store) AppendRunLog(ctx context.Context, runID, level, event, message string, data any) error {
 	return s.withTx(ctx, func(q *storesql.Queries) error {
-		count, err := q.CountRunLogs(ctx, runID)
-		if err != nil {
-			return err
-		}
-		if count >= MaxRunLogRows {
-			return truncateRunLog(ctx, q, runID, event)
-		}
-		return q.InsertRunLog(ctx, storesql.InsertRunLogParams{
-			RunID: runID, Seq: count + 1, Ts: timestamp(), Level: level, Event: event, Message: message,
-		})
+		return appendRunLogTx(ctx, q, runID, &RunLogWrite{Level: level, Event: event, Message: message, Data: data})
+	})
+}
+
+func appendRunLogTx(ctx context.Context, q *storesql.Queries, runID string, log *RunLogWrite) error {
+	if log == nil {
+		return nil
+	}
+	count, err := q.CountRunLogs(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if count >= MaxRunLogRows {
+		return truncateRunLog(ctx, q, runID, log.Event)
+	}
+	return q.InsertRunLog(ctx, storesql.InsertRunLogParams{
+		RunID: runID, Seq: count + 1, Ts: timestamp(), Level: log.Level, Event: log.Event,
+		Message: log.Message, Data: encodeRunLogData(log.Data),
 	})
 }
 
@@ -430,9 +495,32 @@ func truncateRunLog(ctx context.Context, q *storesql.Queries, runID, event strin
 	}
 	_, err = q.ReplaceRunLog(ctx, storesql.ReplaceRunLogParams{
 		RunID: runID, Seq: MaxRunLogRows, Ts: timestamp(), Level: "warn", Event: TruncatedEvent,
-		Message: "run log reached its cap; later events were dropped",
+		Message: "run log reached its cap; later events were dropped", Data: nil,
 	})
 	return err
+}
+
+// RunByBackupID reads the newest run that published this backup. A missing row
+// reports ErrNotFound.
+func (s *Store) RunByBackupID(ctx context.Context, backupID string) (Run, error) {
+	row, err := storesql.New(s.db).RunByBackupID(ctx, nullable(backupID))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Run{}, ErrNotFound
+		}
+		return Run{}, err
+	}
+	return runFromRow(row), nil
+}
+
+// HasActiveFull reports whether a queued or running full already exists for the
+// source, so an admission full can coalesce instead of inserting another.
+func (s *Store) HasActiveFull(ctx context.Context, sourceID string) (bool, error) {
+	count, err := storesql.New(s.db).CountActiveFullsForSource(ctx, sourceID)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // RunLog reads one log row. A missing row reports ErrNotFound.
@@ -485,7 +573,7 @@ func (h *runLogHandler) Enabled(context.Context, slog.Level) bool { return true 
 func (h *runLogHandler) Handle(_ context.Context, record slog.Record) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return h.store.AppendRunLog(ctx, h.runID, levelName(record.Level), record.Message, record.Message)
+	return h.store.AppendRunLog(ctx, h.runID, levelName(record.Level), record.Message, record.Message, nil)
 }
 
 func (h *runLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
