@@ -70,7 +70,7 @@ func createUser(ctx context.Context, queries *storesql.Queries, username, hash, 
 // action or an audit insert failure rolls the user back.
 func (s *Store) CreateUser(ctx context.Context, username, hash, role string, entry AuditLog) (User, error) {
 	var user User
-	err := s.withTx(ctx, func(q *storesql.Queries) error {
+	err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		created, err := createUser(ctx, q, username, hash, role)
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func (s *Store) Users(ctx context.Context) ([]User, error) {
 // An audit failure rolls the change back.
 func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges, entry AuditLog) (User, error) {
 	var user User
-	err := s.withTx(ctx, func(q *storesql.Queries) error {
+	err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		updated, err := updateUser(ctx, q, id, changes)
 		if err != nil {
 			return err
@@ -158,7 +158,7 @@ func updateUser(ctx context.Context, queries *storesql.Queries, id string, chang
 // Session token rotation is a later cookie write and is not part of this transaction.
 func (s *Store) ChangePassword(ctx context.Context, user User, hash string, entry AuditLog) (User, error) {
 	var updated User
-	err := s.withTx(ctx, func(q *storesql.Queries) error {
+	err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		changed, err := changePassword(ctx, q, user, hash)
 		if err != nil {
 			return err
@@ -181,7 +181,7 @@ func changePassword(ctx context.Context, queries *storesql.Queries, user User, h
 
 // RevokeSessions commits the epoch bump and its success audit together.
 func (s *Store) RevokeSessions(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		if err := revokeSessions(ctx, q, id); err != nil {
 			return err
 		}

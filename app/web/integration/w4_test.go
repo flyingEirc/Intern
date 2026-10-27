@@ -40,7 +40,7 @@ var w4StateMarkers = []string{
 	"running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint",
 	"canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true",
 	"sigterm_exit_bounded=true no_false_completed=true recovered=true",
-	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true",
+	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true sqlite_interrupted=true",
 	"sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed",
 }
 

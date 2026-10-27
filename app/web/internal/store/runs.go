@@ -353,7 +353,7 @@ func (s *Store) Runs(ctx context.Context, filter RunsFilter) ([]Run, error) {
 // RequestCancel marks a queued or running run for cancellation. A terminal run
 // reports ErrConflict so the caller can answer 409.
 func (s *Store) RequestCancel(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		if _, err := q.GetRun(ctx, id); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
@@ -374,7 +374,7 @@ func (s *Store) RequestCancel(ctx context.Context, id string, entry AuditLog) er
 // CancelQueuedRun cancels a queued run before a worker claims it. changed is
 // false when a claim won the race.
 func (s *Store) CancelQueuedRun(ctx context.Context, id string, entry AuditLog, log *RunLogWrite) (changed bool, err error) {
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		affected, writeErr := q.CancelQueuedRun(ctx, storesql.CancelQueuedRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()),
 		})
@@ -395,7 +395,7 @@ func (s *Store) CancelQueuedRun(ctx context.Context, id string, entry AuditLog, 
 
 // FinishRunCompleted records a completed run with its published artifact.
 func (s *Store) FinishRunCompleted(ctx context.Context, id string, backupID, chainID string, payloadSize int64, entry AuditLog, log *RunLogWrite) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		changed, err := q.CompleteRun(ctx, storesql.CompleteRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()), BackupID: nullable(backupID),
 			ChainID: nullable(chainID), PayloadSize: sql.NullInt64{Int64: payloadSize, Valid: true},
@@ -416,7 +416,7 @@ func (s *Store) FinishRunCompleted(ctx context.Context, id string, backupID, cha
 // FinishRunFailed records a failed run. class is one of the RunError* values
 // and code the stable failure code when one exists.
 func (s *Store) FinishRunFailed(ctx context.Context, id, class, code string, entry AuditLog, log *RunLogWrite) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		changed, err := q.FailRun(ctx, storesql.FailRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()), ErrorClass: nullable(class), ErrorCode: nullString(&code),
 		})
@@ -436,7 +436,7 @@ func (s *Store) FinishRunFailed(ctx context.Context, id, class, code string, ent
 // FinishRunCanceled records a canceled run. It refuses a completed run: a
 // success point never becomes a cancellation.
 func (s *Store) FinishRunCanceled(ctx context.Context, id string, entry AuditLog, log *RunLogWrite) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		changed, err := q.CancelRunningRun(ctx, storesql.CancelRunningRunParams{
 			ID: id, FinishedAt: nullableTime(time.Now()),
 		})
@@ -471,7 +471,7 @@ func (s *Store) InterruptedRuns(ctx context.Context) ([]Run, error) {
 // newest row exactly once. The cap check and the insert share one transaction
 // on the single write connection.
 func (s *Store) AppendRunLog(ctx context.Context, runID, level, event, message string, data any) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		return appendRunLogTx(ctx, q, runID, &RunLogWrite{Level: level, Event: event, Message: message, Data: data})
 	})
 }
@@ -555,6 +555,46 @@ func (s *Store) PairBackups(ctx context.Context, localRepositoryID, replicaRepos
 		}
 	}
 	return backups, nil
+}
+
+// ChainPredecessorsForPair lists the chain members before one backup that one
+// (local, replica) pair may still enqueue, in seq order: produced by a run on
+// the pair's own local repository, completed and locally present, and not yet
+// queued on the pair's repository. The producing run is resolved through the
+// backup it published — the same runs.backup_id binding RunByBackupID reads —
+// and that run's snapshot is what binds a backup to a local repository, so a
+// chain that crossed local repositories never queues the other repository's
+// base here.
+//
+// The statement reads the physical backups table and the replication replicas
+// table, which sqlc cannot model from the Web schema alone, so it is a raw
+// query like the reference counts DeleteRepository runs through withTxDB.
+func (s *Store) ChainPredecessorsForPair(ctx context.Context, backupID, localRepositoryID, replicaRepositoryID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT b.id
+FROM backups b
+JOIN runs producer ON producer.backup_id = b.id
+WHERE b.chain_id = (SELECT chain_id FROM backups WHERE id = ?1)
+  AND b.seq < (SELECT seq FROM backups WHERE id = ?1)
+  AND b.status = 'completed' AND b.local_present = 1
+  AND producer.local_repository_id = ?2
+  AND NOT EXISTS (
+      SELECT 1 FROM replicas r WHERE r.backup_id = b.id AND r.repository_id = ?3
+  )
+ORDER BY b.seq`, backupID, localRepositoryID, replicaRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }() //nolint:errcheck // best-effort cleanup; the scan error or rows.Err() carries the failure
+	predecessors := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		predecessors = append(predecessors, id)
+	}
+	return predecessors, rows.Err()
 }
 
 // SourceLocalRepositories lists the local repositories that hold one source's

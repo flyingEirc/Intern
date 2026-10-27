@@ -206,17 +206,29 @@ func (s *Store) Ready(ctx context.Context) error {
 	return nil
 }
 
-// withTx runs fn inside one BEGIN IMMEDIATE transaction. A non-nil error rolls
-// the mutation and any success audit inserted by fn back together.
-func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) error {
-	return s.withTxDB(ctx, func(queries *storesql.Queries, _ *sql.Tx) error { return fn(queries) })
-}
+// txWindow bounds one detached write transaction. It is the same budget the
+// dispatcher's terminal run writes use, and it bounds only the transaction
+// itself: a statement waiting on a foreign lock still ends after SQLite's
+// busy_timeout, not after the full window.
+const txWindow = 30 * time.Second
 
-// withTxDB is withTx for a caller that must also run one statement the Web
-// schema does not own, such as an existence count over a table migrated by the
-// physical or replication package. Anything else belongs in sqlc.
-func (s *Store) withTxDB(ctx context.Context, fn func(*storesql.Queries, *sql.Tx) error) (retErr error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+// writeTx runs fn inside one BEGIN IMMEDIATE transaction that caller
+// cancellation cannot poison. The pool holds a single connection, so a
+// transaction begun under a cancellable context that is canceled mid-write can
+// leave that connection half-open, and every later write then waits out
+// busy_timeout. The caller's context is therefore only consulted before the
+// transaction begins: an already-done context returns its error untouched, and
+// otherwise the begin, every statement, and the commit or rollback run under
+// context.WithoutCancel with the bounded window, so a canceled caller can never
+// leave a half-open transaction. A non-nil error rolls the mutation and any
+// success audit inserted by fn back together.
+func (s *Store) writeTx(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error) (retErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txWindow)
+	defer cancel()
+	tx, err := s.db.BeginTx(txCtx, nil)
 	if err != nil {
 		return err
 	}
@@ -227,10 +239,23 @@ func (s *Store) withTxDB(ctx context.Context, fn func(*storesql.Queries, *sql.Tx
 			}
 		}
 	}()
-	if err = fn(storesql.New(tx), tx); err != nil {
+	if err = fn(txCtx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// withTx runs fn inside one write transaction. fn receives the transaction's
+// own context and must run every statement with it.
+func (s *Store) withTx(ctx context.Context, fn func(ctx context.Context, q *storesql.Queries) error) error {
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error { return fn(ctx, storesql.New(tx)) })
+}
+
+// withTxDB is withTx for a caller that must also run one statement the Web
+// schema does not own, such as an existence count over a table migrated by the
+// physical or replication package. Anything else belongs in sqlc.
+func (s *Store) withTxDB(ctx context.Context, fn func(ctx context.Context, q *storesql.Queries, tx *sql.Tx) error) error {
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error { return fn(ctx, storesql.New(tx), tx) })
 }
 
 // Close closes the database before releasing exclusive ownership.

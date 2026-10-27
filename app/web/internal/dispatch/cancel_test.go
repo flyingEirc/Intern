@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -263,5 +264,87 @@ func assertNoPhysicalBackupForRun(t *testing.T, q *queueFixture, runID string) {
 	}
 	if backups != 0 {
 		t.Fatalf("canceled run %s left %d physical backups", runID, backups)
+	}
+}
+
+// TestShutdownDuringThePreChainReadsEndsFailed is the advisor's Y3 and
+// mutation MI: a shutdown — the worker's parent context canceled, no cancel
+// request — that lands while the run is inside its pre-chain reads must end the
+// run with the same terminal write failChain uses, failed with class and code
+// backup_failed. Classifying the shutdown as a cancel would report a canceled
+// run, and returning the failed read without a terminal write would leave the
+// run running until restart recovery reclaims it.
+func TestShutdownDuringThePreChainReadsEndsFailed(t *testing.T) {
+	q := newQueueFixture(t)
+	q.queued("shutdown-in-reads", store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
+	run := q.claim(t)
+	d := q.newDispatcher(time.Now)
+	parent, cancel := context.WithCancel(q.t.Context())
+	release, done := q.blockControlPlane(t, func() error { return d.executeRun(parent, run) })
+	cancel()
+	release()
+	requireRunResult(t, done)
+	assertShutdownOutcome(t, q, run.ID)
+}
+
+// TestShutdownSweepNeverLeavesARunRunning drives the same rule across the whole
+// pre-chain window: the parent is canceled at fine-grained delays while the run
+// moves from its claim through admission towards the refuse read, and every run
+// must reach the terminal failed state. Before the refuse read's error was
+// routed through preChainFailure, a shutdown that landed exactly on that
+// boundary returned without any terminal write and left the run running.
+func TestShutdownSweepNeverLeavesARunRunning(t *testing.T) {
+	q := newQueueFixture(t)
+	recordServerIdentity(t, q)
+	d := q.newDispatcher(time.Now)
+	for i := range 150 {
+		q.queued(fmt.Sprintf("shutdown-sweep-%d", i), store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
+		run := q.claim(t)
+		parent, cancel := context.WithCancel(q.t.Context())
+		result := make(chan error, 1)
+		go func() { result <- d.executeRun(parent, run) }()
+		// The sweep cancels while the run climbs from its claim through
+		// admission towards the refuse read, so every pre-chain boundary is
+		// crossed at one of the delays.
+		time.Sleep(time.Duration(i) * 10 * time.Microsecond)
+		cancel()
+		if err := <-result; err != nil {
+			t.Fatalf("sweep %d: executeRun = %v, want a terminal write and no error", i, err)
+		}
+		assertTerminalFailure(t, q, run.ID)
+	}
+}
+
+// assertShutdownOutcome requires the terminal failed state a shutdown produces
+// on a pre-chain read: failed with class and code backup_failed, finished, no
+// backup and no canceled audit.
+func assertShutdownOutcome(t *testing.T, q *queueFixture, runID string) {
+	t.Helper()
+	final := q.waitForRunState(runID, store.RunStatusFailed, store.RunErrorBackupFailed)
+	if final.ErrorCode == nil || *final.ErrorCode != "backup_failed" {
+		t.Fatalf("failure code = %v, want backup_failed", final.ErrorCode)
+	}
+	if final.FinishedAt == nil || final.BackupID != nil {
+		t.Fatalf("failed run = %+v, want finished with no backup", final)
+	}
+	assertNoPhysicalBackupForRun(t, q, runID)
+	if got := q.systemAuditCount("runs.canceled"); got != 0 {
+		t.Fatalf("runs.canceled system audits = %d, want 0 for a shutdown", got)
+	}
+}
+
+// assertTerminalFailure requires the sweep's weaker, still-load-bearing
+// outcome: the run is terminal and failed. A cancel that lands after the run
+// already failed for its own reason (an unreachable socket preflight) is not a
+// shutdown outcome, so the class is not asserted here; what must never happen
+// is a run left running by the shutdown, or a canceled run without a request.
+func assertTerminalFailure(t *testing.T, q *queueFixture, runID string) {
+	t.Helper()
+	final := q.waitForRunState(runID, store.RunStatusFailed, "")
+	if final.FinishedAt == nil {
+		t.Fatalf("sweep run = %+v, want finished", final)
+	}
+	if got := q.systemAuditCount("runs.canceled"); got != 0 {
+		t.Fatalf("runs.canceled system audits = %d, want 0 without a cancel request", got)
 	}
 }

@@ -337,7 +337,7 @@ func (s *Store) CreateRepository(ctx context.Context, in RepositoryInput, sealer
 		}
 	}
 	var created Repository
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		created, writeErr = insertRepository(ctx, q, id, in, config, sealed, entry)
 		return writeErr
@@ -378,7 +378,7 @@ func (s *Store) UpdateRepository(ctx context.Context, id string, in RepositoryIn
 		}
 	}
 	var updated Repository
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		updated, writeErr = replaceRepository(ctx, q, id, in, config, sealed, entry)
 		return writeErr
@@ -438,21 +438,22 @@ func (s *Store) RepositorySecret(ctx context.Context, id string, sealer SecretSe
 	return openSecret(sealer, "repositories", row.ID, row.SecretCiphertext)
 }
 
-// DeleteRepository refuses a repository that a policy or a replica row uses.
+// DeleteRepository refuses a repository that a policy, a run snapshot or a
+// replica row still uses. The run snapshot columns are the pair a run was
+// claimed with: replication resolves every existing backup's pair from them,
+// and a replica row binds the local repository its bytes live in, so deleting
+// either side would strand those rows, block the repository's protection point
+// forever, and leave nothing any API call could repair.
 func (s *Store) DeleteRepository(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTxDB(ctx, func(q *storesql.Queries, tx *sql.Tx) error {
+	return s.withTxDB(ctx, func(ctx context.Context, q *storesql.Queries, tx *sql.Tx) error {
 		if _, err := q.GetRepository(ctx, id); err != nil {
 			return resourceError(err)
 		}
-		policies, err := q.CountPoliciesByRepository(ctx, id)
+		references, err := s.repositoryReferences(ctx, q, tx, id)
 		if err != nil {
 			return err
 		}
-		replicas, err := countRows(ctx, tx, `SELECT COUNT(*) FROM replicas WHERE repository_id = ?`, id)
-		if err != nil {
-			return err
-		}
-		if policies != 0 || replicas != 0 {
+		if references != 0 {
 			return ErrReferenced
 		}
 		if err = q.DeleteRepository(ctx, id); err != nil {
@@ -460,6 +461,30 @@ func (s *Store) DeleteRepository(ctx context.Context, id string, entry AuditLog)
 		}
 		return insertSuccessAudit(ctx, q, entry, "repository", id)
 	})
+}
+
+// repositoryReferences counts every row that still points at one repository:
+// its policies, the runs claimed with it locally or as their replica, and the
+// replica rows queued on it or bound to it as their local repository.
+func (s *Store) repositoryReferences(ctx context.Context, q *storesql.Queries, tx *sql.Tx, id string) (int64, error) {
+	policies, err := q.CountPoliciesByRepository(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	total := policies
+	for _, count := range []string{
+		`SELECT COUNT(*) FROM runs WHERE local_repository_id = ?`,
+		`SELECT COUNT(*) FROM runs WHERE replica_repository_id = ?`,
+		`SELECT COUNT(*) FROM replicas WHERE repository_id = ?`,
+		`SELECT COUNT(*) FROM replicas WHERE local_repository_id = ?`,
+	} {
+		rows, err := countRows(ctx, tx, count, id)
+		if err != nil {
+			return 0, err
+		}
+		total += rows
+	}
+	return total, nil
 }
 
 // CreateSource seals the MySQL password and commits the row with its success
@@ -474,7 +499,7 @@ func (s *Store) CreateSource(ctx context.Context, in SourceInput, sealer SecretS
 		return Source{}, err
 	}
 	var created Source
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		created, writeErr = insertSource(ctx, q, id, in, sealed, entry)
 		return writeErr
@@ -511,7 +536,7 @@ func (s *Store) UpdateSource(ctx context.Context, id string, in SourceInput, sea
 		}
 	}
 	var updated Source
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		updated, writeErr = replaceSource(ctx, q, id, in, sealed, entry)
 		return writeErr
@@ -583,7 +608,7 @@ func (s *Store) RecordSourcePreflight(ctx context.Context, id string, record Pre
 		return Source{}, err
 	}
 	var updated Source
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		updated, writeErr = storeSourcePreflight(ctx, q, id, record, encoded, entry)
 		return writeErr
@@ -614,7 +639,7 @@ func storeSourcePreflight(ctx context.Context, q *storesql.Queries, id string, r
 
 // DeleteSource refuses a source that a policy or any physical chain uses.
 func (s *Store) DeleteSource(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTxDB(ctx, func(q *storesql.Queries, tx *sql.Tx) error {
+	return s.withTxDB(ctx, func(ctx context.Context, q *storesql.Queries, tx *sql.Tx) error {
 		if _, err := q.GetSource(ctx, id); err != nil {
 			return resourceError(err)
 		}
@@ -648,7 +673,7 @@ func (s *Store) CreatePolicy(ctx context.Context, in PolicyInput, entry AuditLog
 		return Policy{}, err
 	}
 	var created Policy
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		created, writeErr = insertPolicy(ctx, q, id, in, replica, preflight, entry)
 		return writeErr
@@ -686,7 +711,7 @@ func (s *Store) UpdatePolicy(ctx context.Context, id string, in PolicyInput, ent
 		return Policy{}, err
 	}
 	var updated Policy
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		updated, writeErr = replacePolicy(ctx, q, id, in, replica, preflight, entry)
 		return writeErr
@@ -730,7 +755,7 @@ func (s *Store) EnablePolicy(ctx context.Context, id string, enabled bool, recor
 		return Policy{}, err
 	}
 	var updated Policy
-	err = s.withTx(ctx, func(q *storesql.Queries) error {
+	err = s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var writeErr error
 		updated, writeErr = setPolicyEnabled(ctx, q, id, enabled, encoded, entry)
 		return writeErr
@@ -783,7 +808,7 @@ func (s *Store) Policies(ctx context.Context, before string, limit int) ([]Polic
 // DeletePolicy removes a policy. Runs reference it, so a policy with run
 // history is refused.
 func (s *Store) DeletePolicy(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTxDB(ctx, func(q *storesql.Queries, tx *sql.Tx) error {
+	return s.withTxDB(ctx, func(ctx context.Context, q *storesql.Queries, tx *sql.Tx) error {
 		if _, err := q.GetPolicy(ctx, id); err != nil {
 			return resourceError(err)
 		}

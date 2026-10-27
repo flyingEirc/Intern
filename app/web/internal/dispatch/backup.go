@@ -12,6 +12,7 @@ import (
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/physical/chain"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication"
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
@@ -142,8 +143,16 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 	// the flag set and no one re-reading it. The stored flag, not the context,
 	// decides, so the read is ordered before chain.Run and a cancel that races
 	// it is still covered by failChain afterwards.
-	if canceled, err := d.refuseCanceledRun(ctx, run); canceled || err != nil {
-		return err
+	//
+	// The read runs under the parent context like every other post-claim read,
+	// so a shutdown that lands on this boundary surfaces as an error here. It
+	// goes through preChainFailure like every other pre-chain error: a shutdown
+	// ends the run with the same terminal write failChain uses, and no run is
+	// ever left running because the refuse read itself failed.
+	if canceled, err := d.refuseCanceledRun(ctx, run); err != nil {
+		return d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "backup_failed", err)
+	} else if canceled {
+		return nil
 	}
 	d.logEvent(ctx, run.ID, eventStarted, nil)
 	result, runErr := d.runChain(runCtx, run, d.chainJob(run, policy, repo, admitted))
@@ -213,6 +222,12 @@ func (d *Dispatcher) registerRunContext(ctx context.Context, runID string) (cont
 // refuseCanceledRun ends a claimed run as canceled when a cancel request has
 // already arrived: the run is running, so its context is canceled and the
 // terminal write is the canceled one, with no backup.
+//
+// The stored flag is read under the caller's parent context like every other
+// post-claim read; only the run's own probes run under the run context. An
+// error therefore reports either a shutdown or a failed read, and executeRun
+// hands it to preChainFailure so a shutdown keeps the terminal classification
+// every other pre-chain failure gets.
 func (d *Dispatcher) refuseCanceledRun(ctx context.Context, run store.Run) (bool, error) {
 	stored, err := d.config.Database.Run(ctx, run.ID)
 	if err != nil {
@@ -277,7 +292,7 @@ func (d *Dispatcher) admit(parent, runCtx context.Context, run store.Run, policy
 		return admission{}, true, d.preChainFailure(parent, run, store.RunErrorUnavailable, "unconfigured",
 			errors.New("backup runtime is not configured"))
 	}
-	if err := d.validateKEK(parent, run, policy); err != nil {
+	if done, err := d.validateKEK(parent, run, policy); done {
 		return admission{}, true, err
 	}
 	outcome, code, preflightErr := d.preflightRun(runCtx, run, policy)
@@ -420,22 +435,26 @@ func preflightErrorCode(ctx context.Context, err error) (string, bool) {
 // run under the parent context: this is a short control-plane read, and a
 // cancel request must not be reported as a missing repository. A violation
 // fails the run with error_class preflight.
-func (d *Dispatcher) validateKEK(ctx context.Context, run store.Run, policy store.Policy) error {
+//
+// done reports that the run already reached a terminal failure: preChainFailure
+// returns nil once its terminal write succeeded, and admit must stop instead of
+// continuing to the preflight and attempting a second write.
+func (d *Dispatcher) validateKEK(ctx context.Context, run store.Run, policy store.Policy) (bool, error) {
 	repository, err := d.config.Database.Repository(ctx, policy.LocalRepositoryID)
 	if err != nil {
-		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_missing", err)
+		return true, d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_missing", err)
 	}
 	if repository.Kind != store.RepositoryLocal || repository.Local == nil {
-		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_kind",
+		return true, d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_kind",
 			errors.New("local repository required"))
 	}
 	if err := d.config.Settings.ValidateRepositoryRoot(repository.Local.Root); err != nil {
 		d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{
 			"check": "kek", "code": "kek_inside_repository",
 		})
-		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "kek_inside_repository", err)
+		return true, d.preChainFailure(ctx, run, store.RunErrorPreflight, "kek_inside_repository", err)
 	}
-	return nil
+	return false, nil
 }
 
 // admissionFailure implements decision 10: an AdmissionError with RequiresFull
@@ -570,7 +589,7 @@ func (d *Dispatcher) enqueueReplication(ctx context.Context, run store.Run, poli
 	if replicator == nil {
 		return
 	}
-	if err := replicator.Enqueue(ctx, backupID); err != nil {
+	if err := d.enqueueWithChain(ctx, replicator, policy.LocalRepositoryID, *policy.ReplicaRepositoryID, backupID); err != nil {
 		d.logger.ErrorContext(ctx, "cannot enqueue replication", "run_id", run.ID,
 			"backup_id", backupID, "repository_id", *policy.ReplicaRepositoryID, "error", err)
 		return
@@ -578,6 +597,27 @@ func (d *Dispatcher) enqueueReplication(ctx context.Context, run store.Run, poli
 	d.logEvent(ctx, run.ID, eventReplicationEnqueued, map[string]any{
 		"repository_id": *policy.ReplicaRepositoryID,
 	})
+}
+
+// enqueueWithChain enqueues one backup on one pair after its chain predecessors
+// first, in seq order: a full or intermediate member the pair has no row for
+// (the replica was added after the chain produced it) is queued before the
+// backup that depends on it, so the pair's FIFO can never step an incremental
+// whose base it cannot restore from. Only qualifying predecessors are pulled —
+// stored in the pair's local repository, completed and locally present, and not
+// yet queued on the repository — and Enqueue is an idempotent insert per
+// backup, so a repeated call only fills what is missing.
+func (d *Dispatcher) enqueueWithChain(ctx context.Context, replicator *replication.Replicator, localRepositoryID, replicaRepositoryID, backupID string) error {
+	predecessors, err := d.config.Database.ChainPredecessorsForPair(ctx, backupID, localRepositoryID, replicaRepositoryID)
+	if err != nil {
+		return err
+	}
+	for _, predecessor := range predecessors {
+		if err = replicator.Enqueue(ctx, predecessor); err != nil {
+			return fmt.Errorf("enqueue predecessor %s: %w", predecessor, err)
+		}
+	}
+	return replicator.Enqueue(ctx, backupID)
 }
 
 // RequestCancel asks a run to stop. A queued run becomes canceled without

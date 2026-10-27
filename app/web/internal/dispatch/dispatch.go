@@ -396,6 +396,9 @@ func (d *Dispatcher) ensurePolicyReplicator(ctx context.Context, policy store.Po
 // across an unavailable remote or a transient enqueue failure: a backup
 // completed while the pair was down is queued by the catch-up instead of being
 // lost, and FIFO order is preserved because the inserts follow creation order.
+// Each backup pulls its qualifying chain predecessors first, so a replica added
+// after the chain's full completed still receives the base before the
+// incremental that depends on it.
 //
 // The selection is pair-scoped through the producing run's snapshot, so a
 // backup that lives in another local repository is never claimed here: its own
@@ -410,7 +413,7 @@ func (d *Dispatcher) catchUpReplication(ctx context.Context, localID, replicaID 
 		return
 	}
 	for _, backupID := range d.presentByCreation(ctx, backups) {
-		if err = replicator.Enqueue(ctx, backupID); err != nil {
+		if err = d.enqueueWithChain(ctx, replicator, localID, replicaID, backupID); err != nil {
 			// A backup that is not completed is not queued; that is a decision
 			// about the backup, not a pair failure, so the remaining backups
 			// still get their turn.

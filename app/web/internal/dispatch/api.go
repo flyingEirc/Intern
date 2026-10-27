@@ -186,10 +186,13 @@ type ChainView struct {
 // it: one FTP repository shared by two local repositories has one queue per
 // pair, and each queue only proves the copies of its own local repository. The
 // union is ordered by chain position and the point is the last item of its
-// longest all-verified prefix, so a pair that stops producing cannot pin the
-// point, and a point is never claimed across a backup that is not verified on
-// that repository. Verification time is never compared: it says when a copy was
-// proven, not where the copy sits in the chain.
+// longest prefix that is all-verified and chain-complete: every chain on the
+// way must be on the repository from seq 1 with no seq gap, so a chain whose
+// base or an intermediate member never reached the repository contributes
+// nothing at or beyond that gap. A pair that stops producing cannot pin the
+// point, and a point is never claimed across a backup that is not on that
+// repository or not verified there. Verification time is never compared: it
+// says when a copy was proven, not where the copy sits in the chain.
 func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protection, error) {
 	local, err := replication.LocalPoint(ctx, physicalstore.New(d.config.Database.DB()), sourceID)
 	if err != nil {

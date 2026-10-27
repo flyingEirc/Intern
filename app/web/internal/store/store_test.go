@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -206,5 +207,51 @@ func TestReadyRequiresLiveExactVersion(t *testing.T) {
 	}
 	if err := s.Ready(t.Context()); err == nil {
 		t.Fatal("closed database was ready")
+	}
+}
+
+// TestCanceledCallerNeverPoisonsTheStore is the advisor's Y4 probe: write
+// transactions whose context is canceled microseconds after the call must not
+// leave the single pooled connection half-open. Before the fix the first
+// canceled RecordSourcePreflight locked the store, and every later write —
+// including Audit — failed with SQLITE_BUSY until the process restarted.
+func TestCanceledCallerNeverPoisonsTheStore(t *testing.T) {
+	s := openTestStore(t, privateTempDir(t))
+	source := createTestSource(t, s, "poison-source", "{{SECRET_poison_source}}")
+	failed := PreflightRecord{OK: false, Checks: []string{}, Warnings: []PreflightWarning{}}
+	for range 50 {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(10 * time.Microsecond)
+			cancel()
+		}()
+		// The outcome of the canceled call itself is irrelevant: what must hold
+		// is that the store stays writable afterwards.
+		_, _ = s.RecordSourcePreflight(ctx, source.ID, failed, SystemAudit("sources.preflight", AuditDetail{}))
+		cancel()
+	}
+
+	write := func(what string, op func(context.Context) error) {
+		t.Helper()
+		start := time.Now()
+		if err := op(context.Background()); err != nil {
+			t.Fatalf("%s after canceled writers: %v", what, err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("%s took %s; the single connection is poisoned", what, elapsed)
+		}
+	}
+	write("audit", func(ctx context.Context) error {
+		return s.Audit(ctx, SystemAudit("probe.audit", AuditDetail{}))
+	})
+	record := PreflightRecord{OK: true, Checks: []string{"identity"}, Warnings: []PreflightWarning{}}
+	var updated Source
+	write("preflight record", func(ctx context.Context) error {
+		var err error
+		updated, err = s.RecordSourcePreflight(ctx, source.ID, record, SystemAudit("sources.preflight", AuditDetail{}))
+		return err
+	})
+	if updated.LastPreflight == nil || !updated.LastPreflight.OK {
+		t.Fatalf("preflight record = %+v, want the stored observation", updated.LastPreflight)
 	}
 }

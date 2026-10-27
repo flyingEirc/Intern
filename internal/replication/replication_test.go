@@ -720,3 +720,46 @@ func assertPairStepsItsOwn(t *testing.T, replicator *Replicator, wantBackup, wan
 	}
 	return stepped
 }
+
+// TestRemotePointRequiresTheChainFromItsFirstMember is the advisor's Y1(b)
+// unit: the verified prefix must prove every chain it crosses is on the
+// repository from seq 1 with no seq gap. A verified incremental whose base has
+// no row proves nothing, and an intermediate gap stops the point at the member
+// before it.
+func TestRemotePointRequiresTheChainFromItsFirstMember(t *testing.T) {
+	f := newEngine(t)
+	base := f.newBackup(engineSourceID, 0)
+	middle := f.newBackup(engineSourceID, 1)
+	last := f.newBackup(engineSourceID, 2)
+	for _, record := range []backupRecord{base, middle, last} {
+		if err := f.r.Enqueue(t.Context(), record.id); err != nil {
+			t.Fatal(err)
+		}
+		f.assertVerified(record.id)
+	}
+	assertRemotePoint(t, f, last)
+
+	// An intermediate member missing from the repository stops the prefix at
+	// the member before it.
+	if _, err := f.db.ExecContext(t.Context(),
+		`DELETE FROM replicas WHERE backup_id = ? AND repository_id = ?`, middle.id, engineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	assertRemotePoint(t, f, base)
+
+	// Without the base too, the chain is absent from seq 1: nothing is claimed.
+	if _, err := f.db.ExecContext(t.Context(),
+		`DELETE FROM replicas WHERE backup_id = ? AND repository_id = ?`, base.id, engineRepoID); err != nil {
+		t.Fatal(err)
+	}
+	point, err := f.r.RemotePoint(t.Context(), engineSourceID)
+	if err != nil || point != nil {
+		t.Fatalf("remote point = %+v, %v; want none for a chain that starts at seq 2", point, err)
+	}
+
+	// The same rule bounds the repository-wide union across pairs.
+	union, err := RepositoryRemotePoint(t.Context(), f.db, engineRepoID, engineSourceID)
+	if err != nil || union != nil {
+		t.Fatalf("repository point = %+v, %v; want none for a chain that starts at seq 2", union, err)
+	}
+}

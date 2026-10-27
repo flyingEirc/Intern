@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
@@ -251,6 +252,132 @@ func TestPolicyEnableRequiresASuccessfulPreflightRecord(t *testing.T) {
 	enabled, err := f.store.EnablePolicy(t.Context(), policy.ID, true, &record, SystemAudit("policies.enable", AuditDetail{}))
 	if err != nil || !enabled.Enabled || enabled.LastPreflight == nil {
 		t.Fatalf("enable = %+v %v", enabled, err)
+	}
+}
+
+// publishP8State inserts one completed physical backup and the completed run
+// that published it, with the run's claim snapshot naming one (local, replica)
+// pair, plus the queued replica row the pair holds for that backup.
+func publishP8State(t *testing.T, s *Store, policyID, sourceID, localID, replicaID, backupID string) {
+	t.Helper()
+	now := ScheduleStamp(time.Now())
+	statements := []string{
+		`INSERT INTO chains (id, source_id, server_uuid, server_version, tool_version, started_at)
+		 VALUES ('chain-p8', ?, 'server-uuid', '8.4.11', '8.4.0-7', ?)`,
+		`INSERT INTO backups (id, chain_id, seq, kind, status, instance_id, run_id, object_path, key_id,
+		                      local_present, created_at, completed_at)
+		 VALUES (?, 'chain-p8', 1, 'physical-full', 'completed', 'instance-p8', ?, ?, 'key', 1, ?, ?)`,
+		`INSERT INTO runs (id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status,
+		                   scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size,
+		                   local_repository_id, replica_repository_id)
+		 VALUES ('run-p8', ?, ?, 'full', 'cron', 'run-p8-key', 'hash', 'completed', ?, ?, ?, ?, ?, 'chain-p8',
+		         512, ?, ?)`,
+		`INSERT INTO replicas (backup_id, repository_id, local_repository_id, idem_key, status,
+		                       next_attempt_at, created_at, updated_at)
+		 VALUES (?, ?, ?, 'replicate:run-p8', 'pending', ?, ?, ?)`,
+	}
+	arguments := [][]any{
+		{sourceID, now},
+		{backupID, backupID, "instance-p8/" + sourceID + "/chain-p8/" + backupID, now, now},
+		{policyID, sourceID, now, now, now, now, backupID, localID, replicaID},
+		{backupID, replicaID, localID, now, now, now},
+	}
+	for i, statement := range statements {
+		if _, err := s.DB().ExecContext(t.Context(), statement, arguments[i]...); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestRunSnapshotAndReplicaReferencesBlockRepositoryDeletion is P8: a
+// repository a run was claimed with stays referenced through the run's
+// snapshot — locally as the producing repository, remotely as the replica — and
+// a queued copy keeps its local repository referenced even after the run rows
+// are gone, because replication resolves the pair from those rows.
+func TestRunSnapshotAndReplicaReferencesBlockRepositoryDeletion(t *testing.T) {
+	f := newPolicyFixture(t)
+	policy := f.create(t)
+	// Repositories the policy can be moved to, so its own references are out of
+	// the way when the test isolates the run snapshot and the queued copy.
+	spare := mustRepository(t, f.store, testSealer(t), RepositoryInput{
+		Name: "spare", Kind: RepositoryLocal, TLSMode: TLSModeNone, Root: filepath.Join(t.TempDir(), "spare"),
+	})
+	other := mustRepository(t, f.store, testSealer(t), RepositoryInput{
+		Name: "other", Kind: RepositoryFTP, TLSMode: TLSModePlain,
+		FTP: &FTPRepositoryConfig{Host: "127.0.0.1", Port: 21, BasePath: "/b", Username: "u"}, Secret: []byte("{{SECRET_other_ftp}}"),
+	})
+	publishP8State(t, f.store, policy.ID, f.source.ID, f.local.ID, f.ftp.ID, "backup-p8")
+	movePolicyOff(t, f.store, policy, spare.ID, other.ID)
+
+	assertDeleteRefused(t, f.store, f.local.ID, "producing repository")
+	assertDeleteRefused(t, f.store, f.ftp.ID, "replica repository")
+
+	// The queued copy is gone: the replica repository stays referenced only by
+	// the run's snapshot column.
+	clearReplicaRows(t, f.store)
+	assertDeleteRefused(t, f.store, f.ftp.ID, "replica repository after the copy row went")
+
+	// The copy now sits on another repository, so only its local binding still
+	// names the producing repository. With the run rows gone the snapshot
+	// references disappear with them, and the replica repository is deletable.
+	queueCopyOn(t, f.store, other.ID, f.local.ID)
+	clearRunRows(t, f.store)
+	assertDeleteSucceeds(t, f.store, f.ftp.ID, "replica repository without run rows")
+	assertDeleteRefused(t, f.store, f.local.ID, "producing repository bound by the copy row")
+
+	// Without the queued copy nothing references either side any more.
+	clearReplicaRows(t, f.store)
+	assertDeleteSucceeds(t, f.store, f.local.ID, "producing repository without references")
+}
+
+// movePolicyOff re-points one policy at repositories the test is not deleting,
+// through the same store call the PUT handler makes.
+func movePolicyOff(t *testing.T, s *Store, policy Policy, localID, replicaID string) {
+	t.Helper()
+	if _, err := s.UpdatePolicy(t.Context(), policy.ID, PolicyInput{
+		Name: policy.Name, SourceID: policy.SourceID, LocalRepositoryID: localID, ReplicaRepositoryID: &replicaID,
+		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
+		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+	}, SystemAudit("policies.update", AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDeleteRefused(t *testing.T, s *Store, id, what string) {
+	t.Helper()
+	if err := s.DeleteRepository(t.Context(), id, SystemAudit("repositories.delete", AuditDetail{})); !errors.Is(err, ErrReferenced) {
+		t.Fatalf("%s delete = %v, want ErrReferenced", what, err)
+	}
+}
+
+func assertDeleteSucceeds(t *testing.T, s *Store, id, what string) {
+	t.Helper()
+	if err := s.DeleteRepository(t.Context(), id, SystemAudit("repositories.delete", AuditDetail{})); err != nil {
+		t.Fatalf("%s delete = %v, want success", what, err)
+	}
+}
+
+func clearReplicaRows(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.DB().ExecContext(t.Context(), `DELETE FROM replicas`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func clearRunRows(t *testing.T, s *Store) {
+	t.Helper()
+	if _, err := s.DB().ExecContext(t.Context(), `DELETE FROM runs`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func queueCopyOn(t *testing.T, s *Store, repositoryID, localRepositoryID string) {
+	t.Helper()
+	if _, err := s.DB().ExecContext(t.Context(), `INSERT INTO replicas
+(backup_id, repository_id, local_repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
+VALUES ('backup-p8', ?, ?, 'replicate:run-p8', 'pending', ?, ?, ?)`,
+		repositoryID, localRepositoryID, ScheduleStamp(time.Now()), ScheduleStamp(time.Now()), ScheduleStamp(time.Now())); err != nil {
+		t.Fatal(err)
 	}
 }
 

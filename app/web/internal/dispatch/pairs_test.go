@@ -844,6 +844,107 @@ func unblockEnqueue(t *testing.T, database *store.Store, backupID string) {
 	}
 }
 
+// TestReplicaAddedLaterQueuesTheChainBaseFirst is the advisor's P7a: one policy
+// produced its full before any replica existed, and the PUT that added the
+// replica must not leave the chain base unqueued on the repository. The
+// catch-up pulls the qualifying predecessors first, so the full is enqueued
+// before the incremental, and the repository's point is only correct once both
+// members are verified there.
+func TestReplicaAddedLaterQueuesTheChainBaseFirst(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil) // (l1, no replica)
+	base := time.Date(2026, 1, 7, 8, 0, 0, 0, time.UTC)
+	full, _ := s.publishMember(t, plain, "p7-full", "full", base)
+	paired := s.updatePolicyPair(t, plain, s.l1.ID, &s.ftp.ID)
+	incremental, _ := s.publishMember(t, paired, "p7-inc", "incremental", base.Add(time.Hour))
+
+	// Installing the pair runs the catch-up. Only the incremental's run was
+	// claimed with the pair, so the predecessor pull is what queues the full.
+	if err := s.dispatcher.openPair(t.Context(), s.l1.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertQueuedReplica(t, s.fixture, full, s.ftp.ID)
+	assertQueuedReplica(t, s.fixture, incremental, s.ftp.ID)
+
+	// FIFO follows chain position: the first eligible item of the pair's queue
+	// is the chain base, not the incremental that depends on it.
+	replicator := s.dispatcher.replicatorForPair(s.l1.ID, s.ftp.ID)
+	// The memory remote cannot copy, so the attempt itself may fail; what
+	// matters is which backup it named.
+	stepped, attempted, _ := replicator.StepItem(t.Context())
+	if !attempted {
+		t.Fatal("the pair's queue stepped nothing after the catch-up")
+	}
+	if stepped.BackupID != full {
+		t.Fatalf("first stepped backup = %s, want the chain base %s", stepped.BackupID, full)
+	}
+
+	// The point is correct only after both members are verified: nothing is
+	// proven right after the catch-up, the verified base is the point, and
+	// only the whole verified chain moves it to the incremental.
+	markReplicaVerifiedAt(t, s.database, full, s.ftp.ID, s.l1.ID, base.Add(2*time.Hour))
+	requireRemotePoint(t, s, full)
+	markReplicaVerifiedAt(t, s.database, incremental, s.ftp.ID, s.l1.ID, base.Add(3*time.Hour))
+	requireRemotePoint(t, s, incremental)
+}
+
+// TestCrossLocalChainNeverClaimsTheOtherLocalBase is the advisor's P7b: policy
+// pA (l1, no replica) produced the chain's full and policy pB (l2, r) produced
+// an incremental of that chain. The incremental is pB's own backup, but its
+// chain base lives on another local repository and never reaches r through the
+// l2 pair, so r's point must never name the incremental.
+func TestCrossLocalChainNeverClaimsTheOtherLocalBase(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
+	base := time.Date(2026, 1, 7, 9, 0, 0, 0, time.UTC)
+	full, _ := s.publishMember(t, plain, "p7b-full", "full", base)
+	incremental, _ := s.publishMember(t, s.policyB, "p7b-inc", "incremental", base.Add(time.Hour))
+
+	if err := s.dispatcher.openPair(t.Context(), s.l2.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertQueuedReplica(t, s.fixture, incremental, s.ftp.ID)
+	assertNoQueuedReplica(t, s.fixture, full, s.ftp.ID)
+
+	// The base has no row on the repository, so the chain is not on it from
+	// seq 1: the verified incremental contributes nothing.
+	markReplicaVerifiedAt(t, s.database, incremental, s.ftp.ID, s.l2.ID, base.Add(2*time.Hour))
+	requireNoRemotePoint(t, s)
+}
+
+// TestReplicationPairsDropsAPairWhoseRepositoryIsGone pins the repository
+// existence check inside ReplicationPairs. Deleting a repository is refused
+// while runs reference it, so the state the check defends against — a completed
+// run whose snapshot names a repository row that no longer exists — is reached
+// directly in the database, the way pre-upgrade rows or an out-of-band deletion
+// leave it.
+func TestReplicationPairsDropsAPairWhoseRepositoryIsGone(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	s.completeForPolicy(t, s.policyA, "mn-b1") // run snapshot (l1, ftp)
+	s.completeForPolicy(t, s.policyB, "mn-b2") // run snapshot (l2, ftp)
+	// Move both policies off the repositories that are about to disappear,
+	// through the real edit path, so the repository rows can be removed while
+	// the run snapshots still name them.
+	s.updatePolicyPair(t, s.policyA, s.l2.ID, nil)
+	s.updatePolicyPair(t, s.policyB, s.l2.ID, nil)
+	for _, repository := range []store.Repository{s.l1, s.ftp} {
+		if _, err := s.database.DB().ExecContext(t.Context(),
+			`DELETE FROM repositories WHERE id = ?`, repository.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Neither completed-run snapshot survives: one names a local repository
+	// that is gone, the other a replica repository that is gone.
+	pairs, err := s.database.ReplicationPairs(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf("replication pairs = %+v, want none: every pair names a missing repository", pairs)
+	}
+}
+
 var (
 	_ replication.Remote = memoryRemote{}
 	_ io.Reader          = io.Reader(nil)

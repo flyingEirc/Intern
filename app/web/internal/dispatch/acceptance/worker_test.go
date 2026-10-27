@@ -44,6 +44,11 @@ const (
 	// concurrency observation. It is short enough that two overlapping claims
 	// cannot fall between two samples.
 	runningSampleInterval = 20 * time.Millisecond
+	// parentNotCompleted is the admission code the physical chain planner
+	// returns for an incremental whose parent is not completed; the dispatcher
+	// forwards it as the refused run's error_code. No app-side constant wraps
+	// it, so the harness pins the literal the planner writes.
+	parentNotCompleted = "parent_not_completed"
 )
 
 // TestW4Worker is the single W4 native entry point. It runs inside the pinned
@@ -531,14 +536,49 @@ func a3Cancel(t *testing.T, f *fixture) {
 	t.Logf("W4-A3 cancel canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true %s", backup.evidence())
 }
 
-// admissionFull returns the admission-triggered full of one policy, if stored.
-func (f *fixture) admissionFull(policyID string) (string, bool) {
-	for _, item := range f.listRuns(f.t, "policy_id="+policyID) {
+// admissionFulls lists every admission-triggered full of one policy through
+// /runs, with a limit high enough that paging can never hide one.
+func (f *fixture) admissionFulls(t *testing.T, policyID string) []store.Run {
+	t.Helper()
+	var out []store.Run
+	for _, item := range f.listRuns(t, "policy_id="+policyID+"&limit=200") {
 		if item.Trigger == store.RunTriggerAdmission && item.Kind == store.RunKindFull {
-			return item.ID, true
+			out = append(out, item)
 		}
 	}
-	return "", false
+	return out
+}
+
+// admissionFull returns the admission-triggered full of one policy, if stored.
+func (f *fixture) admissionFull(policyID string) (string, bool) {
+	items := f.admissionFulls(f.t, policyID)
+	if len(items) == 0 {
+		return "", false
+	}
+	return items[0].ID, true
+}
+
+// requireSingleActiveFull requires the policy's only queued or running full to
+// be the named admission run: the dispatcher coalesces a refusal into one full
+// and never leaves another full active beside it.
+func (f *fixture) requireSingleActiveFull(t *testing.T, policyID, admissionID string) {
+	t.Helper()
+	active := 0
+	for _, item := range f.listRuns(t, "policy_id="+policyID+"&limit=200") {
+		if item.Kind != store.RunKindFull {
+			continue
+		}
+		if item.Status != store.RunStatusQueued && item.Status != store.RunStatusRunning {
+			continue
+		}
+		if item.ID != admissionID {
+			t.Fatalf("full %s is %s while the admission full %s is active", item.ID, item.Status, admissionID)
+		}
+		active++
+	}
+	if active != 1 {
+		t.Fatalf("%d fulls are queued or running for the policy, want exactly the admission full %s", active, admissionID)
+	}
 }
 
 // waitTerminal waits for any terminal status. Unlike waitRun it accepts a
@@ -795,16 +835,77 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 	f.requirePublishedIntact(t, published, beforeHash, beforeProtection)
 	f.requireProtectionHeld(t, beforeProtection)
 	f.assertNoSecret(t, nil)
-	next := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-next")
-	f.waitRun(t, next, store.RunStatusCompleted)
-	// The restarted child created and completed this run: seeing it here proves
-	// the view also carries the writes that followed the recovery.
-	f.requireViewRun(t, next, store.RunStatusCompleted)
+	// The killed incremental is a failed member at the tail of the newest
+	// chain, so the chain planner refuses any incremental that would extend it,
+	// and the refusal queues exactly one admission full. With that full
+	// completed, a further incremental has a completed parent, is admitted, and
+	// the next backup succeeds.
+	f.requireRefusedIncremental(t, policy)
+	admission := f.requireAdmissionFull(t, policy)
+	f.requireAdmittedIncremental(t, policy, admission)
 	status, class, code := f.sqliteRunOutcome(t, incID)
 	// The locked marker text stays contiguous, so the gate can match it; the
 	// run outcome the restart's recovery recorded follows it, read from the
 	// same row the assertions above used.
-	t.Logf("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true status=%s error_class=%q error_code=%q %s", status, class, code, backup.evidence())
+	t.Logf("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true sqlite_interrupted=true status=%s error_class=%q error_code=%q %s", status, class, code, backup.evidence())
+}
+
+// requireRefusedIncremental triggers the incremental that follows a killed
+// incremental and requires the refusal decision 10 prescribes: the chain
+// planner refuses a parent that is not completed, so the run ends failed with
+// requires_full/parent_not_completed. The outcome is read back from the API
+// row, the stored row and the analysis view; the view carrying a row the
+// restarted child terminal-wrote also proves the writes that followed the
+// recovery are visible.
+func (f *fixture) requireRefusedIncremental(t *testing.T, policy string) {
+	t.Helper()
+	next := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-next")
+	refused := f.waitRun(t, next, store.RunStatusFailed)
+	if errorClass(refused) != store.RunErrorRequiresFull || errorCode(refused) != parentNotCompleted {
+		t.Fatalf("post-restart incremental ended %s class=%q code=%q, want failed %s/%s",
+			refused.Status, errorClass(refused), errorCode(refused), store.RunErrorRequiresFull, parentNotCompleted)
+	}
+	if stored, class, code := f.sqliteRunOutcome(t, next); stored != store.RunStatusFailed || class != store.RunErrorRequiresFull || code != parentNotCompleted {
+		t.Fatalf("stored post-restart incremental is %s class=%q code=%q, want failed %q/%q",
+			stored, class, code, store.RunErrorRequiresFull, parentNotCompleted)
+	}
+	f.requireViewRun(t, next, store.RunStatusFailed)
+}
+
+// requireAdmissionFull requires the refusal to have queued exactly one
+// admission-triggered full through /runs, and no other full of the policy to
+// be queued or running beside it.
+func (f *fixture) requireAdmissionFull(t *testing.T, policy string) string {
+	t.Helper()
+	admissions := f.admissionFulls(t, policy)
+	if len(admissions) != 1 {
+		t.Fatalf("%d admission fulls were queued, want one", len(admissions))
+	}
+	admission := admissions[0]
+	if admission.Status != store.RunStatusQueued && admission.Status != store.RunStatusRunning {
+		t.Fatalf("admission full %s is %s, want queued or running", admission.ID, admission.Status)
+	}
+	f.requireSingleActiveFull(t, policy, admission.ID)
+	return admission.ID
+}
+
+// requireAdmittedIncremental waits for the admission full to complete, then
+// requires a further incremental to be admitted and to complete: with a
+// completed parent the next backup succeeds. Both runs are cross-checked
+// through the analysis view.
+func (f *fixture) requireAdmittedIncremental(t *testing.T, policy, admission string) {
+	t.Helper()
+	completed := f.waitRun(t, admission, store.RunStatusCompleted)
+	if completed.BackupID == nil {
+		t.Fatal("admission full completed with no backup")
+	}
+	f.requireViewRun(t, admission, store.RunStatusCompleted)
+	after := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-after")
+	last := f.waitRun(t, after, store.RunStatusCompleted)
+	if last.BackupID == nil {
+		t.Fatal("post-admission incremental completed with no backup")
+	}
+	f.requireViewRun(t, after, store.RunStatusCompleted)
 }
 
 // requireKilledRunRecovered requires the SIGKILLed run to be failed/interrupted
