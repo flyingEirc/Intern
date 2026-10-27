@@ -563,7 +563,7 @@ func (q *Queries) ReplicasForRepository(ctx context.Context, arg ReplicasForRepo
 	return items, nil
 }
 
-const resetReplicaAttempt = `-- name: ResetReplicaAttempt :exec
+const resetReplicaAttempt = `-- name: ResetReplicaAttempt :execrows
 UPDATE replicas
 SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = ?, updated_at = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
@@ -578,16 +578,20 @@ type ResetReplicaAttemptParams struct {
 }
 
 // A manual retry restarts the attempt budget and the schedule but keeps the
-// history counters: the item has been unprotected since failed_since.
-func (q *Queries) ResetReplicaAttempt(ctx context.Context, arg ResetReplicaAttemptParams) error {
-	_, err := q.db.ExecContext(ctx, resetReplicaAttempt,
+// history counters: the item has been unprotected since failed_since. Zero
+// affected rows is sql.ErrNoRows for the caller: the pair has no such replica.
+func (q *Queries) ResetReplicaAttempt(ctx context.Context, arg ResetReplicaAttemptParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, resetReplicaAttempt,
 		arg.NextAttemptAt,
 		arg.UpdatedAt,
 		arg.BackupID,
 		arg.RepositoryID,
 		arg.LocalRepositoryID,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const resetUploadingReplicas = `-- name: ResetUploadingReplicas :exec
@@ -686,7 +690,7 @@ func (q *Queries) SetReplicaAlert(ctx context.Context, arg SetReplicaAlertParams
 	return err
 }
 
-const setReplicaFailed = `-- name: SetReplicaFailed :exec
+const setReplicaFailed = `-- name: SetReplicaFailed :execrows
 UPDATE replicas
 SET status = ?, attempts = ?, permanent = ?, next_attempt_at = ?,
     failed_since = COALESCE(failed_since, ?), last_error_code = ?, last_reply_code = ?,
@@ -708,8 +712,8 @@ type SetReplicaFailedParams struct {
 	LocalRepositoryID string
 }
 
-func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedParams) error {
-	_, err := q.db.ExecContext(ctx, setReplicaFailed,
+func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setReplicaFailed,
 		arg.Status,
 		arg.Attempts,
 		arg.Permanent,
@@ -722,10 +726,13 @@ func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedPara
 		arg.RepositoryID,
 		arg.LocalRepositoryID,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
-const setReplicaUploaded = `-- name: SetReplicaUploaded :exec
+const setReplicaUploaded = `-- name: SetReplicaUploaded :execrows
 UPDATE replicas
 SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, ?), next_attempt_at = ?, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
@@ -742,9 +749,11 @@ type SetReplicaUploadedParams struct {
 }
 
 // uploaded keeps failed_since: the copy is committed but still unprotected until
-// the readback proves it, so the alert clock must not restart here.
-func (q *Queries) SetReplicaUploaded(ctx context.Context, arg SetReplicaUploadedParams) error {
-	_, err := q.db.ExecContext(ctx, setReplicaUploaded,
+// the readback proves it, so the alert clock must not restart here. The row is
+// scoped to this (backup, repository, local repository) triple, so zero affected
+// rows is an error the caller must not ignore.
+func (q *Queries) SetReplicaUploaded(ctx context.Context, arg SetReplicaUploadedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setReplicaUploaded,
 		arg.UploadedAt,
 		arg.NextAttemptAt,
 		arg.UpdatedAt,
@@ -752,7 +761,10 @@ func (q *Queries) SetReplicaUploaded(ctx context.Context, arg SetReplicaUploaded
 		arg.RepositoryID,
 		arg.LocalRepositoryID,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const setReplicaUploading = `-- name: SetReplicaUploading :execrows
@@ -781,7 +793,7 @@ func (q *Queries) SetReplicaUploading(ctx context.Context, arg SetReplicaUploadi
 	return result.RowsAffected()
 }
 
-const setReplicaVerified = `-- name: SetReplicaVerified :exec
+const setReplicaVerified = `-- name: SetReplicaVerified :execrows
 UPDATE replicas
 SET status = 'verified', verified_at = ?, uploaded_at = COALESCE(uploaded_at, ?),
     permanent = 0, failed_since = NULL, alert_since = NULL, last_error_code = NULL,
@@ -798,8 +810,8 @@ type SetReplicaVerifiedParams struct {
 	LocalRepositoryID string
 }
 
-func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerifiedParams) error {
-	_, err := q.db.ExecContext(ctx, setReplicaVerified,
+func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerifiedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setReplicaVerified,
 		arg.VerifiedAt,
 		arg.UploadedAt,
 		arg.UpdatedAt,
@@ -807,7 +819,10 @@ func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerified
 		arg.RepositoryID,
 		arg.LocalRepositoryID,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const sourceChains = `-- name: SourceChains :many

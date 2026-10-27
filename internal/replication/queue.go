@@ -326,14 +326,18 @@ func (r *Replicator) writeFailure(ctx context.Context, item *queueItem, failure 
 		next = now
 	}
 	q := replsql.New(r.DB)
-	if err := q.SetReplicaFailed(ctx, replsql.SetReplicaFailedParams{
+	changed, err := q.SetReplicaFailed(ctx, replsql.SetReplicaFailedParams{
 		Status: status, Attempts: attempts, Permanent: permanent, NextAttemptAt: stamp(next),
 		FailedSince:   nullableStamp(now),
 		LastErrorCode: sql.NullString{String: failure.code, Valid: true},
 		LastReplyCode: replyCodeOf(failure),
 		UpdatedAt:     stamp(now), BackupID: item.backupID, RepositoryID: r.RepositoryID,
 		LocalRepositoryID: r.LocalRepositoryID,
-	}); err != nil {
+	})
+	if err != nil {
+		return err
+	}
+	if err = oneRow(changed, "replica is not failed"); err != nil {
 		return err
 	}
 	if !r.alerts(item, failure, status, now) {
@@ -380,13 +384,22 @@ func replyCodeOf(failure *replicaFailure) sql.NullInt64 {
 }
 
 // Retry resets one replica for an immediate manual attempt and keeps its history
-// counters (upload time, verification time, attempt count, last error code).
+// counters (upload time, verification time, attempt count, last error code). A
+// pair without that row reports sql.ErrNoRows, which the API answers as
+// not_found rather than as a successful retry that changed nothing.
 func (r *Replicator) Retry(ctx context.Context, backupID string) error {
 	now := stamp(r.clock())
-	return replsql.New(r.DB).ResetReplicaAttempt(ctx, replsql.ResetReplicaAttemptParams{
+	changed, err := replsql.New(r.DB).ResetReplicaAttempt(ctx, replsql.ResetReplicaAttemptParams{
 		NextAttemptAt: now, UpdatedAt: now, BackupID: backupID, RepositoryID: r.RepositoryID,
 		LocalRepositoryID: r.LocalRepositoryID,
 	})
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // Recover repairs state at startup: an interrupted upload returns to pending,

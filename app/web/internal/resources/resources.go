@@ -92,7 +92,11 @@ type PreflightOutcome struct {
 	Warnings      []store.PreflightWarning
 	ServerUUID    string
 	ServerVersion string
-	Failure       *Failure
+	// ToolVersion is the XtraBackup version the tool probe observed. The
+	// physical chain writes it into the backup metadata and compares it on every
+	// later member of the chain, so it is never the MySQL server version.
+	ToolVersion string
+	Failure     *Failure
 }
 
 // OK reports whether every check passed.
@@ -164,6 +168,7 @@ func (s *Service) PreflightSource(ctx context.Context, sourceID, localRepository
 	})
 	outcome := PreflightOutcome{
 		Checks: result.Checks, ServerUUID: result.Identity.UUID, ServerVersion: result.Identity.Version,
+		ToolVersion: result.Tool.Version,
 	}
 	for _, warning := range result.WarningDetails {
 		outcome.Warnings = append(outcome.Warnings, store.PreflightWarning{Code: warning.Code, Message: warning.Message})

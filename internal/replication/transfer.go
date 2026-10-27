@@ -299,7 +299,9 @@ func (r *Replicator) recordPart(ctx context.Context, backupID, member, part stri
 	return row.ID, nil
 }
 
-// markUploaded requires all four members to be committed, then records uploaded.
+// markUploaded requires all four members to be committed, then records uploaded
+// on this replica's own row. The copy is committed but still unprotected until
+// the readback proves it.
 func (r *Replicator) markUploaded(ctx context.Context, backupID string, members map[string]memberRecord) error {
 	for _, member := range memberOrder {
 		switch members[member].status {
@@ -309,10 +311,14 @@ func (r *Replicator) markUploaded(ctx context.Context, backupID string, members 
 		}
 	}
 	now := r.clock()
-	return replsql.New(r.DB).SetReplicaUploaded(ctx, replsql.SetReplicaUploadedParams{
+	changed, err := replsql.New(r.DB).SetReplicaUploaded(ctx, replsql.SetReplicaUploadedParams{
 		UploadedAt: nullableStamp(now), NextAttemptAt: stamp(now), UpdatedAt: stamp(now),
-		BackupID: backupID, RepositoryID: r.RepositoryID,
+		BackupID: backupID, RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
 	})
+	if err != nil {
+		return err
+	}
+	return oneRow(changed, "replica is not uploaded")
 }
 
 // classify converts a remote failure into a fixed, safe code.

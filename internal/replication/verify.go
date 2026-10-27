@@ -174,10 +174,14 @@ func (r *Replicator) recordVerified(ctx context.Context, backupID string) error 
 			return err
 		}
 	}
-	return q.SetReplicaVerified(ctx, replsql.SetReplicaVerifiedParams{
+	changed, err := q.SetReplicaVerified(ctx, replsql.SetReplicaVerifiedParams{
 		VerifiedAt: sql.NullString{String: now, Valid: true},
 		UploadedAt: sql.NullString{String: now, Valid: true},
 		UpdatedAt:  now, BackupID: backupID, RepositoryID: r.RepositoryID,
 		LocalRepositoryID: r.LocalRepositoryID,
 	})
+	if err != nil {
+		return err
+	}
+	return oneRow(changed, "replica is not verified")
 }

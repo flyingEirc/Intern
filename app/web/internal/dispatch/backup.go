@@ -118,12 +118,12 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 	// the run outcome that the rest of this function decides.
 	defer func() { _ = repo.Close() }() //nolint:errcheck // read-only handle, run outcome already decided
 
-	connection, identity, done, err := d.admit(ctx, run, policy)
+	admitted, done, err := d.admit(ctx, run, policy)
 	if done {
 		return err
 	}
 	d.logEvent(ctx, run.ID, eventStarted, nil)
-	result, runErr := d.runChain(ctx, run, d.chainJob(run, policy, repo, identity, connection))
+	result, runErr := d.runChain(ctx, run, d.chainJob(run, policy, repo, admitted))
 
 	if admission := (*physicalstore.AdmissionError)(nil); errors.As(runErr, &admission) {
 		return d.admissionFailure(ctx, run, policy, admission)
@@ -167,24 +167,42 @@ func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy stor
 // configured (decision 9) and a fresh preflight passed (decision 10). done
 // reports that the run already reached a terminal failure and its write is the
 // returned error.
-func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Policy) (physical.Connection, physical.Identity, bool, error) {
+func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Policy) (admission, bool, error) {
 	// Decision 9: without the KEK, work root or XtraBackup executable the run
 	// was still created, and now fails visibly. Nothing is skipped silently.
 	if !d.config.Settings.Preflight() {
-		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorUnavailable, "unconfigured",
+		return admission{}, true, d.failRun(ctx, run, store.RunErrorUnavailable, "unconfigured",
 			errors.New("backup runtime is not configured"))
 	}
 	if err := d.validateKEK(ctx, run, policy); err != nil {
-		return physical.Connection{}, physical.Identity{}, true, err
+		return admission{}, true, err
 	}
-	if code, preflightErr := d.preflightRun(ctx, run, policy); code != "" {
-		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
+	outcome, code, preflightErr := d.preflightRun(ctx, run, policy)
+	if code != "" {
+		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
 	}
 	connection, identity, err := d.preflightConnection(ctx, policy)
 	if err != nil {
-		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorPreflight, "identity_missing", err)
+		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, "identity_missing", err)
 	}
-	return connection, identity, false, nil
+	return admissionFor(connection, identity, outcome), false, nil
+}
+
+// admission is what a passed admission hands the physical chain: the live
+// connection, the server identity the fresh preflight recorded, and the
+// XtraBackup version that same preflight probed.
+type admission struct {
+	Connection  physical.Connection
+	Identity    physical.Identity
+	ToolVersion string
+}
+
+// admissionFor binds one passed preflight to the live connection of a run. The
+// tool version is the probed XtraBackup version, never the server version: the
+// physical chain writes it into the backup metadata and rechecks it on every
+// later member of the chain.
+func admissionFor(connection physical.Connection, identity physical.Identity, outcome resources.PreflightOutcome) admission {
+	return admission{Connection: connection, Identity: identity, ToolVersion: outcome.ToolVersion}
 }
 
 // openRunRepository resolves the policy's local repository for one run. A run
@@ -234,9 +252,9 @@ func (d *Dispatcher) runChain(ctx context.Context, run store.Run, job chain.Job)
 }
 
 // preflightRun runs the fresh preflight and records it on the source. It
-// returns the stable failure code, empty when the run may proceed, and the
-// underlying error for the run record.
-func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy store.Policy) (string, error) {
+// returns the observed outcome, the stable failure code (empty when the run may
+// proceed) and the underlying error for the run record.
+func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy store.Policy) (resources.PreflightOutcome, string, error) {
 	service := d.config.Preflight
 	if service == nil {
 		service = &resources.Service{Store: d.config.Database, Settings: d.config.Settings}
@@ -244,11 +262,11 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 	outcome, err := service.PreflightSource(ctx, policy.SourceID, policy.LocalRepositoryID)
 	switch {
 	case errors.Is(err, resources.ErrUnavailable), errors.Is(err, store.ErrUnavailable):
-		return "unconfigured", err
+		return outcome, "unconfigured", err
 	case errors.Is(err, store.ErrNotFound):
-		return "source_missing", err
+		return outcome, "source_missing", err
 	case err != nil:
-		return "preflight_failed", err
+		return outcome, "preflight_failed", err
 	}
 	record := outcome.Record()
 	if _, err := d.config.Database.RecordSourcePreflight(ctx, policy.SourceID, record,
@@ -257,7 +275,7 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 	}
 	if outcome.OK() {
 		d.logEvent(ctx, run.ID, eventPreflightOK, nil)
-		return "", nil
+		return outcome, "", nil
 	}
 	code := "preflight_failed"
 	check := "preflight"
@@ -270,7 +288,7 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 		}
 	}
 	d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{"check": check, "code": code})
-	return code, fmt.Errorf("preflight failed")
+	return outcome, code, fmt.Errorf("preflight failed")
 }
 
 // validateKEK rechecks that the KEK is outside the policy's local repository
@@ -335,17 +353,15 @@ func (d *Dispatcher) queueAdmissionFull(ctx context.Context, run store.Run, poli
 	d.logEvent(ctx, created.ID, eventQueued, nil)
 }
 
-// chainJob builds the physical chain Job for one run. validateJob rechecks
-// the KEK against the work root; the repository-root recheck happens through
-// the preflight and the local repository open.
-func (d *Dispatcher) chainJob(run store.Run, policy store.Policy, repo *local.Repository,
-	identity physical.Identity, connection physical.Connection,
-) chain.Job {
+// chainJob builds the physical chain Job for one admitted run. validateJob
+// rechecks the KEK against the work root; the repository-root recheck happens
+// through the preflight and the local repository open.
+func (d *Dispatcher) chainJob(run store.Run, policy store.Policy, repo *local.Repository, admitted admission) chain.Job {
 	return chain.Job{
 		Store: physicalstore.New(d.config.Database.DB()), Repo: repo,
 		Binary: d.config.Settings.XtrabackupPath, WorkRoot: d.config.Settings.WorkRoot,
-		Connection: connection,
-		Identity:   identity, ToolVersion: identity.Version,
+		Connection: admitted.Connection,
+		Identity:   admitted.Identity, ToolVersion: admitted.ToolVersion,
 		InstanceID: d.config.Database.InstanceID(), SourceID: policy.SourceID,
 		Kind: run.Kind, MaxChainLength: int(policy.MaxChainLength),
 		KeyFile: d.config.Settings.KeyFile, Parallel: int(policy.Parallel),

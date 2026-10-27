@@ -43,8 +43,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   all($cases[]; . as $case |
     ($output | split("--- PASS: TestW4Worker/" + $case + " (") | length == 2)) and
   all($markers[]; . as $marker | $output | contains($marker)) and
-  # The uploaded-but-unverified window is a counted observation, never a claim.
+  # The uploaded-but-unverified window is a counted observation of the real
+  # state, never a claim: the sampler must have run, and it must name the
+  # backups it caught between `uploaded` and the remote point.
   ($output | test("uploaded_window=observed samples=[1-9][0-9]* ")) and
+  ($output | test("uploaded_backups=[^ ]+ ")) and
   ($output | contains("uploaded_window=missed") | not) and
   # The first SSE event is measured against the locked promptness bound.
   ($output | test("first_event_ms=[0-9]{1,4} ")) and

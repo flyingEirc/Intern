@@ -407,3 +407,15 @@ func asReplicaFailure(err error) *replicaFailure {
 	}
 	return &replicaFailure{code: CodeInternal, retryable: true, cause: err}
 }
+
+// oneRow turns a single-row replica UPDATE's affected count into a state error.
+// Every such statement is scoped to one (backup, repository, local repository)
+// triple, so matching zero rows means the row this attempt is stepping does not
+// exist for this pair; a silent success would leave a status stale and the
+// caller none the wiser.
+func oneRow(changed int64, message string) error {
+	if changed == 1 {
+		return nil
+	}
+	return terminal(CodeStateInvalid, errors.New("replication: "+message))
+}

@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -31,10 +32,18 @@ const (
 	// sseFirstEventBound is the locked promptness bound: the first SSE frame
 	// must arrive within this long after the trigger request returned.
 	sseFirstEventBound = 5 * time.Second
-	// replicaSampleInterval is the protection sampling period while
-	// replication is in progress. It must be far shorter than one FTP upload
-	// so a pending or uploading replica is observed, not inferred.
-	replicaSampleInterval = 10 * time.Millisecond
+	// replicaSampleInterval is the protection sampling period while a copy is
+	// in flight. It must be far shorter than one FTP upload and shorter than the
+	// verification readback, so a replica in the uploaded-but-unverified window
+	// is observed, not inferred.
+	replicaSampleInterval = 2 * time.Millisecond
+	// replicaIdleSampleInterval is the period when every replica of the source
+	// already settled, so an idle scenario does not poll the API in a loop.
+	replicaIdleSampleInterval = 100 * time.Millisecond
+	// runningSampleInterval is the running-count sampling period of the
+	// concurrency observation. It is short enough that two overlapping claims
+	// cannot fall between two samples.
+	runningSampleInterval = 20 * time.Millisecond
 )
 
 // TestW4Worker is the single W4 native entry point. It runs inside the pinned
@@ -75,15 +84,21 @@ func a1E2E(t *testing.T, f *fixture) {
 	f.e2eObjects(t, members)
 	protection, logRows := f.e2eProtection(t, members, out)
 	summary := watch.report(t)
-	if summary.behind == 0 {
-		t.Fatalf("no sample saw the remote point behind an unverified replica (%d samples); protection_requires_verified is unproven", summary.samples)
+	// protection_requires_verified may only be claimed from a sample in which a
+	// replica was exactly uploaded while the remote point did not include it.
+	// Pending and uploading copies are not that sample, so a run that never
+	// caught the window fails instead of claiming the property.
+	if summary.behind == 0 || summary.uploaded == 0 {
+		t.Fatalf("no sample observed a replica in the uploaded state outside the remote point (%d samples); protection_requires_verified is unproven (uploaded_window=missed)",
+			summary.samples)
 	}
 	if summary.verified != 3 || summary.seen != 3 {
 		t.Fatalf("replica samples covered %d verified of %d backups, want 3 of 3", summary.verified, summary.seen)
 	}
 	f.assertNoSecret(t, nil)
-	t.Logf("W4-A1 e2e chain=seq:1,2,3 lsn_continuous=true replay_run_id=%s conflict=409 replicas_verified=3 protection_local=%s protection_remote=%s protection_requires_verified=true uploaded_window=observed samples=%d logs_agree=sqlite log_rows=%d lists_agree=sqlite,local,ftp",
-		first, protection.Local.BackupID, protection.Remote[0].BackupID, summary.samples, logRows)
+	t.Logf("W4-A1 e2e chain=seq:1,2,3 lsn_continuous=true replay_run_id=%s conflict=409 replicas_verified=3 protection_local=%s protection_remote=%s protection_requires_verified=true uploaded_window=observed samples=%d uploaded_backups=%s logs_agree=sqlite log_rows=%d lists_agree=sqlite,local,ftp",
+		first, protection.Local.BackupID, protection.Remote[0].BackupID, summary.samples,
+		strings.Join(summary.window, ","), logRows)
 }
 
 // e2eIdempotency proves the manual contract on the first full run: the same key
@@ -272,43 +287,118 @@ func a2Priority(t *testing.T, f *fixture) {
 	if !parseStamp(t, incAt).Before(parseStamp(t, fullAt)) {
 		t.Fatalf("the incremental must be queued first for the ordering to prove anything: inc=%s full=%s", incAt, fullAt)
 	}
-	stop, done, peak := f.watchRunning(t)
+	watch := f.watchRunning(t)
 	f.waitRun(t, full1, store.RunStatusCompleted)
 	f.waitRun(t, full2, store.RunStatusCompleted)
 	f.waitRun(t, inc, store.RunStatusCompleted)
-	close(stop)
-	<-done
+	highest := watch.report(t)
 	f.requireClaimOrder(t, full2, inc)
 	if concurrent := f.requireDisjointRuns(t); concurrent != 1 {
 		t.Fatalf("sqlite intervals show %d concurrent runs", concurrent)
 	}
-	if peak() != 1 {
-		t.Fatalf("running_max=%d", peak())
+	if highest != 1 {
+		t.Fatalf("running_max=%d", highest)
 	}
 	t.Log("W4-A2 priority running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint")
 }
 
-// watchRunning samples the running-run count until stop closes and reports the
-// highest observed value. Global backup concurrency is frozen at 1.
-func (f *fixture) watchRunning(t *testing.T) (stop chan struct{}, done chan struct{}, peak func() int) {
+// watchRunning starts sampling the running-run count. The sampler reports the
+// highest observed value; global backup concurrency is frozen at 1. The
+// goroutine never calls t.Fatal: it records the failure and the test goroutine
+// reports it, so a failed scenario cannot panic the worker after the subtest
+// ended. The cleanup also stops the sampler, so a failing scenario cannot leave
+// it polling a client that a later scenario replaces.
+func (f *fixture) watchRunning(t *testing.T) *runningWatch {
 	t.Helper()
-	stop, done = make(chan struct{}), make(chan struct{})
-	var highest int
+	w := &runningWatch{f: f, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 	go func() {
-		defer close(done)
+		defer close(w.doneCh)
 		for {
-			select {
-			case <-stop:
+			if !w.sample() {
 				return
-			default:
 			}
-			if n := len(f.listRuns(t, "status=running")); n > highest {
-				highest = n
+			select {
+			case <-w.stopCh:
+				return
+			case <-time.After(runningSampleInterval):
 			}
-			time.Sleep(50 * time.Millisecond)
 		}
 	}()
-	return stop, done, func() int { return highest }
+	t.Cleanup(w.stop)
+	return w
+}
+
+// runningWatch is the running-count sampler. Every field but the channels is
+// read under mu, because the sampler goroutine writes them.
+type runningWatch struct {
+	f       *fixture
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	mu      sync.Mutex
+	highest int
+	samples int
+	failure string
+	stopped bool
+}
+
+// sample reads the running-run count once. It reports false once a read failed:
+// the goroutine stops instead of retrying a broken client for the rest of the
+// scenario.
+func (w *runningWatch) sample() bool {
+	raw, err := w.f.operator.get("/api/v1/runs?status=running")
+	if err != nil {
+		w.fail(err.Error())
+		return false
+	}
+	var page runsPage
+	if err = json.Unmarshal(raw, &page); err != nil {
+		w.fail(fmt.Sprintf("runs page: %v", err))
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.samples++
+	if len(page.Items) > w.highest {
+		w.highest = len(page.Items)
+	}
+	return true
+}
+
+func (w *runningWatch) fail(message string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure == "" {
+		w.failure = message
+	}
+}
+
+// stop is the cleanup path: stop the goroutine once, whether report already did
+// or the scenario failed before reaching it.
+func (w *runningWatch) stop() {
+	w.mu.Lock()
+	stopped := w.stopped
+	w.stopped = true
+	w.mu.Unlock()
+	if stopped {
+		return
+	}
+	close(w.stopCh)
+	<-w.doneCh
+}
+
+// report stops the sampler and evaluates its evidence from the test goroutine.
+func (w *runningWatch) report(t *testing.T) int {
+	t.Helper()
+	w.stop()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure != "" {
+		t.Fatal(w.failure)
+	}
+	if w.samples == 0 {
+		t.Fatal("the running-count sampler never completed a sample")
+	}
+	return w.highest
 }
 
 // requireClaimOrder proves the queued full was claimed before the queued
@@ -471,13 +561,22 @@ func a4SSE(t *testing.T, f *fixture) {
 	policy := f.createPolicy(t, "w4-sse", 8)
 	f.enable(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-sse-full")
+	// Everything stored at this point is replayed to a new subscriber. The
+	// promptness measurement must start at the first frame generated after the
+	// subscription: the stored `queued` row was written before the trigger
+	// returned, so timing it would measure the replay path, not live delivery.
+	// The watermark is read before subscribing, so a frame written in between is
+	// counted as live rather than skipped.
+	replayed := int64(f.sqliteCount(t, `SELECT COALESCE(MAX(seq), 0) FROM run_logs WHERE run_id = ?`, runID))
 	triggered := time.Now()
 	_, body := f.operator.stream(t, "/api/v1/runs/"+runID+"/events")
 	defer func() { _ = body.Close() }()
-	frames, end, first := readSSE(t, body, 10*time.Minute)
+	frames, end, arrivals := readSSE(t, body, 10*time.Minute)
+
+	first, event := firstLiveFrame(t, frames, arrivals, replayed)
 	latency := first.Sub(triggered)
 	if latency > sseFirstEventBound {
-		t.Fatalf("first SSE frame arrived %s after the trigger, bound %s", latency, sseFirstEventBound)
+		t.Fatalf("first live SSE frame (%s) arrived %s after the trigger, bound %s", event, latency, sseFirstEventBound)
 	}
 	joined := strings.Join(frames, "")
 	if end != "completed" {
@@ -492,8 +591,25 @@ func a4SSE(t *testing.T, f *fixture) {
 	raw, err := json.Marshal(logs)
 	must(t, err)
 	f.assertNoSecret(t, append([]byte(joined), raw...))
-	t.Logf("W4-A4 sse sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed first_event_ms=%d logs_agree=sqlite log_rows=%d",
-		latency.Milliseconds(), rows)
+	t.Logf("W4-A4 sse sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed first_event_ms=%d first_live_event=%s replayed_last_seq=%d logs_agree=sqlite log_rows=%d",
+		latency.Milliseconds(), event, replayed, rows)
+}
+
+// firstLiveFrame returns the arrival time and event name of the first frame the
+// server generated after the subscription. Frames at or below the replay
+// watermark were stored before this subscriber existed; timing them would
+// measure the replay path instead of live delivery.
+func firstLiveFrame(t *testing.T, frames []string, arrivals []time.Time, replayed int64) (time.Time, string) {
+	t.Helper()
+	for index, frame := range frames {
+		event, seq, ok := structuredFrame(frame)
+		if !ok || seq <= replayed {
+			continue
+		}
+		return arrivals[index], event
+	}
+	t.Fatalf("no frame was generated after the subscription: replay watermark=%d frames=%d", replayed, len(frames))
+	return time.Time{}, ""
 }
 
 // requireSSELifecycle requires the frozen ordered lifecycle on the wire: every
@@ -772,13 +888,14 @@ func idsOf(items []store.Run) []string {
 }
 
 // readSSE reads frames until the end event, returning the frames, the terminal
-// status and the arrival time of the first frame.
-func readSSE(t *testing.T, body io.Reader, bound time.Duration) ([]string, string, time.Time) {
+// status and every frame's arrival time. Arrival times let the caller time live
+// delivery rather than the replayed rows a new subscriber also receives.
+func readSSE(t *testing.T, body io.Reader, bound time.Duration) ([]string, string, []time.Time) {
 	t.Helper()
 	reader := bufio.NewReader(body)
 	deadline := time.Now().Add(bound)
 	var frames []string
-	var first time.Time
+	var arrivals []time.Time
 	for time.Now().Before(deadline) {
 		frame, err := readFrame(reader)
 		if err != nil {
@@ -790,16 +907,14 @@ func readSSE(t *testing.T, body io.Reader, bound time.Duration) ([]string, strin
 		if strings.HasPrefix(frame, ":") {
 			continue
 		}
-		if first.IsZero() {
-			first = time.Now()
-		}
+		arrivals = append(arrivals, time.Now())
 		frames = append(frames, frame)
 		if strings.HasPrefix(frame, "event: end") {
-			return frames, endStatus(frame), first
+			return frames, endStatus(frame), arrivals
 		}
 	}
 	t.Fatal("sse did not end")
-	return nil, "", first
+	return nil, "", nil
 }
 
 // endStatus reads the terminal status out of the single end frame.

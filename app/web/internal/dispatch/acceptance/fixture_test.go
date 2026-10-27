@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -514,7 +515,7 @@ func (f *fixture) waitRun(t *testing.T, id string, statuses ...string) store.Run
 			return run
 		}
 		if run.Status == store.RunStatusFailed || run.Status == store.RunStatusCanceled || run.Status == store.RunStatusCompleted {
-			t.Fatalf("run %s ended as %s class=%v code=%v", id, run.Status, run.ErrorClass, run.ErrorCode)
+			t.Fatalf("run %s ended as %s class=%q code=%q", id, run.Status, errorClass(run), errorCode(run))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -750,15 +751,15 @@ func (f *fixture) completedBackupsForPolicy(t *testing.T, policyID string) int {
 WHERE r.policy_id = ? AND b.status = 'completed'`, policyID)
 }
 
-// completedBackupsSinceFault counts the completed backups of the faulted run's
-// policy created at or after that run started. Backup intervals are globally
-// disjoint, so any row in that window belongs to the faulted run: a non-zero
-// count is a backup the fault should have prevented.
+// completedBackupsSinceFault counts the completed backups created at or after
+// the faulted run started. Backup intervals are globally disjoint, and global
+// backup concurrency is 1, so any completed row in that window is a backup the
+// fault should have prevented. The count reads backups alone: joining runs would
+// multiply each row by the number of runs that name it and inflate the count.
 func (f *fixture) completedBackupsSinceFault(t *testing.T, runID string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups b JOIN runs r ON r.policy_id = (
-SELECT policy_id FROM runs WHERE id = ?)
-WHERE b.status = 'completed' AND b.created_at >= (SELECT started_at FROM runs WHERE id = ?)`, runID, runID)
+	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups
+WHERE status = 'completed' AND created_at >= (SELECT started_at FROM runs WHERE id = ?)`, runID)
 }
 
 // childExitCode reports the serve child's exit status after waitChild. A
@@ -1165,6 +1166,13 @@ func parseStamp(t *testing.T, value string) time.Time {
 // the replica statuses from SQLite immediately after: a status can only move
 // forward to verified, so a verify that lands between the two reads can hide a
 // violation but can never invent one.
+//
+// The uploaded-but-unverified window is therefore observed, never inferred: a
+// sample counts it only when a replica row is exactly `uploaded` in SQLite and
+// the remote protection point does not include that backup. `pending` and
+// `uploading` are not the window: nothing is committed yet in those states. The
+// sampler runs on its own goroutine with no test helpers, so a broken client
+// fails the scenario from the test goroutine instead of panicking the worker.
 type replicationWatch struct {
 	f               *fixture
 	stopCh          chan struct{}
@@ -1172,13 +1180,17 @@ type replicationWatch struct {
 	mu              sync.Mutex
 	samples, behind int
 	seen, verified  map[string]struct{}
+	uploaded        map[string]struct{}
 	failure         string
 	stopped         bool
 }
 
 // replicationReport is the aggregate evidence of one sampling run.
 type replicationReport struct {
-	samples, behind, seen, verified int
+	samples, behind, seen, verified, uploaded int
+	// window names the backups a sample really caught between uploaded and
+	// verified, so the marker can quote state instead of a claim.
+	window []string
 }
 
 // watchReplication starts sampling. Call report to stop and evaluate it; the
@@ -1189,19 +1201,28 @@ func (f *fixture) watchReplication(t *testing.T) *replicationWatch {
 	w := &replicationWatch{
 		f: f, stopCh: make(chan struct{}), doneCh: make(chan struct{}),
 		seen: map[string]struct{}{}, verified: map[string]struct{}{},
+		uploaded: map[string]struct{}{},
 	}
 	go func() {
 		defer close(w.doneCh)
-		ticker := time.NewTicker(replicaSampleInterval)
-		defer ticker.Stop()
 		for {
-			if !w.sample() {
+			// The sampling period follows the observed state: while any copy is
+			// in flight the sampler runs at the fast period, so the window
+			// between the durable `uploaded` status and the verification
+			// readback cannot be skipped. Idle periods are sampled slowly, which
+			// keeps the request load off the run's own I/O.
+			busy := w.sample()
+			if w.finishing() {
 				return
+			}
+			period := replicaSampleInterval
+			if !busy {
+				period = replicaIdleSampleInterval
 			}
 			select {
 			case <-w.stopCh:
 				return
-			case <-ticker.C:
+			case <-time.After(period):
 			}
 		}
 	}()
@@ -1223,9 +1244,18 @@ func (w *replicationWatch) stopAfterFailure() {
 	<-w.doneCh
 }
 
-// sample reads one protection point and the replica statuses behind it. It
-// reports false once a read failed: the goroutine stops instead of retrying a
-// broken client for the rest of the scenario.
+// finishing reports whether the sampler must stop: a read failed or the
+// scenario stopped it.
+func (w *replicationWatch) finishing() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.failure != "" || w.stopped
+}
+
+// sample reads one protection point and the replica statuses behind it and
+// reports whether any copy was still in flight. A read failure records the
+// failure and stops the goroutine instead of retrying a broken client for the
+// rest of the scenario; the test goroutine reports it.
 func (w *replicationWatch) sample() bool {
 	protection, statuses, err := w.read()
 	if err != nil {
@@ -1238,10 +1268,26 @@ func (w *replicationWatch) sample() bool {
 	if violation := unverifiedRemotePoint(protection, statuses); violation != "" {
 		w.failLocked(violation)
 	}
-	if uploadedBehindLocal(protection, statuses) {
+	if observed := uploadedBehindRemote(protection, statuses); len(observed) > 0 {
 		w.behind++
+		for _, backup := range observed {
+			w.uploaded[backup] = struct{}{}
+		}
 	}
-	return true
+	return inFlight(statuses)
+}
+
+// inFlight reports whether any replica is queued for or in the middle of a
+// copy. Those are the states in which the uploaded window can open, so the
+// sampler must be at its fast period.
+func inFlight(statuses map[string]string) bool {
+	for _, status := range statuses {
+		switch status {
+		case "pending", "uploading", "uploaded":
+			return true
+		}
+	}
+	return false
 }
 
 // read fetches the protection view and then the replica statuses. The order
@@ -1286,25 +1332,31 @@ func unverifiedRemotePoint(protection dispatch.Protection, statuses map[string]s
 	return ""
 }
 
-// uploadedBehindLocal reports a real sample of the uploaded-but-unverified
-// window: the local point is ahead of the newest remote point and its own
-// replica is still pending, uploading or uploaded.
-func uploadedBehindLocal(protection dispatch.Protection, statuses map[string]string) bool {
-	if protection.Local == nil {
-		return false
+// uploadedBehindRemote reports the backups of one real uploaded-but-unverified
+// sample: each is exactly `uploaded` in SQLite while the remote protection point
+// still does not include it. `pending` and `uploading` mean the copy is not
+// committed yet, so they say nothing about whether uploaded is treated as
+// verified, and a failed or exhausted row is a different state again. A replica
+// status only moves forward, and it is read after the protection view, so a row
+// that is uploaded here was not verified when the protection view was read
+// either.
+func uploadedBehindRemote(protection dispatch.Protection, statuses map[string]string) []string {
+	remote := make(map[string]struct{}, len(protection.Remote))
+	for _, point := range protection.Remote {
+		remote[point.BackupID] = struct{}{}
 	}
-	latest := ""
-	if len(protection.Remote) > 0 {
-		latest = protection.Remote[len(protection.Remote)-1].BackupID
+	var observed []string
+	for backup, status := range statuses {
+		if status != "uploaded" {
+			continue
+		}
+		if _, included := remote[backup]; included {
+			continue
+		}
+		observed = append(observed, backup)
 	}
-	if latest == protection.Local.BackupID {
-		return false
-	}
-	switch statuses[protection.Local.BackupID] {
-	case "pending", "uploading", "uploaded":
-		return true
-	}
-	return false
+	slices.Sort(observed)
+	return observed
 }
 
 // replicaStatuses reads every replica status of the fixture source from SQLite.
@@ -1352,7 +1404,15 @@ func (w *replicationWatch) report(t *testing.T) replicationReport {
 	if w.samples == 0 {
 		t.Fatal("the replication sampler never ran a complete sample")
 	}
-	return replicationReport{samples: w.samples, behind: w.behind, seen: len(w.seen), verified: len(w.verified)}
+	window := make([]string, 0, len(w.uploaded))
+	for backup := range w.uploaded {
+		window = append(window, backup)
+	}
+	slices.Sort(window)
+	return replicationReport{
+		samples: w.samples, behind: w.behind, seen: len(w.seen), verified: len(w.verified),
+		uploaded: len(w.uploaded), window: window,
+	}
 }
 
 // get performs one read used from the sampler goroutine, where a test helper
@@ -1410,9 +1470,9 @@ func ptrString(value *string) string {
 	return *value
 }
 
-func errorClass(run store.Run) string {
-	if run.ErrorClass == nil {
-		return ""
-	}
-	return *run.ErrorClass
-}
+// errorClass and errorCode dereference the run's optional failure fields, so a
+// failure message prints the class and code themselves rather than two
+// pointers.
+func errorClass(run store.Run) string { return ptrString(run.ErrorClass) }
+
+func errorCode(run store.Run) string { return ptrString(run.ErrorCode) }

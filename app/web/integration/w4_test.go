@@ -34,7 +34,7 @@ var w4ResultMarkers = []string{
 
 var w4StateMarkers = []string{
 	"chain=seq:1,2,3", "lsn_continuous=true", "conflict=409", "replicas_verified=3",
-	"protection_requires_verified=true uploaded_window=observed",
+	"protection_requires_verified=true uploaded_window=observed", "uploaded_backups=",
 	"logs_agree=sqlite", "lists_agree=sqlite,local,ftp",
 	"running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint",
 	"canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true",

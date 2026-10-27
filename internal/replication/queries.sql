@@ -48,22 +48,24 @@ UPDATE replicas SET status = 'uploading', updated_at = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
   AND status IN ('pending', 'failed', 'uploading');
 
--- name: SetReplicaUploaded :exec
+-- name: SetReplicaUploaded :execrows
 -- uploaded keeps failed_since: the copy is committed but still unprotected until
--- the readback proves it, so the alert clock must not restart here.
+-- the readback proves it, so the alert clock must not restart here. The row is
+-- scoped to this (backup, repository, local repository) triple, so zero affected
+-- rows is an error the caller must not ignore.
 UPDATE replicas
 SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, ?), next_attempt_at = ?, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
--- name: SetReplicaVerified :exec
+-- name: SetReplicaVerified :execrows
 UPDATE replicas
 SET status = 'verified', verified_at = ?, uploaded_at = COALESCE(uploaded_at, ?),
     permanent = 0, failed_since = NULL, alert_since = NULL, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
--- name: SetReplicaFailed :exec
+-- name: SetReplicaFailed :execrows
 UPDATE replicas
 SET status = ?, attempts = ?, permanent = ?, next_attempt_at = ?,
     failed_since = COALESCE(failed_since, ?), last_error_code = ?, last_reply_code = ?,
@@ -74,9 +76,10 @@ WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 UPDATE replicas SET alert_since = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ? AND alert_since IS NULL;
 
--- name: ResetReplicaAttempt :exec
+-- name: ResetReplicaAttempt :execrows
 -- A manual retry restarts the attempt budget and the schedule but keeps the
--- history counters: the item has been unprotected since failed_since.
+-- history counters: the item has been unprotected since failed_since. Zero
+-- affected rows is sql.ErrNoRows for the caller: the pair has no such replica.
 UPDATE replicas
 SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = ?, updated_at = ?
 WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
