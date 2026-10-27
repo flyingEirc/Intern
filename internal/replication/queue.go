@@ -632,26 +632,31 @@ type pointRow struct {
 	verifiedAt                sql.NullString
 }
 
-// verifiedPrefix is the last item of the longest prefix of rows already ordered
-// by chain position that is all-verified and chain-complete. A chain is complete
-// when it is on the repository from seq 1 with no gap in seq. Two rules decide
-// where the prefix ends:
+// verifiedPrefix is the protection point of rows already ordered by chain
+// position: the latest member of the last chain that is complete and fully
+// verified and that the scan reached before any unverified row of a chain no
+// gap had dropped. A chain is complete when it is on the repository from seq 1
+// with no gap in seq. Two rules decide where the claimed prefix ends:
 //
-//   - A row that is present but not verified ends the prefix. R1's rule holds
-//     without exception: a point is never claimed across a copy this repository
-//     has not proven.
-//   - A seq gap drops only the chain it falls in. That chain's members before the
-//     gap stay in the prefix - each of them is present and verified from the
-//     chain's first member - and its members at or beyond the gap are skipped, so
-//     they can never become the point. The scan then continues with the next
-//     chain. Nothing in production closes a gap: the pair that produced the
-//     missing member is the only one that could enqueue it, and no path deletes a
-//     replica row, so an incomplete chain must not pin the point for every later
-//     one.
+//   - A row that is present but not verified ends the prefix - for every chain
+//     the scan can still claim. R1's rule holds without exception over those
+//     chains: a point is never claimed across a copy of a chain it could
+//     depend on that this repository has not proven. Rows of a chain a seq gap
+//     has dropped are the one exception; see below.
+//   - A seq gap drops only the chain it falls in. That chain's members before
+//     the gap stay in the prefix - each is present and verified from the chain's
+//     first member. The rest of that chain is skipped, present-but-unverified
+//     rows included, so nothing at or beyond the gap can become the point. The
+//     scan then continues with the next chain, which means a point can sit past
+//     an unverified row as long as that row's own chain was dropped by a gap.
+//     The point never depends on such a row, because its base is missing from
+//     the repository. Nothing in production closes a gap: the pair that produced
+//     the missing member is the only one that could enqueue it, and no path
+//     deletes a replica row, so an incomplete chain must not pin the point for
+//     every later one.
 //
-// The point is therefore the latest member of the last fully verified complete
-// chain in the prefix. A verified incremental whose base never reached the
-// repository is skipped with the rest of its chain and never becomes the point.
+// A verified incremental whose base never reached the repository is skipped
+// with the rest of its chain and never becomes the point.
 func verifiedPrefix(rows []pointRow) (*Point, error) {
 	var point *Point
 	complete := make(map[string]bool, len(rows))

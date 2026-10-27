@@ -1158,8 +1158,13 @@ paths:
         local is the latest locally completed backup whose chain prefix is all
         completed. remote holds one point per replica repository, taken from the
         union of that source's replicas on the repository across every
-        (local, replica) pair: the union is ordered by chain position and the
-        point is the last item of its longest all-verified prefix. Only verified
+        (local, replica) pair: the union is ordered by chain position. A present
+        but unverified row ends the scan. A seq gap drops only the chain it
+        falls in: the rest of that chain is skipped, including its
+        present-but-unverified rows, and the scan continues with the next
+        chain. The point is therefore the latest member of the last chain that
+        is fully verified, present from seq 1 with no gap, and reached before
+        any unverified row of a chain no gap had dropped. Only verified
         replicas advance it, uploaded is never treated as verified, and proof
         times are never compared. Either side is null when no such point exists.
       responses:
