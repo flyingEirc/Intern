@@ -295,14 +295,6 @@ SELECT * FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1;
 SELECT COUNT(*) FROM runs
 WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running');
 
--- name: SourceLocalRepositories :many
--- The local repositories that hold one source's backups, from each producing
--- run's snapshot. A policy edit never moves a backup that already exists.
-SELECT DISTINCT r.local_repository_id AS local_repository_id
-FROM runs r
-WHERE r.source_id = ? AND r.backup_id IS NOT NULL AND r.local_repository_id IS NOT NULL
-ORDER BY r.local_repository_id;
-
 -- name: PairBackups :many
 -- Every backup published by a run claimed with exactly this
 -- (local_repository_id, replica_repository_id) pair. A backup produced on

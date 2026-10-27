@@ -1694,38 +1694,6 @@ func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicySchedulePa
 	return i, err
 }
 
-const sourceLocalRepositories = `-- name: SourceLocalRepositories :many
-SELECT DISTINCT r.local_repository_id AS local_repository_id
-FROM runs r
-WHERE r.source_id = ? AND r.backup_id IS NOT NULL AND r.local_repository_id IS NOT NULL
-ORDER BY r.local_repository_id
-`
-
-// The local repositories that hold one source's backups, from each producing
-// run's snapshot. A policy edit never moves a backup that already exists.
-func (q *Queries) SourceLocalRepositories(ctx context.Context, sourceID string) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, sourceLocalRepositories, sourceID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []sql.NullString{}
-	for rows.Next() {
-		var local_repository_id sql.NullString
-		if err := rows.Scan(&local_repository_id); err != nil {
-			return nil, err
-		}
-		items = append(items, local_repository_id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const tombstoneActive = `-- name: TombstoneActive :one
 SELECT expiry FROM session_tombstones WHERE token = ? AND expiry > ?
 `

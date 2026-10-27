@@ -597,20 +597,68 @@ ORDER BY b.seq`, backupID, localRepositoryID, replicaRepositoryID)
 	return predecessors, rows.Err()
 }
 
-// SourceLocalRepositories lists the local repositories that hold one source's
-// backups, from each producing run's snapshot.
-func (s *Store) SourceLocalRepositories(ctx context.Context, sourceID string) ([]string, error) {
-	rows, err := storesql.New(s.db).SourceLocalRepositories(ctx, sourceID)
+// ReplicaLocalRepository returns the local repository a replica row binds one
+// backup to on one replica repository: the queue that owns the copy. The run's
+// snapshot cannot answer this. A backup is enqueued on a pair after the policy
+// moved to it - the predecessor pull queues a base whose own run named no
+// replica repository, or another pair's repository - so only the row written at
+// enqueue time records which local repository the payload is read from. The
+// manual retry resolves its pair through it, which is what lets an operator
+// unblock a queue whose predecessor was pulled rather than produced.
+//
+// The statement reads the replication package's replicas table, which sqlc
+// cannot model from the Web schema, so it is a raw query like
+// ChainPredecessorsForPair. A backup with no row on the repository reports
+// ErrNotFound.
+func (s *Store) ReplicaLocalRepository(ctx context.Context, backupID, replicaRepositoryID string) (string, error) {
+	var localID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT local_repository_id FROM replicas WHERE backup_id = ? AND repository_id = ?`,
+		backupID, replicaRepositoryID).Scan(&localID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	if localID == "" {
+		// A row from before the local repository was recorded matches no pair and
+		// is inert; retrying it could not reach a queue, so report it as absent.
+		return "", ErrNotFound
+	}
+	return localID, nil
+}
+
+// ReplicaLocalRepositories lists the local repositories whose queue holds a
+// replica row for one backup, in id order. The replica row is the binding of a
+// copy: it names the queue that owns it and the local repository the payload is
+// read from, so every path that answers for one backup's copies resolves its
+// pairs through it - the list page, the backup view, the repository-wide point and
+// the manual retry all read the same rows. A run snapshot cannot answer it: a
+// chain base queued by the predecessor pull was produced by a run that named no
+// replica repository at all.
+//
+// The statement reads the replication package's replicas table, which sqlc cannot
+// model from the Web schema, so it is a raw query like ChainPredecessorsForPair.
+// An inert row from before the local repository was recorded names nothing and is
+// left out: no pair can read it.
+func (s *Store) ReplicaLocalRepositories(ctx context.Context, backupID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT local_repository_id FROM replicas
+WHERE backup_id = ? AND local_repository_id <> '' ORDER BY local_repository_id`, backupID)
 	if err != nil {
 		return nil, err
 	}
-	holders := make([]string, 0, len(rows))
-	for _, row := range rows {
-		if row.Valid {
-			holders = append(holders, row.String)
+	defer func() { _ = rows.Close() }() //nolint:errcheck // best-effort cleanup; the scan error or rows.Err() carries the failure
+	locals := make([]string, 0)
+	for rows.Next() {
+		var localID string
+		if err = rows.Scan(&localID); err != nil {
+			return nil, err
 		}
+		locals = append(locals, localID)
 	}
-	return holders, nil
+	return locals, rows.Err()
 }
 
 // ReplicationPair is one (local, replica) repository pair the dispatcher serves.

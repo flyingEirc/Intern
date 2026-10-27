@@ -912,6 +912,108 @@ func TestCrossLocalChainNeverClaimsTheOtherLocalBase(t *testing.T) {
 	requireNoRemotePoint(t, s)
 }
 
+// TestProtectionPointAdvancesPastAGappedChain is the advisor's Z1 single-policy
+// reproduction: one policy produced the chain's full on l1 with no replica
+// repository, a PUT moved it to (l2, r), and the same source then produced an
+// incremental of that chain plus a complete new chain. The first chain is
+// permanently incomplete on r - its base was produced elsewhere and no pull can
+// bring it - so the gap must drop only that chain, and the verified chains after
+// it must still reach the point. Before the fix the gap ended the whole scan, so
+// the repository reported no point at all, forever.
+func TestProtectionPointAdvancesPastAGappedChain(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
+	base := time.Date(2026, 1, 9, 8, 0, 0, 0, time.UTC)
+	gapBase, _ := s.publishMember(t, plain, "z1-full", "full", base)
+	paired := s.updatePolicyPair(t, plain, s.l2.ID, &s.ftp.ID)
+	gapped, _ := s.publishMember(t, paired, "z1-inc", "incremental", base.Add(time.Hour))
+	second, _ := s.publishMember(t, paired, "z1-next-0", "full", base.Add(2*time.Hour))
+	third, _ := s.publishMember(t, paired, "z1-next-1", "incremental", base.Add(3*time.Hour))
+	fourth, _ := s.publishMember(t, paired, "z1-next-2", "full", base.Add(4*time.Hour))
+
+	if err := s.dispatcher.openPair(t.Context(), s.l2.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The other local repository's full never reaches this pair, which is the
+	// gap; everything the pair produced is queued.
+	assertNoQueuedReplica(t, s.fixture, gapBase, s.ftp.ID)
+	for _, backupID := range []string{gapped, second, third, fourth} {
+		assertQueuedReplica(t, s.fixture, backupID, s.ftp.ID)
+	}
+
+	// The gapped chain's member is verified first: it proves nothing on its own,
+	// and it must not be claimed as the point either.
+	markReplicaVerifiedAt(t, s.database, gapped, s.ftp.ID, s.l2.ID, base.Add(5*time.Hour))
+	requireNoRemotePoint(t, s)
+
+	// Each complete chain then moves the point to its own latest member, and the
+	// gapped chain never comes back into it.
+	markReplicaVerifiedAt(t, s.database, second, s.ftp.ID, s.l2.ID, base.Add(6*time.Hour))
+	requireRemotePoint(t, s, second)
+	markReplicaVerifiedAt(t, s.database, third, s.ftp.ID, s.l2.ID, base.Add(7*time.Hour))
+	requireRemotePoint(t, s, third)
+	markReplicaVerifiedAt(t, s.database, fourth, s.ftp.ID, s.l2.ID, base.Add(8*time.Hour))
+	requireRemotePoint(t, s, fourth)
+
+	// The pair's own point agrees with the repository-wide union.
+	pair, err := s.dispatcher.replicatorForPair(s.l2.ID, s.ftp.ID).RemotePoint(t.Context(), s.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair == nil || pair.BackupID != fourth {
+		t.Fatalf("pair point = %+v, want %s", pair, fourth)
+	}
+}
+
+// TestProtectionPointOfAP7bChainFollowedByANewChain is the advisor's Z1 second
+// probe: the P7b shape (a cross-local chain whose base is unprovable on the
+// repository) followed by a brand-new complete chain. The new chain must become
+// the point; P7b's gap must never be claimed.
+func TestProtectionPointOfAP7bChainFollowedByANewChain(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
+	base := time.Date(2026, 1, 9, 9, 0, 0, 0, time.UTC)
+	foreignBase, _ := s.publishMember(t, plain, "z1b-full", "full", base)
+	// policyB is (l2, r): its incremental extends the chain foreignBase started.
+	orphaned, _ := s.publishMember(t, s.policyB, "z1b-inc", "incremental", base.Add(time.Hour))
+	ownBase, _ := s.publishMember(t, s.policyB, "z1b-new-full", "full", base.Add(2*time.Hour))
+	ownInc, _ := s.publishMember(t, s.policyB, "z1b-new-inc", "incremental", base.Add(3*time.Hour))
+
+	if err := s.dispatcher.openPair(t.Context(), s.l2.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertNoQueuedReplica(t, s.fixture, foreignBase, s.ftp.ID)
+
+	// P7b alone: the cross-local chain contributes nothing, so the repository has
+	// no point at all.
+	markReplicaVerifiedAt(t, s.database, orphaned, s.ftp.ID, s.l2.ID, base.Add(4*time.Hour))
+	requireNoRemotePoint(t, s)
+
+	// The new chain is on the repository from seq 1 and verified: it is the
+	// point, and its last member wins as each member is proven.
+	markReplicaVerifiedAt(t, s.database, ownBase, s.ftp.ID, s.l2.ID, base.Add(5*time.Hour))
+	requireRemotePoint(t, s, ownBase)
+	markReplicaVerifiedAt(t, s.database, ownInc, s.ftp.ID, s.l2.ID, base.Add(6*time.Hour))
+	requireRemotePoint(t, s, ownInc)
+
+	point := s.remotePoint(t)
+	if point != nil && point.ChainID == chainOf(t, s, orphaned) {
+		t.Fatalf("remote point = %+v, must never be claimed from the gapped chain", *point)
+	}
+}
+
+// chainOf reads the chain id one backup belongs to, so a test can name the chain
+// a point must not come from.
+func chainOf(t *testing.T, s *sharedFTPFixture, backupID string) string {
+	t.Helper()
+	var chainID string
+	if err := s.database.DB().QueryRowContext(t.Context(),
+		`SELECT chain_id FROM backups WHERE id = ?`, backupID).Scan(&chainID); err != nil {
+		t.Fatal(err)
+	}
+	return chainID
+}
+
 // TestReplicationPairsDropsAPairWhoseRepositoryIsGone pins the repository
 // existence check inside ReplicationPairs. Deleting a repository is refused
 // while runs reference it, so the state the check defends against — a completed
@@ -942,6 +1044,164 @@ func TestReplicationPairsDropsAPairWhoseRepositoryIsGone(t *testing.T) {
 	}
 	if len(pairs) != 0 {
 		t.Fatalf("replication pairs = %+v, want none: every pair names a missing repository", pairs)
+	}
+}
+
+// TestReplicaRetryReachesAPulledPredecessor is the advisor's Z2: the manual
+// retry must resolve the pair from the replica row, not from the producing run's
+// snapshot. A chain base the predecessor pull queued was produced by a run that
+// named no replica repository at all, so a snapshot-based lookup answers 404 for
+// exactly the row that blocks the queue: with the base exhausted, StepItem
+// attempts nothing, the remote point stays unset, and no API call can repair it.
+func TestReplicaRetryReachesAPulledPredecessor(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil) // (l1, no replica)
+	base := time.Date(2026, 1, 8, 8, 0, 0, 0, time.UTC)
+	full, fullRun := s.publishMember(t, plain, "z2-full", "full", base)
+	paired := s.updatePolicyPair(t, plain, s.l1.ID, &s.ftp.ID)
+	incremental, _ := s.publishMember(t, paired, "z2-inc", "incremental", base.Add(time.Hour))
+
+	// The pull queues the base, and its producing run really does name no replica
+	// repository: that is the state a snapshot lookup cannot resolve.
+	if err := s.dispatcher.openPair(t.Context(), s.l1.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertQueuedReplica(t, s.fixture, full, s.ftp.ID)
+	assertRunNamesNoReplicaRepository(t, s, fullRun)
+	replicator := s.dispatcher.replicatorForPair(s.l1.ID, s.ftp.ID)
+
+	// The base exhausted its attempts, so the queue is blocked behind it.
+	upsertReplica(t, s.database, full, s.ftp.ID, s.l1.ID, replication.StatusExhausted)
+	assertBlockedBehindTheExhaustedBase(t, s, full, replicator)
+	assertRetryReopensTheBase(t, s, full, replicator)
+
+	// Once both members are verified the point advances over the repaired pair.
+	markReplicaVerifiedAt(t, s.database, full, s.ftp.ID, s.l1.ID, base.Add(2*time.Hour))
+	requireRemotePoint(t, s, full)
+	markReplicaVerifiedAt(t, s.database, incremental, s.ftp.ID, s.l1.ID, base.Add(3*time.Hour))
+	requireRemotePoint(t, s, incremental)
+}
+
+// assertRunNamesNoReplicaRepository requires one run's snapshot to name no
+// replica repository, which is the state the predecessor pull produces: the base
+// was produced before the policy had one.
+func assertRunNamesNoReplicaRepository(t *testing.T, s *sharedFTPFixture, runID string) {
+	t.Helper()
+	producer, err := s.database.Run(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if producer.ReplicaRepositoryID != nil {
+		t.Fatalf("run %s snapshot replica = %v, want none", runID, *producer.ReplicaRepositoryID)
+	}
+}
+
+// assertBlockedBehindTheExhaustedBase requires the queue to be stuck: no step is
+// possible, no point is proven, yet every read path still shows the row that
+// blocks. BackupView and Replicas resolve pairs from the replica table, so an
+// operator can always see the blocked copy and name it in a retry.
+func assertBlockedBehindTheExhaustedBase(t *testing.T, s *sharedFTPFixture, backupID string,
+	replicator *replication.Replicator,
+) {
+	t.Helper()
+	view, err := s.dispatcher.BackupView(t.Context(), backupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Replicas) != 1 || view.Replicas[0].Status != replication.StatusExhausted {
+		t.Fatalf("backup view replicas = %+v, want the exhausted row on the shared repository",
+			view.Replicas)
+	}
+	views, err := s.dispatcher.Replicas(t.Context(), ReplicaFilter{SourceID: s.source.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 || views[0].RepositoryID != s.ftp.ID {
+		t.Fatalf("replica list = %+v, want both queue rows on the shared repository", views)
+	}
+	requireNoRemotePoint(t, s)
+	if stepped, attempted, stepErr := replicator.StepItem(t.Context()); attempted || stepErr != nil {
+		t.Fatalf("step behind an exhausted base = %+v, %v, %v; want nothing attempted",
+			stepped, attempted, stepErr)
+	}
+}
+
+// assertRetryReopensTheBase requires the manual retry to reach the pulled
+// predecessor through its own pair, restart its budget, and let the queue step
+// it again. The memory remote cannot copy, so the attempt may fail; what is under
+// test is that the blocked predecessor is workable again.
+func assertRetryReopensTheBase(t *testing.T, s *sharedFTPFixture, backupID string,
+	replicator *replication.Replicator,
+) {
+	t.Helper()
+	if retryErr := s.dispatcher.ReplicaRetry(t.Context(), backupID, s.ftp.ID); retryErr != nil {
+		t.Fatalf("retry of a predecessor the pull queued: %v", retryErr)
+	}
+	retried, err := replicator.Replica(t.Context(), backupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != replication.StatusPending {
+		t.Fatalf("retried replica status = %s, want pending", retried.Status)
+	}
+	stepped, attempted, stepErr := replicator.StepItem(t.Context())
+	if !attempted {
+		t.Fatalf("step after the retry attempted nothing: %+v, %v", stepped, stepErr)
+	}
+	if stepped.BackupID != backupID {
+		t.Fatalf("stepped backup = %s, want the retried predecessor %s", stepped.BackupID, backupID)
+	}
+}
+
+// TestBackupViewAndRetryResolveTheReplicaRowNotTheRunSnapshot pins the rule the
+// manual retry follows: the replica row is the binding of a copy, and every path
+// that answers for one backup's copies reads it. A run written before the local
+// repository was recorded in the run snapshot names nothing, so a snapshot-derived
+// pair lookup loses the row from the backup view while the replica list and the
+// repository point still count it. Reading the row's own local_repository_id keeps
+// the four paths in agreement.
+func TestBackupViewAndRetryResolveTheReplicaRowNotTheRunSnapshot(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
+	at := time.Date(2026, 1, 10, 8, 0, 0, 0, time.UTC)
+	full, _ := s.publishMember(t, plain, "row-full", "full", at)
+	paired := s.updatePolicyPair(t, plain, s.l1.ID, &s.ftp.ID)
+	incremental, _ := s.publishMember(t, paired, "row-inc", "incremental", at.Add(time.Hour))
+	if err := s.dispatcher.openPair(t.Context(), s.l1.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The pre-upgrade shape: no run of this source names a local repository, so a
+	// snapshot-derived read has nothing to scope itself by.
+	if _, err := s.database.DB().ExecContext(t.Context(),
+		`UPDATE runs SET local_repository_id = NULL WHERE source_id = ?`, s.source.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The replica list and the backup view agree on one row per queue, because
+	// both read the replica rows.
+	views, err := s.dispatcher.Replicas(t.Context(), ReplicaFilter{SourceID: s.source.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 2 {
+		t.Fatalf("replica list = %+v, want both queued rows", views)
+	}
+	view, err := s.dispatcher.BackupView(t.Context(), full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Replicas) != 1 || view.Replicas[0].RepositoryID != s.ftp.ID {
+		t.Fatalf("backup view replicas = %+v, want the base's row on the shared repository",
+			view.Replicas)
+	}
+
+	// And the retry reaches the same row through the same pair.
+	if retryErr := s.dispatcher.ReplicaRetry(t.Context(), full, s.ftp.ID); retryErr != nil {
+		t.Fatalf("retry after the run snapshot lost its local repository: %v", retryErr)
+	}
+	if _, err := s.dispatcher.BackupView(t.Context(), incremental); err != nil {
+		t.Fatalf("backup view of the untouched member: %v", err)
 	}
 }
 

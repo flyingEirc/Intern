@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -761,5 +762,189 @@ func TestRemotePointRequiresTheChainFromItsFirstMember(t *testing.T) {
 	union, err := RepositoryRemotePoint(t.Context(), f.db, engineRepoID, engineSourceID)
 	if err != nil || union != nil {
 		t.Fatalf("repository point = %+v, %v; want none for a chain that starts at seq 2", union, err)
+	}
+}
+
+// verifiedRow builds one row of a scan input: chain position and status carry
+// the decision, the proof time only has to exist and be distinct so a wrong
+// pick is visible in the failure message.
+func verifiedRow(backupID, chainID string, seq int64, status string) pointRow {
+	row := pointRow{backupID: backupID, chainID: chainID, chainSeq: seq, status: status}
+	if status == StatusVerified {
+		row.verifiedAt = nullableStamp(time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC))
+	}
+	return row
+}
+
+// TestVerifiedPrefixGapSkipsOnlyItsChain is the advisor's Z1: the seq check must
+// drop the rest of the chain the gap falls in and keep scanning, so a chain that
+// is permanently incomplete cannot pin the remote point for every later chain.
+// A row that is present but not verified still ends the prefix, because R1 never
+// skips an unverified predecessor.
+func TestVerifiedPrefixGapSkipsOnlyItsChain(t *testing.T) {
+	tests := []struct {
+		name  string
+		rows  []pointRow
+		want  string // expected point backup id, empty for none
+		chain string // and its chain id
+	}{
+		{
+			// The single-policy reproduction: a policy produced sp-inc on another
+			// local repository, then (l2, r) produced a full and two members after
+			// it. Every row is verified; sp-inc's chain base never reached r.
+			name: "every later chain stays claimable after one gapped chain",
+			rows: []pointRow{
+				verifiedRow("sp-inc", "chain-a", 2, StatusVerified), verifiedRow("sp-next-0", "chain-b", 1, StatusVerified),
+				verifiedRow("sp-next-1", "chain-b", 2, StatusVerified), verifiedRow("sp-next-2", "chain-b", 3, StatusVerified),
+			},
+			want:  "sp-next-2",
+			chain: "chain-b",
+		},
+		{
+			// P7b followed by a new chain: the cross-local incremental is verified
+			// on the repository, but its base lives on another local repository and
+			// never arrives, so the whole chain is skipped and never claimed.
+			name: "a gapped chain's later members are never claimed",
+			rows: []pointRow{
+				verifiedRow("p7b-inc", "chain-a", 2, StatusVerified), verifiedRow("p9-full", "chain-b", 1, StatusVerified),
+				verifiedRow("p9-inc", "chain-b", 2, StatusVerified),
+			},
+			want:  "p9-inc",
+			chain: "chain-b",
+		},
+		{
+			name: "an intermediate gap keeps the member before it and the later chains",
+			rows: []pointRow{
+				verifiedRow("a-1", "chain-a", 1, StatusVerified), verifiedRow("a-3", "chain-a", 3, StatusVerified),
+				verifiedRow("b-1", "chain-b", 1, StatusVerified),
+			},
+			want:  "b-1",
+			chain: "chain-b",
+		},
+		{
+			// The gap rule is chain-local only: the prefix still stops at the first
+			// row that is present and unproven, so a pending member bounds it and
+			// the last fully verified complete chain before it stays the point.
+			name: "an unverified row ends the prefix",
+			rows: []pointRow{
+				verifiedRow("a-1", "chain-a", 1, StatusVerified), verifiedRow("a-2", "chain-a", 2, StatusVerified),
+				verifiedRow("b-1", "chain-b", 1, StatusPending), verifiedRow("b-2", "chain-b", 2, StatusVerified),
+			},
+			want: "a-2", chain: "chain-a",
+		},
+		{
+			// An exhausted predecessor is unverified for the point as well.
+			name: "an exhausted row ends the prefix",
+			rows: []pointRow{
+				verifiedRow("a-1", "chain-a", 1, StatusVerified), verifiedRow("a-2", "chain-a", 2, StatusExhausted),
+				verifiedRow("b-1", "chain-b", 1, StatusVerified),
+			},
+			want: "a-1", chain: "chain-a",
+		},
+		{
+			// A base-only chain that never reached the repository alone still
+			// proves nothing.
+			name: "a chain that starts above seq 1 alone proves nothing",
+			rows: []pointRow{verifiedRow("a-2", "chain-a", 2, StatusVerified), verifiedRow("a-3", "chain-a", 3, StatusVerified)},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			point, err := verifiedPrefix(test.rows)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.want == "" {
+				if point != nil {
+					t.Fatalf("point = %+v, want none", *point)
+				}
+				return
+			}
+			if point == nil || point.BackupID != test.want || point.ChainID != test.chain {
+				t.Fatalf("point = %+v, want %s of %s", point, test.want, test.chain)
+			}
+		})
+	}
+}
+
+// TestRemotePointContinuesPastAGappedChain is Z1 at the read boundary: one chain
+// is missing its base on the repository and a complete later chain is fully
+// verified there, so both the pair point and the repository-wide union name the
+// later chain's last member instead of nothing.
+func TestRemotePointContinuesPastAGappedChain(t *testing.T) {
+	f := newEngine(t)
+
+	// Chain A is the gapped one: its full never reached the repository, its
+	// incremental did. Chain B is complete there: a full and one incremental.
+	aFull := f.newBackup(engineSourceID, 0)
+	aInc := f.newBackup(engineSourceID, 1)
+	bFull := f.newBackup(engineSourceID, 0)
+	bInc := f.newBackup(engineSourceID, 1)
+	enqueueRecords(t, f, aFull, aInc, bFull, bInc)
+	// A's base is not on the repository: the chain never starts at seq 1 there.
+	deleteReplicaRows(t, f, aFull.id)
+	for _, record := range []backupRecord{aInc, bFull, bInc} {
+		f.assertVerified(record.id)
+	}
+
+	// The gapped chain's verified incremental is skipped with the rest of its
+	// chain, and the scan claims the complete later chain.
+	assertRemotePoint(t, f, bInc)
+	union, err := RepositoryRemotePoint(t.Context(), f.db, engineRepoID, engineSourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if union == nil || union.BackupID != bInc.id || union.ChainID != bInc.chainID {
+		t.Fatalf("repository point = %+v, want %s of %s", union, bInc.id, bInc.chainID)
+	}
+
+	// With only the gapped chain on the repository, nothing is claimed: the skip
+	// is not a licence to name a member of an incomplete chain.
+	deleteReplicaRows(t, f, bFull.id, bInc.id)
+	assertNoRemotePoint(t, f, "one incomplete chain")
+
+	// A row that is present but not verified still ends the prefix: chain B is
+	// queued again with its base unproven, so its later member and the gapped
+	// chain above it prove nothing.
+	enqueueRecords(t, f, bFull, bInc)
+	assertNoRemotePoint(t, f, "an unverified predecessor")
+}
+
+// enqueueRecords queues records on the fixture's own pair.
+func enqueueRecords(t *testing.T, f *engineFixture, records ...backupRecord) {
+	t.Helper()
+	for _, record := range records {
+		if err := f.r.Enqueue(t.Context(), record.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// deleteReplicaRows removes replica rows from the queue. No production path
+// deletes one; the rows stand in for members that never reached the repository,
+// because the queue row is the only thing the prefix scan reads.
+func deleteReplicaRows(t *testing.T, f *engineFixture, backupIDs ...string) {
+	t.Helper()
+	args := make([]any, 0, len(backupIDs)+1)
+	args = append(args, engineRepoID)
+	for _, id := range backupIDs {
+		args = append(args, id)
+	}
+	query := `DELETE FROM replicas WHERE repository_id = ? AND backup_id IN (` +
+		strings.TrimSuffix(strings.Repeat("?,", len(backupIDs)), ",") + `)`
+	if _, err := f.db.ExecContext(t.Context(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertNoRemotePoint requires the pair to prove nothing for the fixture source.
+func assertNoRemotePoint(t *testing.T, f *engineFixture, why string) {
+	t.Helper()
+	point, err := f.r.RemotePoint(t.Context(), engineSourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if point != nil {
+		t.Fatalf("remote point = %+v, want none for %s", *point, why)
 	}
 }

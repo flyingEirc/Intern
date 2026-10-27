@@ -210,32 +210,55 @@ func TestReadyRequiresLiveExactVersion(t *testing.T) {
 	}
 }
 
-// TestCanceledCallerNeverPoisonsTheStore is the advisor's Y4 probe: write
-// transactions whose context is canceled microseconds after the call must not
-// leave the single pooled connection half-open. Before the fix the first
-// canceled RecordSourcePreflight locked the store, and every later write —
-// including Audit — failed with SQLITE_BUSY until the process restarted.
+// TestCanceledCallerNeverPoisonsTheStore is the advisor's Y4 probe, pinned with
+// a seam instead of a delay: a foreign connection holds the SQLite write lock,
+// so the store's BEGIN IMMEDIATE waits inside the driver with the single pooled
+// connection checked out. The test cancels the caller exactly there - observed
+// through ConnectionsInUse, not slept into - and then releases the lock. The
+// caller's context is only consulted before the transaction begins, so the
+// begin, every statement and the commit run under context.WithoutCancel: the
+// canceled write must still be stored, and no connection may be left half-open.
+// With the pre-fix cancellable BeginTx the transaction opens under an already
+// canceled context, the commit (or the rollback that replaces it) fails, and
+// every later write then waits out busy_timeout - which is exactly what the
+// follow-up writes below refuse to tolerate.
 func TestCanceledCallerNeverPoisonsTheStore(t *testing.T) {
-	s := openTestStore(t, privateTempDir(t))
+	s, path := openLockedStore(t)
 	source := createTestSource(t, s, "poison-source", "{{SECRET_poison_source}}")
 	failed := PreflightRecord{OK: false, Checks: []string{}, Warnings: []PreflightWarning{}}
-	for range 50 {
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
-			time.Sleep(10 * time.Microsecond)
-			cancel()
-		}()
-		// The outcome of the canceled call itself is irrelevant: what must hold
-		// is that the store stays writable afterwards.
-		_, _ = s.RecordSourcePreflight(ctx, source.ID, failed, SystemAudit("sources.preflight", AuditDetail{}))
-		cancel()
+	stored := PreflightRecord{OK: true, Checks: []string{"identity"}, Warnings: []PreflightWarning{}}
+
+	release := holdExternalWriteLock(t, path)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.RecordSourcePreflight(ctx, source.ID, failed, SystemAudit("sources.preflight", AuditDetail{}))
+		result <- err
+	}()
+
+	// The connection is checked out and the transaction's BEGIN IMMEDIATE is in
+	// flight: the pool reports it in use, and the write cannot have completed.
+	waitForConnection(t, s)
+	cancel()
+	// Let the cancellation be delivered while the begin is still waiting.
+	time.Sleep(200 * time.Millisecond)
+	release()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("write whose caller canceled mid-begin = %v, want the detached transaction to commit", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the canceled write never finished after the foreign lock was released")
 	}
 
 	write := func(what string, op func(context.Context) error) {
 		t.Helper()
 		start := time.Now()
 		if err := op(context.Background()); err != nil {
-			t.Fatalf("%s after canceled writers: %v", what, err)
+			t.Fatalf("%s after a canceled writer: %v", what, err)
 		}
 		if elapsed := time.Since(start); elapsed > 2*time.Second {
 			t.Fatalf("%s took %s; the single connection is poisoned", what, elapsed)
@@ -244,14 +267,28 @@ func TestCanceledCallerNeverPoisonsTheStore(t *testing.T) {
 	write("audit", func(ctx context.Context) error {
 		return s.Audit(ctx, SystemAudit("probe.audit", AuditDetail{}))
 	})
-	record := PreflightRecord{OK: true, Checks: []string{"identity"}, Warnings: []PreflightWarning{}}
 	var updated Source
 	write("preflight record", func(ctx context.Context) error {
 		var err error
-		updated, err = s.RecordSourcePreflight(ctx, source.ID, record, SystemAudit("sources.preflight", AuditDetail{}))
+		updated, err = s.RecordSourcePreflight(ctx, source.ID, stored, SystemAudit("sources.preflight", AuditDetail{}))
 		return err
 	})
 	if updated.LastPreflight == nil || !updated.LastPreflight.OK {
-		t.Fatalf("preflight record = %+v, want the stored observation", updated.LastPreflight)
+		t.Fatalf("preflight record = %+v, want the later observation to have replaced the canceled one",
+			updated.LastPreflight)
+	}
+}
+
+// waitForConnection requires the store's single pooled connection to be checked
+// out inside a driver call, which is the deterministic signal that a write holds
+// an open transaction.
+func waitForConnection(t *testing.T, s *Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for s.ConnectionsInUse() != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("connections in use = %d, want the write to hold the single connection", s.ConnectionsInUse())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -348,3 +348,56 @@ func assertTerminalFailure(t *testing.T, q *queueFixture, runID string) {
 		t.Fatalf("runs.canceled system audits = %d, want 0 without a cancel request", got)
 	}
 }
+
+// TestShutdownInsideTheRefuseReadEndsFailed pins the exact Y3 window with the
+// refuseReadGate seam instead of a delay: the run is held inside the pre-chain
+// cancel re-read, the worker's parent is canceled there, and the read is then
+// released. That read cannot succeed, so the only correct outcome is the terminal
+// failure preChainFailure writes - failed with class and code backup_failed.
+// Before the refuse read's error was routed through preChainFailure, this
+// boundary returned the raw error with no terminal write and left the row running
+// until the next start's recovery reclaimed it.
+func TestShutdownInsideTheRefuseReadEndsFailed(t *testing.T) {
+	q := newQueueFixture(t)
+	recordServerIdentity(t, q)
+	q.queued("shutdown-inside-refuse-read", store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
+	run := q.claim(t)
+
+	entered := make(chan struct{})
+	hold := make(chan struct{})
+	original := refuseReadGate
+	refuseReadGate = func() {
+		close(entered)
+		<-hold
+	}
+	t.Cleanup(func() { refuseReadGate = original })
+
+	// The run has to cross admission to reach the refuse read, so the preflight
+	// is the injected success probe, and the dispatcher is driven directly
+	// instead of started: a running worker loop would claim another run.
+	d := q.newDispatcher(time.Now)
+	d.config.Preflight = successPreflight{}
+
+	parent, cancelParent := context.WithCancel(q.t.Context())
+	result := make(chan error, 1)
+	go func() { result <- d.executeRun(parent, run) }()
+
+	select {
+	case <-entered:
+	case <-time.After(30 * time.Second):
+		close(hold)
+		t.Fatal("the run never reached the pre-chain cancel re-read")
+	}
+	// The shutdown lands while the read is still owed, which is the window the
+	// sweep could only ever hit by luck.
+	cancelParent()
+	close(hold)
+
+	if err := <-result; err != nil {
+		t.Fatalf("executeRun = %v, want the terminal write and no error", err)
+	}
+	assertShutdownOutcome(t, q, run.ID)
+	if stored := q.run(run.ID); stored.Status != store.RunStatusFailed {
+		t.Fatalf("run after the shutdown inside the refuse read = %+v, want failed", stored)
+	}
+}

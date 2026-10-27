@@ -633,19 +633,39 @@ type pointRow struct {
 }
 
 // verifiedPrefix is the last item of the longest prefix of rows already ordered
-// by chain position that is all-verified and chain-complete: every chain on the
-// way must be present from seq 1 with no gap in seq. A row ends the prefix when
-// it is unverified, or when it breaks its chain's seq continuity, so a chain
-// whose base or an intermediate member has no row on the repository contributes
-// nothing at or beyond the gap — a verified incremental whose base never
-// reached the repository can never become the point. A member before the gap
-// stays the point: it is present and verified from the chain's first member.
+// by chain position that is all-verified and chain-complete. A chain is complete
+// when it is on the repository from seq 1 with no gap in seq. Two rules decide
+// where the prefix ends:
+//
+//   - A row that is present but not verified ends the prefix. R1's rule holds
+//     without exception: a point is never claimed across a copy this repository
+//     has not proven.
+//   - A seq gap drops only the chain it falls in. That chain's members before the
+//     gap stay in the prefix - each of them is present and verified from the
+//     chain's first member - and its members at or beyond the gap are skipped, so
+//     they can never become the point. The scan then continues with the next
+//     chain. Nothing in production closes a gap: the pair that produced the
+//     missing member is the only one that could enqueue it, and no path deletes a
+//     replica row, so an incomplete chain must not pin the point for every later
+//     one.
+//
+// The point is therefore the latest member of the last fully verified complete
+// chain in the prefix. A verified incremental whose base never reached the
+// repository is skipped with the rest of its chain and never becomes the point.
 func verifiedPrefix(rows []pointRow) (*Point, error) {
 	var point *Point
+	complete := make(map[string]bool, len(rows))
 	expected := make(map[string]int64, len(rows))
 	for _, row := range rows {
+		// A member that is not the first of a chain the scan is still claiming
+		// contributes nothing, and neither does anything else in that chain:
+		// the gap dropped it, so skip to the next chain.
+		if !complete[row.chainID] && row.chainSeq != 1 {
+			continue
+		}
 		if row.chainSeq != expected[row.chainID]+1 {
-			break
+			complete[row.chainID] = false
+			continue
 		}
 		if row.status != StatusVerified {
 			break
@@ -657,6 +677,7 @@ func verifiedPrefix(rows []pointRow) (*Point, error) {
 		if verified == nil {
 			return nil, errors.New("replication: verified replica has no verification time")
 		}
+		complete[row.chainID] = true
 		expected[row.chainID] = row.chainSeq
 		point = &Point{BackupID: row.backupID, ChainID: row.chainID, At: *verified}
 	}

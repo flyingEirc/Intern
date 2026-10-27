@@ -186,13 +186,18 @@ type ChainView struct {
 // it: one FTP repository shared by two local repositories has one queue per
 // pair, and each queue only proves the copies of its own local repository. The
 // union is ordered by chain position and the point is the last item of its
-// longest prefix that is all-verified and chain-complete: every chain on the
-// way must be on the repository from seq 1 with no seq gap, so a chain whose
-// base or an intermediate member never reached the repository contributes
-// nothing at or beyond that gap. A pair that stops producing cannot pin the
-// point, and a point is never claimed across a backup that is not on that
-// repository or not verified there. Verification time is never compared: it
-// says when a copy was proven, not where the copy sits in the chain.
+// longest prefix under two rules: a row that is present but not verified ends
+// the prefix, so a point is never claimed across a copy this repository has
+// not proven; a seq gap skips only the remainder of the chain it falls in and
+// the scan continues with the next chain, because nothing in production ever
+// closes that gap and a permanently incomplete chain must not pin the point
+// for every later one. The point is therefore the latest member of the last
+// fully verified chain that is on the repository from seq 1 with no gap - a
+// verified incremental whose base never reached the repository is skipped with
+// the rest of its chain, and the preceding complete chain stays the point. A
+// pair that stops producing cannot pin the point, and verification time is
+// never compared: it says when a copy was proven, not where the copy sits in
+// the chain.
 func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protection, error) {
 	local, err := replication.LocalPoint(ctx, physicalstore.New(d.config.Database.DB()), sourceID)
 	if err != nil {
@@ -324,30 +329,40 @@ func (d *Dispatcher) ReplicaRetry(ctx context.Context, backupID, repositoryID st
 	return nil
 }
 
-// pairForBackup resolves the (local, replica) pair whose queue holds the
-// replica row of one backup: the pair its producing run was claimed with. The
-// run snapshot is the binding, so a retry still finds an old backup after a PUT
-// moved the policy to another repository. A missing pair or an uninstalled
-// replicator reports store.ErrNotFound, which the API answers as a 404.
+// pairForBackup resolves the (local, replica) pair whose queue holds the replica
+// row of one backup, from that row's own local_repository_id. The replica row is
+// the binding: it names the queue that owns the copy, and every enqueue path
+// writes it - including the predecessor pull, which queues a chain base whose
+// producing run named no replica repository at all, and a pair the policy moved
+// to later. Resolving through the run's snapshot instead answers 404 for exactly
+// the row an operator most needs to retry, and the queue then stays blocked
+// behind its exhausted predecessor with no API able to repair it.
+//
+// A row bound to a pair this process never installed - one whose policy moved on
+// and whose completed-run snapshot is gone - also reports store.ErrNotFound, which
+// the API answers as a 404: no replicator holds the FTP handle that row needs.
 func (d *Dispatcher) pairForBackup(ctx context.Context, backupID, repositoryID string) (*replication.Replicator, error) {
-	run, err := d.config.Database.RunByBackupID(ctx, backupID)
-	if err != nil || run.LocalRepositoryID == nil {
-		return nil, store.ErrNotFound
+	localID, err := d.config.Database.ReplicaLocalRepository(ctx, backupID, repositoryID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
 	}
-	if run.ReplicaRepositoryID == nil || *run.ReplicaRepositoryID != repositoryID {
-		return nil, store.ErrNotFound
-	}
-	replicator := d.replicatorForPair(*run.LocalRepositoryID, repositoryID)
+	replicator := d.replicatorForPair(localID, repositoryID)
 	if replicator == nil {
 		return nil, store.ErrNotFound
 	}
 	return replicator, nil
 }
 
-// BackupView reads one backup with its per-repository replicas. The replicas
-// are the union over the installed pairs of the backup's source: each pair's
-// queue only describes its own (local, replica) copy, so a replica repository
-// shared by two local repositories answers through both pairs.
+// BackupView reads one backup with its per-repository replicas. The pairs are the
+// ones whose replica rows hold this backup - the replica row is the binding, the
+// same one the replica list, the repository point and the manual retry read - so
+// a copy queued by the predecessor pull is shown even though its producing run
+// named no replica repository. Each pair's queue only describes its own
+// (local, replica) copy, so a replica repository shared by two local repositories
+// answers through both pairs.
 func (d *Dispatcher) BackupView(ctx context.Context, backupID string) (*BackupView, error) {
 	handle := physicalstore.New(d.config.Database.DB())
 	backup, err := handle.Backup(ctx, backupID)
@@ -359,11 +374,7 @@ func (d *Dispatcher) BackupView(ctx context.Context, backupID string) (*BackupVi
 	}
 	view := backupView(backup)
 	view.Replicas = []ReplicaView{}
-	chain, err := handle.Chain(ctx, backup.ChainID)
-	if err != nil {
-		return nil, err
-	}
-	holders, err := d.config.Database.SourceLocalRepositories(ctx, chain.SourceID)
+	holders, err := d.config.Database.ReplicaLocalRepositories(ctx, backupID)
 	if err != nil {
 		return nil, err
 	}

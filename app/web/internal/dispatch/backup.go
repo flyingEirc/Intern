@@ -219,6 +219,12 @@ func (d *Dispatcher) registerRunContext(ctx context.Context, runID string) (cont
 	return runCtx, unregister
 }
 
+// refuseReadGate is the test seam around the pre-chain cancel re-read. The
+// production value returns immediately; a test replaces it to hold the run
+// exactly inside that window, so a shutdown is proven to land on the boundary
+// rather than merely observed landing there at some delay.
+var refuseReadGate = func() {}
+
 // refuseCanceledRun ends a claimed run as canceled when a cancel request has
 // already arrived: the run is running, so its context is canceled and the
 // terminal write is the canceled one, with no backup.
@@ -229,6 +235,7 @@ func (d *Dispatcher) registerRunContext(ctx context.Context, runID string) (cont
 // hands it to preChainFailure so a shutdown keeps the terminal classification
 // every other pre-chain failure gets.
 func (d *Dispatcher) refuseCanceledRun(ctx context.Context, run store.Run) (bool, error) {
+	refuseReadGate()
 	stored, err := d.config.Database.Run(ctx, run.ID)
 	if err != nil {
 		return false, err
