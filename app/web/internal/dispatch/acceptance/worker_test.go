@@ -68,13 +68,17 @@ func TestW4Worker(t *testing.T) {
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
 			f.t = t
+			// Registered before the scenario runs, so it runs after the
+			// scenario's own cleanups (samplers and any serve child) have
+			// settled: the dump then reads the final state a failure left
+			// behind, which is what root-causing a stuck run needs.
+			t.Cleanup(func() { f.dumpDiagnostics(t) })
 			step.run(t, f)
 		})
 	}
 }
 
 func a1E2E(t *testing.T, f *fixture) {
-	t.Helper()
 	// The protection sampler runs from before the first run so the
 	// uploaded-but-unverified window is read from state, not assumed.
 	watch := f.watchReplication(t)
@@ -265,7 +269,6 @@ func (f *fixture) requireSQLiteBackup(t *testing.T, member dispatch.BackupView) 
 }
 
 func a2Priority(t *testing.T, f *fixture) {
-	t.Helper()
 	policy := f.createPolicy(t, "w4-priority", 8)
 	f.enable(t, policy)
 	full1 := f.triggerRun(t, policy, store.RunKindFull, "w4-pri-full-1")
@@ -486,12 +489,12 @@ func overlapping(all []runInterval, item runInterval) int {
 }
 
 func a3Cancel(t *testing.T, f *fixture) {
-	t.Helper()
 	policy := f.createPolicy(t, "w4-cancel", 8)
 	f.enable(t, policy)
 	before := f.completedBackupsForPolicy(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-cancel-full")
-	f.waitXtrabackup(t, runID)
+	backup := f.waitXtrabackup(t, runID)
+	f.requireBackupAlive(t, backup)
 	f.cancel(t, runID)
 	run := f.waitRun(t, runID, store.RunStatusCanceled)
 	if run.BackupID != nil {
@@ -525,7 +528,7 @@ func a3Cancel(t *testing.T, f *fixture) {
 	// this scenario leaves nothing in flight for the next scenario's promptness
 	// and concurrency measurements.
 	f.waitTerminal(t, admission)
-	t.Log("W4-A3 cancel canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true")
+	t.Logf("W4-A3 cancel canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true %s", backup.evidence())
 }
 
 // admissionFull returns the admission-triggered full of one policy, if stored.
@@ -557,7 +560,6 @@ func (f *fixture) waitTerminal(t *testing.T, id string) store.Run {
 }
 
 func a4SSE(t *testing.T, f *fixture) {
-	t.Helper()
 	policy := f.createPolicy(t, "w4-sse", 8)
 	f.enable(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-sse-full")
@@ -668,13 +670,13 @@ func structuredFrame(frame string) (string, int64, bool) {
 }
 
 func a3SIGTERM(t *testing.T, f *fixture) {
-	t.Helper()
 	f.startServeChild(t)
 	policy := f.createPolicy(t, "w4-sigterm", 8)
 	f.enable(t, policy)
 	before := f.completedBackupsForPolicy(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-sigterm-full")
-	f.waitXtrabackup(t, runID)
+	backup := f.waitXtrabackup(t, runID)
+	f.requireBackupAlive(t, backup)
 	f.signalChild(t, syscall.SIGTERM)
 	f.waitChild(t, 2*time.Minute)
 	// The exit code belongs to the child that received SIGTERM; a restart
@@ -685,11 +687,9 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 	}
 	// The drain must record a terminal outcome for the interrupted run. A row
 	// still `running` after the child exited means the drain silently dropped
-	// the outcome, which the contract does not allow.
-	status := f.sqliteString(t, `SELECT status FROM runs WHERE id = ?`, runID)
-	if status != store.RunStatusCanceled && status != store.RunStatusFailed {
-		t.Fatalf("SIGTERM left run %s as %s, want canceled or failed", runID, status)
-	}
+	// the outcome, and `completed` would be a false success.
+	status, class, code := f.sqliteRunOutcome(t, runID)
+	requireSIGTERMOutcome(t, runID, status, class, code)
 	if n := f.completedBackupsForRun(t, runID); n != 0 {
 		t.Fatalf("SIGTERM published %d completed backups", n)
 	}
@@ -700,18 +700,42 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 		t.Fatalf("%d backups completed during the SIGTERM window", during)
 	}
 	f.startServeChild(t)
-	recovered := f.sqliteString(t, `SELECT status FROM runs WHERE id = ?`, runID)
-	if recovered != store.RunStatusCanceled && recovered != store.RunStatusFailed {
-		t.Fatalf("recovered SIGTERM run is %s", recovered)
+	// The drain wrote a terminal row before the child exited, so the restart
+	// must find it unchanged: recovery only reclaims rows a process left
+	// running. A row that changed here means the drain's outcome was lost.
+	if recovered := f.sqliteString(t, `SELECT status FROM runs WHERE id = ?`, runID); recovered != status {
+		t.Fatalf("recovered SIGTERM run is %s, want %s", recovered, status)
 	}
 	next := f.triggerRun(t, policy, store.RunKindFull, "w4-sigterm-next")
 	f.waitRun(t, next, store.RunStatusCompleted)
 	f.assertNoSecret(t, nil)
-	t.Logf("W4-A3 sigterm sigterm_exit_bounded=true no_false_completed=true recovered=true status=%s exit=%d", status, exit)
+	t.Logf("W4-A3 sigterm sigterm_exit_bounded=true no_false_completed=true recovered=true status=%s error_class=%q error_code=%q exit=%d %s", status, class, code, exit, backup.evidence())
+}
+
+// requireSIGTERMOutcome applies the contract's rule for a drained SIGTERM run:
+// the status is canceled or failed, never completed or running, and the evidence
+// matches the status. A failed run carries the chain error, so its class and
+// code must both be present; a canceled run carries the canceled class the store
+// writes, which is store.RunErrorCanceled. CancelRunningRun and CancelQueuedRun
+// leave error_class NULL, so the empty value is the same outcome rather than a
+// missing record, and both spellings are accepted.
+func requireSIGTERMOutcome(t *testing.T, runID, status, class, code string) {
+	t.Helper()
+	switch status {
+	case store.RunStatusFailed:
+		if class == "" || code == "" {
+			t.Fatalf("SIGTERM run %s failed with no error_class/error_code (class=%q code=%q)", runID, class, code)
+		}
+	case store.RunStatusCanceled:
+		if class != "" && class != store.RunErrorCanceled {
+			t.Fatalf("SIGTERM run %s canceled with error_class=%q, want %q or empty", runID, class, store.RunErrorCanceled)
+		}
+	default:
+		t.Fatalf("SIGTERM left run %s as %s, want canceled or failed", runID, status)
+	}
 }
 
 func a3SIGKILL(t *testing.T, f *fixture) {
-	t.Helper()
 	f.startServeChild(t)
 	policy := f.createPolicy(t, "w4-sigkill", 8)
 	f.enable(t, policy)
@@ -731,7 +755,8 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 	}
 	f.dml(t, 9)
 	incID := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-inc")
-	f.waitXtrabackup(t, incID)
+	backup := f.waitXtrabackup(t, incID)
+	f.requireBackupAlive(t, backup)
 	f.signalChild(t, syscall.SIGKILL)
 	f.waitChild(t, 30*time.Second)
 	killed, ok := f.child.ProcessState.Sys().(syscall.WaitStatus)
@@ -745,7 +770,11 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 	f.assertNoSecret(t, nil)
 	next := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-next")
 	f.waitRun(t, next, store.RunStatusCompleted)
-	t.Log("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true")
+	status, class, code := f.sqliteRunOutcome(t, incID)
+	// The locked marker text stays contiguous, so the gate can match it; the
+	// run outcome the restart's recovery recorded follows it, read from the
+	// same row the assertions above used.
+	t.Logf("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true status=%s error_class=%q error_code=%q %s", status, class, code, backup.evidence())
 }
 
 // requireKilledRunRecovered requires the SIGKILLed run to be failed/interrupted

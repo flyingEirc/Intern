@@ -523,6 +523,32 @@ func (s *Store) HasActiveFull(ctx context.Context, sourceID string) (bool, error
 	return count > 0, nil
 }
 
+// PairBackups lists the backups published by runs of the policies that use one
+// (local repository, replica repository) pair. A backup produced on another
+// local repository is never listed, so a shared replica repository cannot bind
+// it to this pair.
+func (s *Store) PairBackups(ctx context.Context, localRepositoryID, replicaRepositoryID string) ([]string, error) {
+	rows, err := storesql.New(s.db).PairBackups(ctx, storesql.PairBackupsParams{
+		LocalRepositoryID: localRepositoryID, ReplicaRepositoryID: nullable(replicaRepositoryID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	backups := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.Valid {
+			backups = append(backups, row.String)
+		}
+	}
+	return backups, nil
+}
+
+// SourceLocalRepositories lists the local repositories that hold one source's
+// backups: the repositories of the policies whose runs published them.
+func (s *Store) SourceLocalRepositories(ctx context.Context, sourceID string) ([]string, error) {
+	return storesql.New(s.db).SourceLocalRepositories(ctx, sourceID)
+}
+
 // RunLog reads one log row. A missing row reports ErrNotFound.
 func (s *Store) RunLog(ctx context.Context, runID string, seq int64) (RunLog, error) {
 	row, err := storesql.New(s.db).GetRunLog(ctx, storesql.GetRunLogParams{RunID: runID, Seq: seq})

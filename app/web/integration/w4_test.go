@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,30 @@ var w4StateMarkers = []string{
 	"sigterm_exit_bounded=true no_false_completed=true recovered=true",
 	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true",
 	"sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed",
+}
+
+// w4FaultMarkers are the cases whose marker must prove the fault was injected
+// during a real backup, plus the class and code the run recorded.
+var w4FaultMarkers = []string{"W4-A3 cancel", "W4-A3 sigterm", "W4-A3 sigkill"}
+
+// w4InjectionPattern is the argv-derived proof of injection: a matched
+// `--backup` process of the run's own work root. The `--version` probe cannot
+// satisfy it.
+var w4InjectionPattern = regexp.MustCompile(`injected_during=backup backup_pid=[1-9][0-9]* backup_target=run-[0-9a-f]+/`)
+
+// w4TerminationPatterns require the recorded outcome of the run each process
+// fault ended, and never a false success. The fault is injected only after the
+// harness matched a live `--backup` process, so a failure can only be the chain
+// failure the drain records or the interruption restart recovery records; a
+// fault that had landed during preflight would record preflight or unavailable.
+//
+// SIGTERM may legitimately end either way, so each status carries its own
+// evidence: failed needs a class and code from the closed set, and canceled
+// needs the canceled class the store writes (CancelRunningRun leaves error_class
+// NULL, so the empty value is the same outcome).
+var w4TerminationPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`W4-A3 sigterm[^\n]*status=(failed error_class="(backup_failed|interrupted|recovery_failed)" error_code="[a-z_]+"|canceled error_class="(canceled)?" error_code="[a-z_]*") exit=0 `),
+	regexp.MustCompile(`W4-A3 sigkill[^\n]*status=failed[^\n]*error_class="(interrupted|recovery_failed)" error_code="[a-z_]+" `),
 }
 
 // TestW4NativeContainers serves the real dispatcher and Web handler inside the
@@ -157,4 +182,35 @@ func verifyW4Evidence(t *testing.T, text string) {
 	}
 	requireMarkers(t, text, w4ResultMarkers, "result")
 	requireMarkers(t, text, w4StateMarkers, "state")
+	requireFaultEvidence(t, text)
+}
+
+// requireFaultEvidence requires every fault marker to quote a live backup
+// process of the run's own work root, and every process fault to name the class
+// and code the ended run recorded. A dump means a scenario failed: the harness
+// only emits one from a failed scenario, so it is a failure here too.
+func requireFaultEvidence(t *testing.T, text string) {
+	t.Helper()
+	if strings.Contains(text, "W4 diagnostics: begin") {
+		t.Fatal("a W4 scenario emitted failure diagnostics")
+	}
+	for _, name := range w4FaultMarkers {
+		index := strings.Index(text, name)
+		if index < 0 {
+			t.Fatalf("missing W4 fault marker %q", name)
+		}
+		end := strings.IndexByte(text[index:], '\n')
+		if end < 0 {
+			end = len(text) - index
+		}
+		line := text[index : index+end]
+		if !w4InjectionPattern.MatchString(line) {
+			t.Fatalf("%s does not prove injection during a backup: %q", name, line)
+		}
+	}
+	for _, pattern := range w4TerminationPatterns {
+		if !pattern.MatchString(text) {
+			t.Fatalf("a process fault did not record its run class and code: %s", pattern)
+		}
+	}
 }

@@ -170,7 +170,7 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 		return err
 	}
 	if len(reserved) > 0 {
-		return r.reclaimReserved(ctx, reserved)
+		return r.reclaimReserved(ctx, r.ownReservations(ctx, reserved))
 	}
 	eligible, reason, err := r.eligibility(ctx, chainID)
 	if err != nil {
@@ -183,7 +183,31 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 	if err != nil {
 		return err
 	}
-	return r.reclaimReserved(ctx, reserved)
+	return r.reclaimReserved(ctx, r.ownReservations(ctx, reserved))
+}
+
+// ownReservations keeps only the pending rows this (local, replica) pair owns:
+// the rows whose backup has a replica row bound to this pair's local
+// repository. A reservation created by another local repository sharing this
+// FTP repository is left untouched — never reclaimed here and never marked
+// done — because its object lives in the other repository's root and this
+// pair's recovery pass is what finishes it.
+func (r *Replicator) ownReservations(ctx context.Context, reserved []store.LocalDelete) []store.LocalDelete {
+	ids := make([]string, 0, len(reserved))
+	for _, row := range reserved {
+		ids = append(ids, row.BackupID)
+	}
+	statuses, err := r.ReplicaStatuses(ctx, ids)
+	if err != nil {
+		return nil
+	}
+	own := make([]store.LocalDelete, 0, len(reserved))
+	for _, row := range reserved {
+		if _, ok := statuses[row.BackupID]; ok {
+			own = append(own, row)
+		}
+	}
+	return own
 }
 
 // recoverLocalDeletes finishes every pending local-delete reservation that

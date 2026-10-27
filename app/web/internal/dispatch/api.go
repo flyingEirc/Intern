@@ -180,6 +180,15 @@ type ChainView struct {
 }
 
 // Protection reads the local and remote protection points for one source.
+//
+// The remote point is computed per replica repository, but from every pair that
+// repository serves for this source: one FTP repository shared by two local
+// repositories has one queue per pair, and each queue only proves the copies of
+// its own local repository. The reported point is therefore the earliest of the
+// pair points, because a remote repository can only be claimed to protect the
+// source up to the point every one of its queues has proven. A pair that holds
+// no backups of the source contributes nothing: its RemotePoint is nil, and
+// treating that as "no protection" would erase a point proven by another pair.
 func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protection, error) {
 	local, err := replication.LocalPoint(ctx, physicalstore.New(d.config.Database.DB()), sourceID)
 	if err != nil {
@@ -189,44 +198,74 @@ func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protectio
 	if local != nil {
 		protection.Local = &PointView{BackupID: local.BackupID, ChainID: local.ChainID, At: store.ScheduleStamp(local.At)}
 	}
-	seen := map[string]struct{}{}
+	remote, err := d.remotePoints(ctx, sourceID)
+	if err != nil {
+		return Protection{}, err
+	}
+	protection.Remote = remote
+	return protection, nil
+}
+
+// remotePoints derives one point per replica repository from the pairs that
+// actually hold backups of the source. The point is the earliest of those
+// pairs' points: the repository can only be claimed to protect the source up to
+// what every queue has proven.
+func (d *Dispatcher) remotePoints(ctx context.Context, sourceID string) ([]PointView, error) {
+	holders, err := d.config.Database.SourceLocalRepositories(ctx, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	holds := make(map[string]struct{}, len(holders))
+	for _, localID := range holders {
+		holds[localID] = struct{}{}
+	}
+	points := map[string]*replication.Point{}
+	order := make([]string, 0, len(d.replicaSnapshot()))
 	for _, slot := range d.replicaSnapshot() {
-		if _, ok := seen[slot.replicaID]; ok {
+		if _, ok := holds[slot.localID]; !ok {
 			continue
 		}
-		seen[slot.replicaID] = struct{}{}
 		remote, err := slot.replicator.RemotePoint(ctx, sourceID)
 		if err != nil {
-			return Protection{}, err
+			return nil, err
 		}
 		if remote == nil {
 			continue
 		}
-		protection.Remote = append(protection.Remote, PointView{
-			RepositoryID: slot.replicaID, BackupID: remote.BackupID,
-			ChainID: remote.ChainID, At: store.ScheduleStamp(remote.At),
+		earliest, seen := points[slot.replicaID]
+		if !seen {
+			order = append(order, slot.replicaID)
+			points[slot.replicaID] = remote
+			continue
+		}
+		if remote.At.Before(earliest.At) {
+			points[slot.replicaID] = remote
+		}
+	}
+	views := make([]PointView, 0, len(order))
+	for _, repositoryID := range order {
+		point := points[repositoryID]
+		views = append(views, PointView{
+			RepositoryID: repositoryID, BackupID: point.BackupID,
+			ChainID: point.ChainID, At: store.ScheduleStamp(point.At),
 		})
 	}
-	return protection, nil
+	return views, nil
 }
 
-// Replicas lists replica rows. The source filter joins the physical chain for
-// the source identity; the other filters are direct column matches.
+// Replicas lists replica rows over every installed pair. Each pair holds its
+// own queue for a replica repository, so the page is the union of all pairs,
+// not one arbitrary pair's queue.
 func (d *Dispatcher) Replicas(ctx context.Context, filter ReplicaFilter) ([]ReplicaView, error) {
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 100
 	}
 	views := []ReplicaView{}
-	seen := map[string]struct{}{}
 	for _, slot := range d.replicaSnapshot() {
 		if filter.RepositoryID != "" && slot.replicaID != filter.RepositoryID {
 			continue
 		}
-		if _, ok := seen[slot.replicaID]; ok {
-			continue
-		}
-		seen[slot.replicaID] = struct{}{}
 		extended, err := appendReplicas(ctx, slot.replicator, filter, views, limit)
 		if err != nil {
 			return nil, err
@@ -239,16 +278,19 @@ func (d *Dispatcher) Replicas(ctx context.Context, filter ReplicaFilter) ([]Repl
 	return views, nil
 }
 
-// appendReplicas forwards the matching rows of one replicator, stopping at the
+// appendReplicas forwards the matching rows of one pair, stopping at the
 // caller's limit so no queue is read beyond what the page needs.
 func appendReplicas(ctx context.Context, replicator *replication.Replicator, filter ReplicaFilter,
 	views []ReplicaView, limit int,
 ) ([]ReplicaView, error) {
-	rows, err := replicator.List(ctx, filter.SourceID)
+	rows, err := replicator.ListAll(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
+		if filter.SourceID != "" && row.SourceID != filter.SourceID {
+			continue
+		}
 		if filter.Status != "" && row.Status != filter.Status {
 			continue
 		}
@@ -282,12 +324,13 @@ func stampPointer(value *time.Time) *string {
 	return &text
 }
 
-// ReplicaRetry implements the manual retry: Replicator.Retry then an immediate
-// Step so the copy starts without waiting for the worker's poll.
+// ReplicaRetry implements the manual retry: the backup's pair is resolved first,
+// because a replica repository shared by several local repositories has one
+// queue per pair and only the owning pair can find the row.
 func (d *Dispatcher) ReplicaRetry(ctx context.Context, backupID, repositoryID string) error {
-	replicator := d.replicatorFor(repositoryID)
-	if replicator == nil {
-		return store.ErrNotFound
+	replicator, err := d.pairForBackup(ctx, backupID, repositoryID)
+	if err != nil {
+		return err
 	}
 	if err := replicator.Retry(ctx, backupID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -298,9 +341,36 @@ func (d *Dispatcher) ReplicaRetry(ctx context.Context, backupID, repositoryID st
 	return nil
 }
 
-// BackupView reads one backup with its per-repository replicas.
+// pairForBackup resolves the (local, replica) pair whose queue holds the
+// replica row of one backup: the local repository of the policy whose run
+// produced the backup. A missing pair or an uninstalled replicator reports
+// store.ErrNotFound, which the API answers as a 404.
+func (d *Dispatcher) pairForBackup(ctx context.Context, backupID, repositoryID string) (*replication.Replicator, error) {
+	run, err := d.config.Database.RunByBackupID(ctx, backupID)
+	if err != nil {
+		return nil, store.ErrNotFound
+	}
+	policy, err := d.config.Database.Policy(ctx, run.PolicyID)
+	if err != nil {
+		return nil, store.ErrNotFound
+	}
+	if policy.ReplicaRepositoryID == nil || *policy.ReplicaRepositoryID != repositoryID {
+		return nil, store.ErrNotFound
+	}
+	replicator := d.replicatorForPair(policy.LocalRepositoryID, repositoryID)
+	if replicator == nil {
+		return nil, store.ErrNotFound
+	}
+	return replicator, nil
+}
+
+// BackupView reads one backup with its per-repository replicas. The replicas
+// are the union over the installed pairs of the backup's source: each pair's
+// queue only describes its own (local, replica) copy, so a replica repository
+// shared by two local repositories answers through both pairs.
 func (d *Dispatcher) BackupView(ctx context.Context, backupID string) (*BackupView, error) {
-	backup, err := physicalstore.New(d.config.Database.DB()).Backup(ctx, backupID)
+	handle := physicalstore.New(d.config.Database.DB())
+	backup, err := handle.Backup(ctx, backupID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -308,12 +378,23 @@ func (d *Dispatcher) BackupView(ctx context.Context, backupID string) (*BackupVi
 		return nil, err
 	}
 	view := backupView(backup)
-	seen := map[string]struct{}{}
+	view.Replicas = []ReplicaView{}
+	chain, err := handle.Chain(ctx, backup.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	holders, err := d.config.Database.SourceLocalRepositories(ctx, chain.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	holds := make(map[string]struct{}, len(holders))
+	for _, localID := range holders {
+		holds[localID] = struct{}{}
+	}
 	for _, slot := range d.replicaSnapshot() {
-		if _, ok := seen[slot.replicaID]; ok {
+		if _, ok := holds[slot.localID]; !ok {
 			continue
 		}
-		seen[slot.replicaID] = struct{}{}
 		replica, err := slot.replicator.Replica(ctx, backupID)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue

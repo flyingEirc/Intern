@@ -17,6 +17,7 @@
 package dispatch
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -36,14 +37,26 @@ import (
 
 // Timing bounds. shutdownWait must exceed chain.Complete's 15s WithoutCancel
 // commit window, so a finishing run commits before the database closes.
+// catchUpInterval is the per-pair floor between periodic catch-ups: a transient
+// Enqueue failure at completion is retried by the replication worker without a
+// restart, and a healthy pair is never re-scanned more often than this.
 const (
 	schedulerTick     = 30 * time.Second
 	shutdownWait      = 45 * time.Second
 	replicationPoll   = time.Second
 	workerPoll        = time.Second
 	claimRetry        = time.Second
+	catchUpInterval   = 30 * time.Second
 	runLogCapDeadline = 10 * time.Second
 )
+
+// PreflightRunner is the fresh per-run preflight the dispatcher executes before
+// a chain. The resources service is the production implementation; the seam
+// exists so a test can drive a run whose preflight really blocks, which is the
+// window a cancel request must be able to interrupt.
+type PreflightRunner interface {
+	PreflightSource(ctx context.Context, sourceID, localRepositoryID string) (resources.PreflightOutcome, error)
+}
 
 // Config wires the dispatcher to the process capabilities. Everything except
 // the database and logger is optional: without the KEK, work root or
@@ -57,7 +70,7 @@ type Config struct {
 	// nil for the real clock.
 	Now func() time.Time
 	// Preflight is the resources service the fresh per-run preflight uses.
-	Preflight *resources.Service
+	Preflight PreflightRunner
 }
 
 // Dispatcher owns the run queue for one serve process.
@@ -82,6 +95,9 @@ type Dispatcher struct {
 	// replicatorFailed records (local, replica) pairs whose last lazy open
 	// failed, so the replication worker retries them on the next step.
 	replicatorFailed map[string]struct{}
+	// caughtUpAt records when each pair last ran its catch-up, so the
+	// replication worker's periodic retry is rate-limited per pair.
+	caughtUpAt map[string]time.Time
 }
 
 // replicaHandle is one Replicator for a distinct (local, replica) repository pair.
@@ -94,19 +110,6 @@ const replicatorUnavailable = "replicator_unavailable"
 
 func pairKey(localID, replicaID string) string {
 	return localID + "\x00" + replicaID
-}
-
-// replicatorFor returns one replicator of this FTP repository, nil when this
-// instance does not serve it.
-func (d *Dispatcher) replicatorFor(repositoryID string) *replication.Replicator {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, slot := range d.replicas {
-		if slot.replicaID == repositoryID {
-			return slot.replicator
-		}
-	}
-	return nil
 }
 
 // replicatorForPair returns the replicator of one policy's (local, replica) pair.
@@ -223,16 +226,15 @@ func (d *Dispatcher) recoverPhysical(ctx context.Context, recovered []recoveredR
 	return nil
 }
 
-// recoverReplication reclaims each FTP repository's interrupted copies.
+// recoverReplication reclaims the interrupted copies of every installed pair.
+// Recovery is pair-scoped because an FTP repository shared by two local
+// repositories has two independent queues: the second pair's interrupted
+// uploads and temporary keys belong to its own replicator, and recovering only
+// the first pair leaves them stuck forever.
 func (d *Dispatcher) recoverReplication(ctx context.Context) error {
-	seen := map[string]struct{}{}
 	for _, slot := range d.replicaSnapshot() {
-		if _, ok := seen[slot.replicaID]; ok {
-			continue
-		}
-		seen[slot.replicaID] = struct{}{}
 		if err := slot.replicator.Recover(ctx); err != nil {
-			return fmt.Errorf("dispatch: replication recovery: %w", err)
+			return fmt.Errorf("dispatch: replication recovery for pair %s: %w", pairKey(slot.localID, slot.replicaID), err)
 		}
 	}
 	return nil
@@ -393,49 +395,89 @@ func (d *Dispatcher) ensurePolicyReplicator(ctx context.Context, policy store.Po
 	return d.replicatorForPair(localID, replicaID)
 }
 
-// catchUpReplication queues every completed, locally present backup of every
-// source this pair serves. EnqueueCompleted is an idempotent insert per backup,
-// so running it at each install is what makes a replica durable across an
-// unavailable remote: a backup completed while the pair was down is queued by
-// the catch-up instead of being lost, and FIFO order is preserved because the
-// insert order is the creation order.
+// catchUpReplication queues every backup that a policy with exactly this
+// (local, replica) pair produced, provided the backup is completed and locally
+// present. Enqueue is an idempotent insert per backup, so running it at each
+// install and on the worker's periodic retry is what makes a replica durable
+// across an unavailable remote or a transient enqueue failure: a backup
+// completed while the pair was down is queued by the catch-up instead of being
+// lost, and FIFO order is preserved because the inserts follow creation order.
+//
+// The selection is pair-scoped through the producing run's policy. Listing the
+// backups of a source and binding them all here would claim a backup that lives
+// in another local repository, which its own pair then cannot read.
 func (d *Dispatcher) catchUpReplication(ctx context.Context, localID, replicaID string, replicator *replication.Replicator) {
-	sources, err := d.pairSources(ctx, localID, replicaID)
+	d.markCaughtUp(localID, replicaID)
+	backups, err := d.config.Database.PairBackups(ctx, localID, replicaID)
 	if err != nil {
-		d.logger.ErrorContext(ctx, "cannot list the pair's sources for the replication catch-up",
+		d.logger.ErrorContext(ctx, "cannot list the pair's backups for the replication catch-up",
 			"local_repository_id", localID, "repository_id", replicaID, "error", err)
 		return
 	}
-	for _, sourceID := range sources {
-		if err = replicator.EnqueueCompleted(ctx, sourceID); err != nil {
-			d.logger.ErrorContext(ctx, "cannot run the replication catch-up",
+	sorted := d.orderByCreation(ctx, backups)
+	for _, backupID := range sorted {
+		if err = replicator.Enqueue(ctx, backupID); err != nil {
+			// A backup that is no longer completed or locally present is not
+			// queued; that is a decision about the backup, not a pair failure,
+			// so the remaining backups still get their turn.
+			d.logger.WarnContext(ctx, "replication catch-up skipped a backup",
 				"local_repository_id", localID, "repository_id", replicaID,
-				"source_id", sourceID, "error", err)
-			return
+				"backup_id", backupID, "error", err)
 		}
 	}
 }
 
-// pairSources returns the distinct sources of the policies that use one pair.
-func (d *Dispatcher) pairSources(ctx context.Context, localID, replicaID string) ([]string, error) {
-	policies, err := d.config.Database.Policies(ctx, "", 1_000_000)
-	if err != nil {
-		return nil, err
+// orderByCreation returns the listed backups in the physical creation order the
+// FIFO queue depends on. A backup row that is no longer readable is dropped from
+// the catch-up rather than failing the whole pair.
+func (d *Dispatcher) orderByCreation(ctx context.Context, backupIDs []string) []string {
+	handle := physicalstore.New(d.config.Database.DB())
+	type created struct {
+		id  string
+		at  time.Time
+		seq int
 	}
-	seen := map[string]struct{}{}
-	sources := make([]string, 0, len(policies))
-	for _, policy := range policies {
-		if policy.ReplicaRepositoryID == nil || *policy.ReplicaRepositoryID != replicaID ||
-			policy.LocalRepositoryID != localID {
+	ordered := make([]created, 0, len(backupIDs))
+	for _, backupID := range backupIDs {
+		backup, err := handle.Backup(ctx, backupID)
+		if err != nil {
 			continue
 		}
-		if _, ok := seen[policy.SourceID]; ok {
-			continue
-		}
-		seen[policy.SourceID] = struct{}{}
-		sources = append(sources, policy.SourceID)
+		ordered = append(ordered, created{id: backup.ID, at: backup.CreatedAt, seq: backup.Seq})
 	}
-	return sources, nil
+	slices.SortFunc(ordered, func(left, right created) int {
+		if order := left.at.Compare(right.at); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(left.seq, right.seq); order != 0 {
+			return order
+		}
+		return cmp.Compare(left.id, right.id)
+	})
+	ids := make([]string, 0, len(ordered))
+	for _, item := range ordered {
+		ids = append(ids, item.id)
+	}
+	return ids
+}
+
+// markCaughtUp records that this pair just ran its catch-up.
+func (d *Dispatcher) markCaughtUp(localID, replicaID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.caughtUpAt == nil {
+		d.caughtUpAt = map[string]time.Time{}
+	}
+	d.caughtUpAt[pairKey(localID, replicaID)] = d.now()
+}
+
+// dueForCatchUp reports whether the pair's periodic catch-up is due. The floor
+// is catchUpInterval so a healthy pair is not re-scanned on every worker cycle.
+func (d *Dispatcher) dueForCatchUp(localID, replicaID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	last, ok := d.caughtUpAt[pairKey(localID, replicaID)]
+	return !ok || d.now().Sub(last) >= catchUpInterval
 }
 
 func (d *Dispatcher) markReplicatorFailed(localID, replicaID string) {
@@ -465,10 +507,15 @@ func (d *Dispatcher) logReplicatorUnavailable(ctx context.Context, runID, replic
 }
 
 // claimPolicyReplicators opens the pairs of policies this process has not
-// installed yet, then runs their catch-up. The replication worker calls it each
-// cycle, so a policy created after Start reaches a replicator even if no run ever
-// completed again; the completion path is the fast route, this is the durable
-// one. It dials nothing when every pair is already installed.
+// installed yet and re-runs the catch-up of every installed pair whose interval
+// has elapsed. The replication worker calls it each cycle, so:
+//   - a policy created after Start reaches a replicator even if no run ever
+//     completed again;
+//   - a transient Enqueue failure at completion is retried without a restart.
+//
+// The catch-up floor is catchUpInterval per pair, so a healthy pair is not
+// re-scanned on every worker cycle, and an uninstalled pair is opened (which
+// runs its own catch-up) rather than scanned twice.
 func (d *Dispatcher) claimPolicyReplicators(ctx context.Context) {
 	if !d.config.Settings.Credentials() {
 		return
@@ -483,17 +530,21 @@ func (d *Dispatcher) claimPolicyReplicators(ctx context.Context) {
 		if policy.ReplicaRepositoryID == nil {
 			continue
 		}
-		key := pairKey(policy.LocalRepositoryID, *policy.ReplicaRepositoryID)
+		localID, replicaID := policy.LocalRepositoryID, *policy.ReplicaRepositoryID
+		key := pairKey(localID, replicaID)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		if d.replicatorForPair(policy.LocalRepositoryID, *policy.ReplicaRepositoryID) != nil {
+		if existing := d.replicatorForPair(localID, replicaID); existing != nil {
+			if d.dueForCatchUp(localID, replicaID) {
+				d.catchUpReplication(ctx, localID, replicaID, existing)
+			}
 			continue
 		}
-		if err = d.openPair(ctx, policy.LocalRepositoryID, *policy.ReplicaRepositoryID); err != nil {
-			d.markReplicatorFailed(policy.LocalRepositoryID, *policy.ReplicaRepositoryID)
-			d.logReplicatorUnavailable(ctx, "", *policy.ReplicaRepositoryID, err)
+		if err = d.openPair(ctx, localID, replicaID); err != nil {
+			d.markReplicatorFailed(localID, replicaID)
+			d.logReplicatorUnavailable(ctx, "", replicaID, err)
 		}
 	}
 }

@@ -1052,6 +1052,14 @@ paths:
         and permission, and a mismatch emits one revoked event and closes. The
         per-subscriber buffer holds 256 events; an overflow drops the
         subscriber without touching the run.
+
+        replication_enqueued and replication_step are appended after the
+        terminal event, because the replication handoff runs once the backup is
+        committed. They are therefore not delivered to a live stream that has
+        already ended; they appear on replay (a later subscription, or
+        Last-Event-ID/after_seq) and in the logs API. A client that needs the
+        replication outcome reads GET /api/v1/runs/{id}/logs once the run is
+        terminal, or polls the replicas API.
       parameters:
         - name: Last-Event-ID
           in: header

@@ -1328,6 +1328,46 @@ func (q *Queries) MaxRunLogSeq(ctx context.Context, runID string) (int64, error)
 	return column_1, err
 }
 
+const pairBackups = `-- name: PairBackups :many
+SELECT DISTINCT r.backup_id AS backup_id
+FROM runs r
+JOIN policies p ON p.id = r.policy_id
+WHERE p.local_repository_id = ? AND p.replica_repository_id = ?
+  AND r.backup_id IS NOT NULL
+`
+
+type PairBackupsParams struct {
+	LocalRepositoryID   string
+	ReplicaRepositoryID sql.NullString
+}
+
+// Every backup published by a run of a policy with exactly this
+// (local_repository_id, replica_repository_id) pair. A backup produced by a
+// policy on another local repository is never selected, so one replica
+// repository shared by two local repositories never queues the other's backup.
+func (q *Queries) PairBackups(ctx context.Context, arg PairBackupsParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, pairBackups, arg.LocalRepositoryID, arg.ReplicaRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []sql.NullString{}
+	for rows.Next() {
+		var backup_id sql.NullString
+		if err := rows.Scan(&backup_id); err != nil {
+			return nil, err
+		}
+		items = append(items, backup_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const recordSourcePreflight = `-- name: RecordSourcePreflight :one
 UPDATE sources SET
     server_uuid = COALESCE(?1, server_uuid),
@@ -1589,6 +1629,40 @@ func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicySchedulePa
 	var i SetPolicyScheduleRow
 	err := row.Scan(&i.NextFullAt, &i.NextIncrementalAt)
 	return i, err
+}
+
+const sourceLocalRepositories = `-- name: SourceLocalRepositories :many
+SELECT DISTINCT p.local_repository_id AS local_repository_id
+FROM runs r
+JOIN policies p ON p.id = r.policy_id
+WHERE r.source_id = ? AND r.backup_id IS NOT NULL
+ORDER BY p.local_repository_id
+`
+
+// The local repositories that hold one source's backups: every policy whose
+// run published a backup of that source. The physical schema keeps no local
+// repository on a backup, so the producing run's policy is the durable binding.
+func (q *Queries) SourceLocalRepositories(ctx context.Context, sourceID string) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, sourceLocalRepositories, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var local_repository_id string
+		if err := rows.Scan(&local_repository_id); err != nil {
+			return nil, err
+		}
+		items = append(items, local_repository_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const tombstoneActive = `-- name: TombstoneActive :one

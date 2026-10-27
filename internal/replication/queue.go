@@ -13,15 +13,16 @@ import (
 
 // Replica is the observable state of one (backup, repository) copy. The times
 // are nil until the corresponding step happened; NextAttemptAt is the schedule
-// the queue enforces.
+// the queue enforces. SourceID is the identity of the chain that owns the
+// backup, so a caller listing several pairs can filter by source itself.
 type Replica struct {
-	BackupID, RepositoryID, Status string
-	Attempts                       int
-	NextAttemptAt                  *time.Time
-	UploadedAt, VerifiedAt         *time.Time
-	AlertSince                     *time.Time
-	LastErrorCode                  string
-	LastReplyCode                  int
+	BackupID, RepositoryID, SourceID, Status string
+	Attempts                                 int
+	NextAttemptAt                            *time.Time
+	UploadedAt, VerifiedAt                   *time.Time
+	AlertSince                               *time.Time
+	LastErrorCode                            string
+	LastReplyCode                            int
 }
 
 // idemKey is the durable idempotency key of one replica.
@@ -497,6 +498,27 @@ func (r *Replicator) List(ctx context.Context, sourceID string) ([]Replica, erro
 	return replicas, nil
 }
 
+// ListAll reads every replica of this (local, repository) pair in FIFO order
+// per source, regardless of source. A caller that answers for the whole
+// replica repository unions this over every installed pair.
+func (r *Replicator) ListAll(ctx context.Context) ([]Replica, error) {
+	rows, err := replsql.New(r.DB).ReplicasForRepository(ctx, replsql.ReplicasForRepositoryParams{
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	replicas := make([]Replica, 0, len(rows))
+	for _, row := range rows {
+		replica, err := replicaRecordWithSource(row)
+		if err != nil {
+			return nil, err
+		}
+		replicas = append(replicas, replica)
+	}
+	return replicas, nil
+}
+
 // ReplicaStatuses returns the replica status of this repository for each listed
 // backup. A backup without a replica row is absent from the map.
 func (r *Replicator) ReplicaStatuses(ctx context.Context, backupIDs []string) (map[string]string, error) {
@@ -540,6 +562,23 @@ func replicaRecord(row replsql.Replica) (Replica, error) {
 		}
 		*field.dest = parsed
 	}
+	return replica, nil
+}
+
+// replicaRecordWithSource maps one joined row, carrying the chain's source
+// identity that the plain replica row does not hold.
+func replicaRecordWithSource(row replsql.ReplicasForRepositoryRow) (Replica, error) {
+	replica, err := replicaRecord(replsql.Replica{
+		BackupID: row.BackupID, RepositoryID: row.RepositoryID, IdemKey: row.IdemKey,
+		Status: row.Status, Attempts: row.Attempts, Permanent: row.Permanent,
+		NextAttemptAt: row.NextAttemptAt, UploadedAt: row.UploadedAt, VerifiedAt: row.VerifiedAt,
+		FailedSince: row.FailedSince, AlertSince: row.AlertSince, LastErrorCode: row.LastErrorCode,
+		LastReplyCode: row.LastReplyCode, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+	})
+	if err != nil {
+		return Replica{}, err
+	}
+	replica.SourceID = row.SourceID
 	return replica, nil
 }
 

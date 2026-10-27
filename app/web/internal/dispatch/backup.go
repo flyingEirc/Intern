@@ -102,12 +102,19 @@ func (d *Dispatcher) auditRun(ctx context.Context, action string) {
 // executeRun runs one claimed run through preflight, the physical chain and
 // the replication handoff. Every outcome is terminal: queued -> running ->
 // completed | failed | canceled.
+//
+// The run's cancel context is registered before admit, so a cancel request that
+// arrives during the preflight, the version probe or the connection checks is
+// honored too: preflightExternalFailure maps a canceled context to the canceled
+// code, and the preflight window below turns that into a canceled run.
 func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
-	policy, err := d.config.Database.Policy(ctx, run.PolicyID)
+	runCtx, unregister := d.registerRunContext(ctx, run.ID)
+	defer unregister()
+	policy, err := d.config.Database.Policy(runCtx, run.PolicyID)
 	if err != nil {
 		return d.failRun(ctx, run, store.RunErrorBackupFailed, "policy_missing", err)
 	}
-	repo, cancelled, err := d.openRunRepository(ctx, run, policy)
+	repo, cancelled, err := d.openRunRepository(runCtx, run, policy)
 	if cancelled {
 		return err
 	}
@@ -118,12 +125,20 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 	// the run outcome that the rest of this function decides.
 	defer func() { _ = repo.Close() }() //nolint:errcheck // read-only handle, run outcome already decided
 
-	admitted, done, err := d.admit(ctx, run, policy)
+	admitted, done, err := d.admit(runCtx, run, policy)
 	if done {
 		return err
 	}
+	// A cancel request that landed between the preflight probes and the chain
+	// must end the run here: the chain would otherwise run to completion with
+	// the flag set and no one re-reading it. The stored flag, not the context,
+	// decides, so the read is ordered before chain.Run and a cancel that races
+	// it is still covered by failChain afterwards.
+	if canceled, err := d.refuseCanceledRun(ctx, run); canceled || err != nil {
+		return err
+	}
 	d.logEvent(ctx, run.ID, eventStarted, nil)
-	result, runErr := d.runChain(ctx, run, d.chainJob(run, policy, repo, admitted))
+	result, runErr := d.runChain(runCtx, run, d.chainJob(run, policy, repo, admitted))
 
 	if admission := (*physicalstore.AdmissionError)(nil); errors.As(runErr, &admission) {
 		return d.admissionFailure(ctx, run, policy, admission)
@@ -132,6 +147,47 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 		return d.failChain(ctx, run, runErr)
 	}
 	return d.completeRun(ctx, run, policy, result)
+}
+
+// registerRunContext derives the cancelable context of one claimed run and
+// registers it, so RequestCancel reaches the preflight, the version probe and
+// the connection checks as well as chain.Run.
+func (d *Dispatcher) registerRunContext(ctx context.Context, runID string) (context.Context, func()) {
+	runCtx, cancel := context.WithCancel(ctx)
+	unregister := func() {
+		cancel()
+		d.mu.Lock()
+		if d.runningRunID == runID {
+			d.runningCancel = nil
+			d.runningRunID = ""
+		}
+		d.mu.Unlock()
+	}
+	d.mu.Lock()
+	d.runningCancel = cancel
+	d.runningRunID = runID
+	d.mu.Unlock()
+	return runCtx, unregister
+}
+
+// refuseCanceledRun ends a claimed run as canceled when a cancel request has
+// already arrived: the run is running, so its context is canceled and the
+// terminal write is the canceled one, with no backup.
+func (d *Dispatcher) refuseCanceledRun(ctx context.Context, run store.Run) (bool, error) {
+	stored, err := d.config.Database.Run(ctx, run.ID)
+	if err != nil {
+		return false, err
+	}
+	if !stored.CancelRequested {
+		return false, nil
+	}
+	d.mu.Lock()
+	cancel, active := d.runningCancel, d.runningRunID == run.ID
+	d.mu.Unlock()
+	if active && cancel != nil {
+		cancel()
+	}
+	return true, d.cancelRun(ctx, stored)
 }
 
 // failChain records a chain failure. A cancel request that arrived while the
@@ -167,6 +223,11 @@ func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy stor
 // configured (decision 9) and a fresh preflight passed (decision 10). done
 // reports that the run already reached a terminal failure and its write is the
 // returned error.
+//
+// A cancel request that arrives during the preflight, the version probe or the
+// connection checks cancels this context, so the preflight reports the canceled
+// code. That is a cancel, not a preflight failure: the run ends canceled and
+// leaves no backup, exactly as a cancel during the chain does.
 func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Policy) (admission, bool, error) {
 	// Decision 9: without the KEK, work root or XtraBackup executable the run
 	// was still created, and now fails visibly. Nothing is skipped silently.
@@ -178,11 +239,17 @@ func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Poli
 		return admission{}, true, err
 	}
 	outcome, code, preflightErr := d.preflightRun(ctx, run, policy)
+	if code == "canceled" || (code != "" && ctx.Err() != nil) {
+		return admission{}, true, d.cancelRun(ctx, run)
+	}
 	if code != "" {
 		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
 	}
 	connection, identity, err := d.preflightConnection(ctx, policy)
 	if err != nil {
+		if ctx.Err() != nil {
+			return admission{}, true, d.cancelRun(ctx, run)
+		}
 		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, "identity_missing", err)
 	}
 	return admissionFor(connection, identity, outcome), false, nil
@@ -234,39 +301,22 @@ func (d *Dispatcher) openRunRepository(ctx context.Context, run store.Run, polic
 	return repo, false, nil
 }
 
-// runChain runs one chain under the registered run context, so a cancel request
-// reaches the in-flight tool. The context is always unregistered afterwards.
-func (d *Dispatcher) runChain(ctx context.Context, run store.Run, job chain.Job) (chain.Result, error) {
-	runCtx, cancel := context.WithCancel(ctx)
-	d.mu.Lock()
-	d.runningCancel = cancel
-	d.runningRunID = run.ID
-	d.mu.Unlock()
-	result, err := chain.Run(runCtx, job)
-	cancel()
-	d.mu.Lock()
-	d.runningCancel = nil
-	d.runningRunID = ""
-	d.mu.Unlock()
-	return result, err
+// runChain runs one chain under the run context that executeRun registered at
+// claim time, so a cancel request reaches the in-flight tool through the same
+// registration that already covered the preflight.
+func (d *Dispatcher) runChain(ctx context.Context, _ store.Run, job chain.Job) (chain.Result, error) {
+	return chain.Run(ctx, job)
 }
 
 // preflightRun runs the fresh preflight and records it on the source. It
 // returns the observed outcome, the stable failure code (empty when the run may
-// proceed) and the underlying error for the run record.
+// proceed) and the underlying error for the run record. A canceled context is
+// reported as the canceled code, so a cancel that lands during the preflight or
+// the version probe ends the run as canceled, not as a preflight failure.
 func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy store.Policy) (resources.PreflightOutcome, string, error) {
-	service := d.config.Preflight
-	if service == nil {
-		service = &resources.Service{Store: d.config.Database, Settings: d.config.Settings}
-	}
-	outcome, err := service.PreflightSource(ctx, policy.SourceID, policy.LocalRepositoryID)
-	switch {
-	case errors.Is(err, resources.ErrUnavailable), errors.Is(err, store.ErrUnavailable):
-		return outcome, "unconfigured", err
-	case errors.Is(err, store.ErrNotFound):
-		return outcome, "source_missing", err
-	case err != nil:
-		return outcome, "preflight_failed", err
+	outcome, err := d.preflightService().PreflightSource(ctx, policy.SourceID, policy.LocalRepositoryID)
+	if code, failed := preflightErrorCode(ctx, err); failed {
+		return outcome, code, err
 	}
 	record := outcome.Record()
 	if _, err := d.config.Database.RecordSourcePreflight(ctx, policy.SourceID, record,
@@ -277,8 +327,10 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 		d.logEvent(ctx, run.ID, eventPreflightOK, nil)
 		return outcome, "", nil
 	}
-	code := "preflight_failed"
-	check := "preflight"
+	if ctx.Err() != nil || (outcome.Failure != nil && outcome.Failure.Code == "canceled") {
+		return outcome, "canceled", fmt.Errorf("preflight canceled")
+	}
+	code, check := "preflight_failed", "preflight"
 	if outcome.Failure != nil {
 		if outcome.Failure.Code != "" {
 			code = outcome.Failure.Code
@@ -289,6 +341,34 @@ func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy sto
 	}
 	d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{"check": check, "code": code})
 	return outcome, code, fmt.Errorf("preflight failed")
+}
+
+// preflightService returns the injected preflight or the production resources
+// service over this dispatcher's database.
+func (d *Dispatcher) preflightService() PreflightRunner {
+	if d.config.Preflight != nil {
+		return d.config.Preflight
+	}
+	return &resources.Service{Store: d.config.Database, Settings: d.config.Settings}
+}
+
+// preflightErrorCode maps a preflight Go error to the stable run code and
+// reports whether the call failed at all. A canceled context is reported as
+// canceled, so a cancel during the preflight is not recorded as a preflight
+// failure.
+func preflightErrorCode(ctx context.Context, err error) (string, bool) {
+	switch {
+	case err == nil:
+		return "", false
+	case errors.Is(err, resources.ErrUnavailable), errors.Is(err, store.ErrUnavailable):
+		return "unconfigured", true
+	case errors.Is(err, store.ErrNotFound):
+		return "source_missing", true
+	case ctx.Err() != nil:
+		return "canceled", true
+	default:
+		return "preflight_failed", true
+	}
 }
 
 // validateKEK rechecks that the KEK is outside the policy's local repository

@@ -581,3 +581,74 @@ func assertRetainedReservation(t *testing.T, f *fixture, chain testChain) {
 		}
 	}
 }
+
+// TestDeleteLocalChainSkipsAnotherPairsReservation is the pair-scoping rule for
+// the library entry point: a pending reservation that belongs to another local
+// repository sharing this FTP repository is never reclaimed here and never
+// marked done, so its own pair can finish it in the right root.
+func TestDeleteLocalChainSkipsAnotherPairsReservation(t *testing.T) {
+	f := newFixture(t)
+	first, second := f.newChain(2), f.newChain(2)
+	f.verifyChain(first)
+	f.verifyChain(second)
+
+	// The reservation of the first chain belongs to another pair: its replica
+	// row names a different local repository, which is exactly what the queue
+	// binding of a shared FTP repository looks like.
+	const otherLocalRepository = "other-local-repository"
+	if _, err := f.store.ReserveLocalDelete(t.Context(), first.id, f.now); err != nil {
+		t.Fatal(err)
+	}
+	rebindReplicas(t, f, first, otherLocalRepository)
+
+	// Deleting through this pair must leave the other pair's reservation and its
+	// objects alone.
+	if err := f.r.DeleteLocalChain(t.Context(), first.id); err != nil {
+		t.Fatal(err)
+	}
+	assertReclaimed(t, f, first, false)
+	reserved, err := f.store.LocalDeletePending(t.Context(), first.id)
+	if err != nil || len(reserved) != len(first.backups) {
+		t.Fatalf("reservation of %s = %+v %v; want the other pair's %d rows left alone",
+			first.id, reserved, err, len(first.backups))
+	}
+	assertReplicaBinding(t, f, first, otherLocalRepository)
+
+	// The owning pair finishes it, in its own root.
+	owner := f.replicator(f.repo)
+	owner.LocalRepositoryID = otherLocalRepository
+	if err := owner.DeleteLocalChain(t.Context(), first.id); err != nil {
+		t.Fatal(err)
+	}
+	assertReclaimed(t, f, first, true)
+	assertReservationEmpty(t, f, first)
+	// The other chain was never part of either reservation.
+	assertReclaimed(t, f, second, false)
+}
+
+// rebindReplicas moves one chain's replica rows to another local repository.
+func rebindReplicas(t *testing.T, f *fixture, chain testChain, localRepositoryID string) {
+	t.Helper()
+	for _, backupID := range chain.backups {
+		if _, err := f.db.ExecContext(t.Context(), `UPDATE replicas SET local_repository_id = ?
+WHERE backup_id = ? AND repository_id = ?`, localRepositoryID, backupID, testRepositoryID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// assertReplicaBinding requires every member's replica row to stay bound to one
+// local repository, so no reclaim rebound it to this pair.
+func assertReplicaBinding(t *testing.T, f *fixture, chain testChain, localRepositoryID string) {
+	t.Helper()
+	for _, backupID := range chain.backups {
+		var bound string
+		if err := f.db.QueryRowContext(t.Context(), `SELECT local_repository_id FROM replicas
+WHERE backup_id = ? AND repository_id = ?`, backupID, testRepositoryID).Scan(&bound); err != nil {
+			t.Fatal(err)
+		}
+		if bound != localRepositoryID {
+			t.Fatalf("replica of %s is bound to %q, want %q", backupID, bound, localRepositoryID)
+		}
+	}
+}

@@ -286,3 +286,24 @@ SELECT * FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1;
 -- name: CountActiveFullsForSource :one
 SELECT COUNT(*) FROM runs
 WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running');
+
+-- name: SourceLocalRepositories :many
+-- The local repositories that hold one source's backups: every policy whose
+-- run published a backup of that source. The physical schema keeps no local
+-- repository on a backup, so the producing run's policy is the durable binding.
+SELECT DISTINCT p.local_repository_id AS local_repository_id
+FROM runs r
+JOIN policies p ON p.id = r.policy_id
+WHERE r.source_id = ? AND r.backup_id IS NOT NULL
+ORDER BY p.local_repository_id;
+
+-- name: PairBackups :many
+-- Every backup published by a run of a policy with exactly this
+-- (local_repository_id, replica_repository_id) pair. A backup produced by a
+-- policy on another local repository is never selected, so one replica
+-- repository shared by two local repositories never queues the other's backup.
+SELECT DISTINCT r.backup_id AS backup_id
+FROM runs r
+JOIN policies p ON p.id = r.policy_id
+WHERE p.local_repository_id = ? AND p.replica_repository_id = ?
+  AND r.backup_id IS NOT NULL;

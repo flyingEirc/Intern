@@ -99,7 +99,12 @@ type fixture struct {
 	certPool   *x509.CertPool
 	child      *exec.Cmd
 	childLog   string
-	closed     bool
+	// childLogs keeps every serve child log this fixture wrote, in start order.
+	// A failing process scenario is often diagnosed from the log of a child that
+	// is no longer the current one: the SIGKILLed child of a stalled recovery,
+	// for instance.
+	childLogs []string
+	closed    bool
 }
 
 type client struct {
@@ -562,20 +567,38 @@ func (f *fixture) waitAllReplicasVerified(t *testing.T) {
 	t.Fatal("not every replica reached verified before the deadline")
 }
 
-func (f *fixture) waitXtrabackup(t *testing.T, runID string) {
+// waitXtrabackup waits until the run is running AND its real backup process is
+// live, and returns that process. Only the matched `--backup` process of this
+// fixture satisfies it: a fault injected afterwards is injected during a
+// backup, not during the preflight `--version` probe.
+func (f *fixture) waitXtrabackup(t *testing.T, runID string) backupProcess {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Minute)
 	for time.Now().Before(deadline) {
 		run := f.getRun(t, runID)
 		if run.Status == store.RunStatusCompleted || run.Status == store.RunStatusFailed || run.Status == store.RunStatusCanceled {
-			t.Fatalf("run %s ended as %s before xtrabackup was observed", runID, run.Status)
+			t.Fatalf("run %s ended as %s before a backup process was observed", runID, run.Status)
 		}
-		if run.Status == store.RunStatusRunning && f.xtrabackupRunning() {
-			return
+		if run.Status == store.RunStatusRunning {
+			if backup, ok := f.xtrabackupBackup(); ok {
+				return backup
+			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("xtrabackup never appeared while the run was live")
+	t.Fatal("no live xtrabackup --backup process appeared while the run was live")
+	return backupProcess{}
+}
+
+// requireBackupAlive rechecks the matched backup immediately before a fault is
+// injected. waitXtrabackup already returned a real `--backup` process; this
+// closes the window between that match and the signal or cancel, so a marker
+// can only claim injection during a backup that was still running.
+func (f *fixture) requireBackupAlive(t *testing.T, backup backupProcess) {
+	t.Helper()
+	if !backup.alive() {
+		t.Fatalf("the matched backup %d exited before the fault was injected; the injection would not be during a backup", backup.pid)
+	}
 }
 
 func (f *fixture) dml(t *testing.T, n int) {
@@ -634,6 +657,7 @@ func (f *fixture) startServeChild(t *testing.T) {
 	logFile, err := os.Create(logPath)
 	must(t, err)
 	f.childLog = logPath
+	f.childLogs = append(f.childLogs, logPath)
 	command := exec.Command(executable, "-test.v", "-test.run=^TestW4ServeChild$", "-test.timeout=15m")
 	command.Env = append(os.Environ(),
 		"INTERN_W4_SERVE=1",
@@ -857,6 +881,281 @@ func (f *fixture) childOutput(t *testing.T) []byte {
 	return raw
 }
 
+// Diagnostic budgets. The dump is an aid for root-causing, so it must fit in a
+// CI log even when a scenario stalled with a long run log and a chatty child.
+// Every section has its own budget, so a noisy one cannot starve another: the
+// replica rows and the child log tail are exactly what a stalled queue is
+// diagnosed from, and each involved run keeps its full 50 stored events.
+const (
+	diagnosticLines       = 1200
+	diagnosticReplicaRows = 100
+	diagnosticRunRows     = 6
+	diagnosticRunLogLines = 50
+	diagnosticChildLines  = 200
+	// diagnosticChildBudget reserves room for the child log tails in the total
+	// dump budget, so the replica table and the run logs cannot crowd them out.
+	diagnosticChildBudget  = 4 * (diagnosticChildLines + 1)
+	diagnosticMessageWidth = 200
+)
+
+// dumpDiagnostics logs a bounded, secret-scanned snapshot of the state a
+// failing scenario left behind: every replica row, the last 50 run_logs rows of
+// the involved runs, and the tail of every serve child log this fixture wrote.
+// A process case that failed with none of that in the evidence is what made its
+// real cause unreachable; the dump is the missing half of the report.
+//
+// The dump never fails the scenario itself: the scenario already failed, and the
+// dump must not turn a real defect into a different one. A generated credential
+// found in the dump is redacted and reported as its own line, so the leak is
+// visible without ever reaching the log.
+//
+// The child log tails are built and reserved first. They are the only record of
+// a stalled drain, recovery or replication in the process cases, so a long
+// replica table must never be able to truncate them away.
+func (f *fixture) dumpDiagnostics(t *testing.T) {
+	if !t.Failed() {
+		return
+	}
+	children := f.diagnosticChildren()
+	if len(children) > diagnosticChildBudget {
+		children = append(children[:diagnosticChildBudget], "W4 diagnostics: further child log lines omitted")
+	}
+	remaining := max(diagnosticLines-len(children)-2, 0)
+	lines := []string{fmt.Sprintf("W4 diagnostics: begin (bounded to %d lines)", diagnosticLines)}
+	for _, section := range [][]string{f.diagnosticReplicas(), f.diagnosticRuns()} {
+		if len(section) > remaining {
+			section = append(section[:remaining], "W4 diagnostics: further lines of this section omitted")
+		}
+		remaining = max(remaining-len(section), 0)
+		lines = append(lines, section...)
+	}
+	lines = append(lines, children...)
+	clean, leaks := f.redact(lines)
+	for _, line := range clean {
+		t.Log(line)
+	}
+	if leaks > 0 {
+		t.Logf("W4 diagnostics: a generated credential appeared in %d diagnostic line(s) and was redacted", leaks)
+	}
+	t.Log("W4 diagnostics: end")
+}
+
+// diagnosticReplicas prints every replica row with the fields a stalled queue
+// is diagnosed from: which pair it belongs to, how far it got, why it stopped
+// and when it may try again.
+func (f *fixture) diagnosticReplicas() []string {
+	rows, err := f.analysis.QueryContext(context.Background(),
+		`SELECT backup_id, repository_id, local_repository_id, status, attempts, permanent,
+COALESCE(last_error_code, ''), next_attempt_at FROM replicas
+ORDER BY local_repository_id, repository_id, backup_id LIMIT ?`, diagnosticReplicaRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: replica rows unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: replica rows: backup_id repository_id local_repository_id status attempts permanent last_error_code next_attempt_at"}
+	for rows.Next() {
+		var backup, repository, localRepo, status, code, next string
+		var attempts, permanent int
+		if err = rows.Scan(&backup, &repository, &localRepo, &status, &attempts, &permanent, &code, &next); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: replica row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: replica %s %s %s status=%s attempts=%d permanent=%t last_error_code=%q next_attempt_at=%s",
+			backup, repository, localRepo, status, attempts, permanent != 0, code, next))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: replica rows unreadable: %v", err))
+	}
+	return out
+}
+
+// diagnosticRuns prints the involved runs of this fixture's source and, for
+// each, its last 50 stored log rows. Runs that never reached a terminal state
+// come first, then the failed ones: a stuck FIFO, a silently dropped cancel or
+// a run that ended in the wrong state is one of those, and their logs are what
+// says why. The run count is capped so the dump stays bounded; every listed run
+// gets its full 50 rows, because a run whose log was cut short is exactly the
+// run a failure cannot be read from.
+func (f *fixture) diagnosticRuns() []string {
+	if f.sourceID == "" {
+		return []string{"W4 diagnostics: no source was created"}
+	}
+	rows, err := f.analysis.QueryContext(context.Background(),
+		`SELECT id, policy_id, kind, "trigger", status, COALESCE(error_class, ''), COALESCE(error_code, ''),
+COALESCE(backup_id, ''), cancel_requested, scheduled_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
+FROM runs WHERE source_id = ?
+ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
+         created_at DESC LIMIT ?`, f.sourceID, diagnosticRunRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: runs unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: involved runs"}
+	var ids []string
+	for rows.Next() {
+		var id, policy, kind, trigger, status, class, code, backup, scheduled, started, finished string
+		var cancel int
+		if err = rows.Scan(&id, &policy, &kind, &trigger, &status, &class, &code, &backup, &cancel, &scheduled, &started, &finished); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: run row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: run %s policy=%s kind=%s trigger=%s status=%s error_class=%q error_code=%q backup_id=%s cancel_requested=%t scheduled_at=%s started_at=%q finished_at=%q",
+			id, policy, kind, trigger, status, class, code, backup, cancel != 0, scheduled, started, finished))
+		ids = append(ids, id)
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: run rows unreadable: %v", err))
+	}
+	for _, id := range ids {
+		out = append(out, f.diagnosticLogs(id)...)
+	}
+	return out
+}
+
+// diagnosticLogs prints the last diagnosticRunLogLines stored events of one run,
+// oldest first.
+func (f *fixture) diagnosticLogs(runID string) []string {
+	rows, err := f.analysis.QueryContext(context.Background(),
+		`SELECT seq, ts, level, event, substr(COALESCE(message, ''), 1, ?) FROM run_logs
+WHERE run_id = ? ORDER BY seq DESC LIMIT ?`, diagnosticMessageWidth, runID, diagnosticRunLogLines)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: run_logs of %s unavailable: %v", runID, err)}
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var seq int64
+		var ts, level, event, message string
+		if err = rows.Scan(&seq, &ts, &level, &event, &message); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: run_logs row of %s unreadable: %v", runID, err))
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: log %s seq=%d level=%s event=%s message=%q", runID, seq, level, event, message))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: run_logs of %s unreadable: %v", runID, err))
+	}
+	slices.Reverse(out)
+	return out
+}
+
+// diagnosticChildren prints the tail of every serve child log this fixture
+// wrote, oldest first. The drain, recovery and replication failures of the
+// process cases only exist there, and the child that failed is often not the
+// newest one: a SIGKILLed child's log is what a stalled recovery is read from,
+// so every log is quoted, not only the current child's.
+func (f *fixture) diagnosticChildren() []string {
+	logs := slices.Clone(f.childLogs)
+	if len(logs) == 0 {
+		return []string{"W4 diagnostics: no serve child was started in this scenario"}
+	}
+	out := make([]string, 0, len(logs)*(diagnosticChildLines+1))
+	for _, path := range logs {
+		tail, err := tailLines(path, diagnosticChildLines)
+		if err != nil {
+			out = append(out, fmt.Sprintf("W4 diagnostics: serve child log %s unavailable: %v", filepath.Base(path), err))
+			continue
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: serve child log %s tail (%d lines)", filepath.Base(path), len(tail)))
+		for _, line := range tail {
+			out = append(out, "W4 diagnostics: child "+line)
+		}
+	}
+	return out
+}
+
+// tailLines returns the last count lines of one file, reading a bounded window
+// from the end rather than the whole file. An absent file has no lines.
+func tailLines(path string, count int) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, partial, err := readTail(path)
+	if err != nil || len(raw) == 0 {
+		return nil, err
+	}
+	return lastLines(string(raw), count, partial), nil
+}
+
+// readTail reads a bounded window from the end of one file. partial reports
+// that the window started mid-line, so its first line is not a whole record.
+func readTail(path string) ([]byte, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	// 512 KiB of child output covers far more than 200 lines of our own
+	// fixed-format records, and bounds the read whatever the file grew to.
+	const window = 512 << 10
+	offset := max(info.Size()-window, 0)
+	if _, err = file.Seek(offset, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return nil, false, err
+	}
+	return raw, offset > 0, nil
+}
+
+// lastLines splits one text into its last count lines, dropping the first line
+// of a window that started mid-record.
+func lastLines(text string, count int, partial bool) []string {
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return nil
+	}
+	found := strings.Split(text, "\n")
+	if partial {
+		found = found[1:]
+	}
+	if len(found) > count {
+		found = found[len(found)-count:]
+	}
+	return found
+}
+
+// redact removes every generated credential from the dump and reports how many
+// lines carried one. The dump quotes stored text, and a diagnostic must never be
+// the place a secret reaches a CI log.
+func (f *fixture) redact(lines []string) ([]string, int) {
+	secrets := []string{f.secret.source, f.secret.ftp, f.secret.admin, f.secret.operator}
+	out := make([]string, 0, len(lines))
+	leaks := 0
+	for _, line := range lines {
+		hidden := false
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(line, secret) {
+				line = strings.ReplaceAll(line, secret, "[redacted]")
+				hidden = true
+			}
+		}
+		if hidden {
+			leaks++
+			line += " (a generated credential appeared here and was redacted)"
+		}
+		out = append(out, line)
+	}
+	return out, leaks
+}
+
+// sqliteRunOutcome reads the stored status, failure class and failure code of
+// one run. The marker of a fault quotes all three from the row, so the class
+// and code a fault recorded are state, not a claim.
+func (f *fixture) sqliteRunOutcome(t *testing.T, runID string) (string, string, string) {
+	t.Helper()
+	var status, class, code string
+	must(t, f.analysis.QueryRowContext(t.Context(),
+		`SELECT status, COALESCE(error_class, ''), COALESCE(error_code, '') FROM runs WHERE id = ?`, runID,
+	).Scan(&status, &class, &code))
+	return status, class, code
+}
+
 func newClient(t *testing.T, httpClient *http.Client, base, role string) *client {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
@@ -991,38 +1290,162 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// xtrabackupRunning reports whether the configured xtrabackup executable is
-// running as a descendant of this worker or of the serve child it started. The
+// backupProcess is one live XtraBackup *backup* of this fixture, identified
+// from /proc. It is never the preflight `--version` probe: the matched process
+// carries `--backup` and writes into a target directory inside the run's work
+// root, so a fault injected at this point was injected while a real backup was
+// running.
+type backupProcess struct {
+	pid int
+	// target is the matched --target-dir, relative to the fixture's work root.
+	// It is what proves the process belongs to this harness's run.
+	target string
+}
+
+// evidence is the bounded, argv-derived fragment a fault-injection marker
+// quotes instead of claiming the injection reached a backup.
+func (p backupProcess) evidence() string {
+	return fmt.Sprintf("injected_during=backup backup_pid=%d backup_target=%s", p.pid, p.target)
+}
+
+// alive reports whether this matched backup is still running the same argv. It
+// is checked immediately before a fault is injected: the marker may only claim
+// injection during a backup when the backup was alive at that moment, so a
+// backup that ended a few milliseconds earlier fails the scenario loudly
+// instead of passing on a claim it did not earn.
+func (p backupProcess) alive() bool {
+	argv, ok := processArgv(p.pid)
+	return ok && hasArgument(argv, "--backup")
+}
+
+// xtrabackupBackup returns the live backup process of this fixture. The
 // identity is the resolved /proc/<pid>/exe target, never a comm value or an
 // argv basename, and the parent chain must reach one of this fixture's own
 // processes, so a supervisor or a stale process cannot be mistaken for the
-// tool of the run under test.
-func (f *fixture) xtrabackupRunning() bool {
+// tool of the run under test. On top of that identity the argv must carry
+// `--backup` and a `--target-dir` strictly inside the fixture's work root: the
+// `--version` preflight probe has neither, and a run whose backup is not
+// running yet therefore cannot match.
+func (f *fixture) xtrabackupBackup() (backupProcess, bool) {
+	want, work, ok := f.backupIdentity()
+	if !ok {
+		return backupProcess{}, false
+	}
+	roots := f.processRoots()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return backupProcess{}, false
+	}
+	for _, entry := range entries {
+		pid, ok := procPID(entry.Name())
+		if !ok || !executableIs(pid, want) || !descendsFrom(pid, roots) {
+			continue
+		}
+		if backup, ok := backupOfProcess(pid, work); ok {
+			return backup, true
+		}
+	}
+	return backupProcess{}, false
+}
+
+// backupIdentity resolves the configured tool and the fixture's work root.
+func (f *fixture) backupIdentity() (string, string, bool) {
 	want, err := filepath.EvalSymlinks(xtrabackupBin)
 	if err != nil {
-		return false
+		return "", "", false
 	}
+	work, err := filepath.EvalSymlinks(f.layout.work)
+	if err != nil {
+		return "", "", false
+	}
+	return want, work, true
+}
+
+// processRoots is the set of this fixture's own processes: the worker and, when
+// one is running, the serve child it started.
+func (f *fixture) processRoots() []int {
 	roots := []int{os.Getpid()}
 	if f.child != nil && f.child.Process != nil {
 		roots = append(roots, f.child.Process.Pid)
 	}
-	return anyProcessMatches(want, roots)
+	return roots
 }
 
-// anyProcessMatches walks /proc for one process whose executable is want and
-// whose parent chain reaches one of roots.
-func anyProcessMatches(want string, roots []int) bool {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false
+// backupOfProcess reports whether one process is a real backup writing into
+// work, and returns it.
+func backupOfProcess(pid int, work string) (backupProcess, bool) {
+	argv, ok := processArgv(pid)
+	if !ok || !hasArgument(argv, "--backup") {
+		return backupProcess{}, false
 	}
-	for _, entry := range entries {
-		pid, ok := procPID(entry.Name())
-		if ok && executableIs(pid, want) && descendsFrom(pid, roots) {
+	target, ok := backupTarget(argv, work)
+	if !ok {
+		return backupProcess{}, false
+	}
+	return backupProcess{pid: pid, target: target}, true
+}
+
+// hasArgument reports whether argv carries one exact option.
+func hasArgument(argv []string, want string) bool {
+	for _, arg := range argv {
+		if arg == want {
 			return true
 		}
 	}
 	return false
+}
+
+// backupTarget resolves the `--target-dir` option of one backup argv and
+// reports it relative to work when it lies strictly inside that root. A probe,
+// an extraction or a backup of another harness has no such option or writes
+// outside this root, so it is rejected here.
+func backupTarget(argv []string, work string) (string, bool) {
+	for _, arg := range argv {
+		value, ok := strings.CutPrefix(arg, "--target-dir=")
+		if !ok {
+			continue
+		}
+		resolved, ok := resolvePath(value)
+		if !ok {
+			return "", false
+		}
+		rel, err := filepath.Rel(work, resolved)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		return rel, true
+	}
+	return "", false
+}
+
+// resolvePath resolves every symlink of one absolute path. The leaf may not
+// exist yet — the tool creates its own subdirectory inside the target — so an
+// unresolvable leaf falls back to its resolved parent, which keeps a live
+// backup matchable without ever accepting an unresolved path.
+func resolvePath(path string) (string, bool) {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved, true
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(parent, filepath.Base(path)), true
+}
+
+// processArgv reads one process's argv from /proc. The kernel separates the
+// entries with NUL bytes and terminates the list with one.
+func processArgv(pid int) ([]string, bool) {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return nil, false
+	}
+	fields := bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		out = append(out, string(field))
+	}
+	return out, true
 }
 
 // procPID parses one /proc entry name. This worker's own pid is skipped: it is
@@ -1082,17 +1505,19 @@ func scriptInterpreter(pid int, script string) bool {
 	return false
 }
 
-// argvResolvesTo reports whether one argv entry names the given file.
+// argvResolvesTo reports whether one argv entry names the given file. It is the
+// interpreter-side half of the identity of a configured wrapper script, whose
+// process is the interpreter with the script in its argv.
 func argvResolvesTo(pid int, want string) bool {
-	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil {
+	argv, ok := processArgv(pid)
+	if !ok {
 		return false
 	}
-	for _, part := range bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0}) {
-		if len(part) == 0 {
+	for _, part := range argv {
+		if part == "" {
 			continue
 		}
-		if resolved, err := filepath.EvalSymlinks(string(part)); err == nil && resolved == want {
+		if resolved, err := filepath.EvalSymlinks(part); err == nil && resolved == want {
 			return true
 		}
 	}

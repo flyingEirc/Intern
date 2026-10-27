@@ -166,13 +166,7 @@ func (s *Service) PreflightSource(ctx context.Context, sourceID, localRepository
 		MinWorkBytes:   s.Settings.MinWorkBytes,
 		MinBackupBytes: s.Settings.MinBackupBytes,
 	})
-	outcome := PreflightOutcome{
-		Checks: result.Checks, ServerUUID: result.Identity.UUID, ServerVersion: result.Identity.Version,
-		ToolVersion: result.Tool.Version,
-	}
-	for _, warning := range result.WarningDetails {
-		outcome.Warnings = append(outcome.Warnings, store.PreflightWarning{Code: warning.Code, Message: warning.Message})
-	}
+	outcome := PreflightOutcomeOf(result)
 	if err != nil {
 		var failure *physical.PreflightError
 		if !errors.As(err, &failure) {
@@ -181,6 +175,22 @@ func (s *Service) PreflightSource(ctx context.Context, sourceID, localRepository
 		outcome.Failure = &Failure{Check: failure.Check, Code: failure.Code, Message: failure.Message, Missing: failure.Missing}
 	}
 	return outcome, nil
+}
+
+// PreflightOutcomeOf maps one physical preflight observation onto the service
+// outcome, and it is the only place the two shapes meet. The tool version is
+// carried through untouched: the physical chain writes it into the backup
+// metadata and compares it on every later member, so losing it here would
+// silently disable that comparison.
+func PreflightOutcomeOf(result physical.PreflightResult) PreflightOutcome {
+	outcome := PreflightOutcome{
+		Checks: result.Checks, ServerUUID: result.Identity.UUID, ServerVersion: result.Identity.Version,
+		ToolVersion: result.Tool.Version,
+	}
+	for _, warning := range result.WarningDetails {
+		outcome.Warnings = append(outcome.Warnings, store.PreflightWarning{Code: warning.Code, Message: warning.Message})
+	}
+	return outcome
 }
 
 // ProbeRepository writes, reads and removes a temporary object on the target
