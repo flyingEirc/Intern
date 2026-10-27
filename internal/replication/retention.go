@@ -170,7 +170,7 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 		return err
 	}
 	if len(reserved) > 0 {
-		return r.reclaimReserved(ctx, r.ownReservations(ctx, reserved))
+		return r.reclaimOwn(ctx, reserved)
 	}
 	eligible, reason, err := r.eligibility(ctx, chainID)
 	if err != nil {
@@ -183,7 +183,18 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 	if err != nil {
 		return err
 	}
-	return r.reclaimReserved(ctx, r.ownReservations(ctx, reserved))
+	return r.reclaimOwn(ctx, reserved)
+}
+
+// reclaimOwn keeps this pair's reservations of the list and reclaims them. A
+// failed ownership read is returned: the caller must not be told the chain was
+// reclaimed when nothing was touched.
+func (r *Replicator) reclaimOwn(ctx context.Context, reserved []store.LocalDelete) error {
+	own, err := r.ownReservations(ctx, reserved)
+	if err != nil {
+		return err
+	}
+	return r.reclaimReserved(ctx, own)
 }
 
 // ownReservations keeps only the pending rows this (local, replica) pair owns:
@@ -192,14 +203,18 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 // FTP repository is left untouched — never reclaimed here and never marked
 // done — because its object lives in the other repository's root and this
 // pair's recovery pass is what finishes it.
-func (r *Replicator) ownReservations(ctx context.Context, reserved []store.LocalDelete) []store.LocalDelete {
+//
+// A failed status read is an error, never an empty ownership set: reporting
+// success while reclaiming nothing would leave the reservation's objects in
+// place with the caller believing they are gone.
+func (r *Replicator) ownReservations(ctx context.Context, reserved []store.LocalDelete) ([]store.LocalDelete, error) {
 	ids := make([]string, 0, len(reserved))
 	for _, row := range reserved {
 		ids = append(ids, row.BackupID)
 	}
 	statuses, err := r.ReplicaStatuses(ctx, ids)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	own := make([]store.LocalDelete, 0, len(reserved))
 	for _, row := range reserved {
@@ -207,7 +222,7 @@ func (r *Replicator) ownReservations(ctx context.Context, reserved []store.Local
 			own = append(own, row)
 		}
 	}
-	return own
+	return own, nil
 }
 
 // recoverLocalDeletes finishes every pending local-delete reservation that

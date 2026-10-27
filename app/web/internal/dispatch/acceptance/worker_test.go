@@ -260,7 +260,7 @@ func (f *fixture) requireSQLiteBackup(t *testing.T, member dispatch.BackupView) 
 	t.Helper()
 	var sqliteID, sqliteSHA, sqlitePath string
 	var sqliteSeq int
-	must(t, f.analysis.QueryRowContext(t.Context(),
+	must(t, f.view(t).QueryRowContext(t.Context(),
 		`SELECT id, seq, object_path, payload_sha256 FROM backups WHERE id = ?`, member.ID,
 	).Scan(&sqliteID, &sqliteSeq, &sqlitePath, &sqliteSHA))
 	if sqliteID != member.ID || sqliteSeq != member.Seq || sqlitePath != member.ObjectPath || sqliteSHA != member.PayloadSHA256 {
@@ -456,7 +456,7 @@ func (f *fixture) requireDisjointRuns(t *testing.T) int {
 // finished_at means the concurrency claim cannot be evaluated, so it fails.
 func (f *fixture) runIntervals(t *testing.T) []runInterval {
 	t.Helper()
-	rows, err := f.analysis.QueryContext(t.Context(), `SELECT id, started_at, finished_at FROM runs`)
+	rows, err := f.view(t).QueryContext(t.Context(), `SELECT id, started_at, finished_at FROM runs`)
 	must(t, err)
 	defer func() { must(t, rows.Close()) }()
 	var all []runInterval
@@ -685,6 +685,10 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 	if exit != 0 {
 		t.Fatalf("serve child exited %d: the bounded drain reported an error", exit)
 	}
+	// The view was reopened when the child stopped; the row the child created is
+	// the first thing read from it, so a view that cannot see it fails here
+	// instead of reporting "no rows" from the outcome check below.
+	f.requireViewRun(t, runID, "")
 	// The drain must record a terminal outcome for the interrupted run. A row
 	// still `running` after the child exited means the drain silently dropped
 	// the outcome, and `completed` would be a false success.
@@ -700,14 +704,27 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 		t.Fatalf("%d backups completed during the SIGTERM window", during)
 	}
 	f.startServeChild(t)
+	// The restarted child creates this run, so a view that can see it is the
+	// live database rather than the snapshot the previous child's exit left
+	// behind. It is the first read of the view after the restart: everything
+	// below is judged on it.
+	next := f.triggerRun(t, policy, store.RunKindFull, "w4-sigterm-next")
+	f.waitRun(t, next, store.RunStatusCompleted)
+	f.requireViewRun(t, next, store.RunStatusCompleted)
 	// The drain wrote a terminal row before the child exited, so the restart
 	// must find it unchanged: recovery only reclaims rows a process left
 	// running. A row that changed here means the drain's outcome was lost.
-	if recovered := f.sqliteString(t, `SELECT status FROM runs WHERE id = ?`, runID); recovered != status {
-		t.Fatalf("recovered SIGTERM run is %s, want %s", recovered, status)
+	// The value is read twice from two different connections — the restarted
+	// child serves it over the API, the view reads the stored row — so the
+	// check cannot pass by reading one stale snapshot against itself.
+	recovered := f.getRun(t, runID)
+	if recovered.Status != status || errorClass(recovered) != class {
+		t.Fatalf("the restarted child reports the SIGTERM run as status=%s class=%q, want %s class=%q",
+			recovered.Status, errorClass(recovered), status, class)
 	}
-	next := f.triggerRun(t, policy, store.RunKindFull, "w4-sigterm-next")
-	f.waitRun(t, next, store.RunStatusCompleted)
+	if stored, storedClass, _ := f.sqliteRunOutcome(t, runID); stored != status || storedClass != class {
+		t.Fatalf("recovered SIGTERM run is %s class=%q, want %s class=%q", stored, storedClass, status, class)
+	}
 	f.assertNoSecret(t, nil)
 	t.Logf("W4-A3 sigterm sigterm_exit_bounded=true no_false_completed=true recovered=true status=%s error_class=%q error_code=%q exit=%d %s", status, class, code, exit, backup.evidence())
 }
@@ -747,8 +764,11 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 	published := f.getBackup(t, *full.BackupID)
 	beforeHash := f.hashLocal(t, published.ObjectPath)
 	// Settle replication first so the hold is measured against a fixed pair of
-	// protection points rather than against work still in flight.
-	f.waitAllReplicasVerified(t)
+	// protection points rather than against work still in flight. The full's
+	// own replica must be part of that settled set: a wait that only settles
+	// the rows a stale view happened to list would let the hold be measured
+	// against a backup that was never replicated.
+	f.waitAllReplicasVerified(t, *full.BackupID)
 	beforeProtection := f.getProtection(t)
 	if len(beforeProtection.Remote) != 1 {
 		t.Fatalf("before SIGKILL remote protection = %+v, the remote hold would be unproven", beforeProtection.Remote)
@@ -764,12 +784,22 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 		t.Fatal("child was not SIGKILL")
 	}
 	f.startServeChild(t)
+	// Both rows were written by the child that was killed, so a view that holds
+	// them is the live database. This is the first read of the view after the
+	// restart: a view frozen before that child wrote turns the recovery
+	// cross-check below into "sql: no rows in result set", which says nothing
+	// about the recovery it was meant to judge.
+	f.requireViewRun(t, fullID, store.RunStatusCompleted)
+	f.requireViewRun(t, incID, store.RunStatusFailed)
 	f.requireKilledRunRecovered(t, incID)
 	f.requirePublishedIntact(t, published, beforeHash, beforeProtection)
 	f.requireProtectionHeld(t, beforeProtection)
 	f.assertNoSecret(t, nil)
 	next := f.triggerRun(t, policy, store.RunKindIncremental, "w4-sigkill-next")
 	f.waitRun(t, next, store.RunStatusCompleted)
+	// The restarted child created and completed this run: seeing it here proves
+	// the view also carries the writes that followed the recovery.
+	f.requireViewRun(t, next, store.RunStatusCompleted)
 	status, class, code := f.sqliteRunOutcome(t, incID)
 	// The locked marker text stays contiguous, so the gate can match it; the
 	// run outcome the restart's recovery recorded follows it, read from the
@@ -787,7 +817,7 @@ func (f *fixture) requireKilledRunRecovered(t *testing.T, runID string) {
 		t.Fatalf("killed run api status=%s class=%s", inc.Status, errorClass(inc))
 	}
 	var status, class string
-	must(t, f.analysis.QueryRowContext(t.Context(),
+	must(t, f.view(t).QueryRowContext(t.Context(),
 		`SELECT status, COALESCE(error_class, '') FROM runs WHERE id = ?`, runID).Scan(&status, &class))
 	if status != store.RunStatusFailed || class != store.RunErrorInterrupted {
 		t.Fatalf("killed run sqlite status=%s class=%s", status, class)
@@ -877,9 +907,10 @@ func lsnContinuous(members []dispatch.BackupView) bool {
 // SQLite row and to appear as completed in the API list.
 func runsAgree(t *testing.T, f *fixture, listed []store.Run, ids []string) bool {
 	t.Helper()
+	view := f.view(t)
 	for _, id := range ids {
 		var status string
-		if err := f.analysis.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = ?`, id).Scan(&status); err != nil {
+		if err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = ?`, id).Scan(&status); err != nil {
 			return false
 		}
 		if status != store.RunStatusCompleted {

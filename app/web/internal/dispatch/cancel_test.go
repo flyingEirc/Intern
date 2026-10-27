@@ -142,6 +142,103 @@ func TestCancelBetweenPreflightAndChainEndsCanceled(t *testing.T) {
 	}
 }
 
+// TestCancelDuringPostClaimReadsEndsCanceled is X3: a cancel request that lands
+// while the run is inside the post-claim control-plane reads must end the run
+// canceled, not failed with policy_missing or repository_unavailable.
+//
+// The probe holds the single SQLite connection so the next read blocks, then
+// does exactly what RequestCancel does for a running run: write the flag, then
+// cancel the registered run context. Before the fix the blocked read inherited
+// the cancelable context, returned context.Canceled and was recorded as a
+// repository or policy failure even though nothing was wrong with either.
+func TestCancelDuringPostClaimReadsEndsCanceled(t *testing.T) {
+	q := newQueueFixture(t)
+	d := q.newDispatcher(time.Now)
+	q.queued("cancel-in-reads", store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
+	run := q.claim(t)
+	// The flag is set before the blocked read: that is exactly the read the
+	// cancel request would have to wait for.
+	q.setCancelFlag(t, run.ID)
+	release, done := q.blockControlPlane(t, func() error { return d.executeRun(t.Context(), run) })
+	d.cancelRegisteredRun(t, run.ID)
+	release()
+	requireRunResult(t, done)
+	assertCanceledWithoutBackup(t, q, run.ID)
+}
+
+// claim claims the one queued run the fixture holds.
+func (q *queueFixture) claim(t *testing.T) store.Run {
+	t.Helper()
+	run, claimed, err := q.database.ClaimRun(t.Context())
+	if err != nil || !claimed {
+		t.Fatalf("claim = %+v %v %v, want the queued run", run, claimed, err)
+	}
+	return run
+}
+
+// setCancelFlag writes the cancel request flag directly, which is the first half
+// of what RequestCancel does for a running run.
+func (q *queueFixture) setCancelFlag(t *testing.T, runID string) {
+	t.Helper()
+	if _, err := q.database.DB().ExecContext(t.Context(),
+		`UPDATE runs SET cancel_requested = 1 WHERE id = ?`, runID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// blockControlPlane holds the single database connection so the work's next
+// control-plane read waits. The returned release lets the read proceed; done
+// carries the work's own result.
+func (q *queueFixture) blockControlPlane(t *testing.T, work func() error) (release func(), done <-chan error) {
+	t.Helper()
+	tx, err := q.database.DB().BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() { result <- work() }()
+	// The connection is now held by the worker's blocked read.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case workErr := <-result:
+		t.Fatalf("the run finished while its first control-plane read was blocked: %v", workErr)
+	default:
+	}
+	return func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			t.Errorf("rollback: %v", rollbackErr)
+		}
+	}, result
+}
+
+// cancelRegisteredRun cancels the context the dispatcher registered for one run,
+// which is the second half of what RequestCancel does for a running run.
+func (d *Dispatcher) cancelRegisteredRun(t *testing.T, runID string) {
+	t.Helper()
+	waitFor(t, "the run context to be registered", func() bool {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.runningRunID == runID && d.runningCancel != nil
+	})
+	d.mu.Lock()
+	cancel := d.runningCancel
+	d.mu.Unlock()
+	cancel()
+}
+
+// requireRunResult requires the work to finish without an error.
+func requireRunResult(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run did not finish after the cancel")
+	}
+}
+
 // recordServerIdentity persists the identity a preflight would have observed, so
 // the run reaches the connection check instead of failing on a missing identity.
 func recordServerIdentity(t *testing.T, q *queueFixture) {

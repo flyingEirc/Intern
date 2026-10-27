@@ -103,29 +103,37 @@ func (d *Dispatcher) auditRun(ctx context.Context, action string) {
 // the replication handoff. Every outcome is terminal: queued -> running ->
 // completed | failed | canceled.
 //
-// The run's cancel context is registered before admit, so a cancel request that
-// arrives during the preflight, the version probe or the connection checks is
-// honored too: preflightExternalFailure maps a canceled context to the canceled
-// code, and the preflight window below turns that into a canceled run.
+// The run's cancel context is registered before the post-claim reads, so a
+// cancel request that arrives during the preflight, the version probe or the
+// connection checks is honored too: the preflight reports the canceled code and
+// preChainFailure turns that into a canceled run.
+//
+// The policy read, the local repository open and the KEK repository read run
+// under the parent context, not the run context. They are short control-plane
+// reads: cancelling them would surface as a policy or repository failure even
+// though nothing was wrong with either. A cancel request that lands during them
+// is still honored, because preChainFailure re-reads the stored flag before any
+// pre-chain failure decides the outcome.
 func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 	runCtx, unregister := d.registerRunContext(ctx, run.ID)
 	defer unregister()
-	policy, err := d.config.Database.Policy(runCtx, run.PolicyID)
+	policy, err := d.config.Database.Policy(ctx, run.PolicyID)
 	if err != nil {
-		return d.failRun(ctx, run, store.RunErrorBackupFailed, "policy_missing", err)
+		return d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "policy_missing", err)
 	}
-	repo, cancelled, err := d.openRunRepository(runCtx, run, policy)
+	bindRunPair(&policy, run)
+	repo, cancelled, err := d.openRunRepository(ctx, run, policy)
 	if cancelled {
 		return err
 	}
 	if err != nil {
-		return d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
+		return d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
 	}
 	// The repository handle is read-only here; a close failure cannot change
 	// the run outcome that the rest of this function decides.
 	defer func() { _ = repo.Close() }() //nolint:errcheck // read-only handle, run outcome already decided
 
-	admitted, done, err := d.admit(runCtx, run, policy)
+	admitted, done, err := d.admit(ctx, runCtx, run, policy)
 	if done {
 		return err
 	}
@@ -147,6 +155,38 @@ func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
 		return d.failChain(ctx, run, runErr)
 	}
 	return d.completeRun(ctx, run, policy, result)
+}
+
+// bindRunPair pins the (local, replica) pair the claim snapshotted onto the
+// policy this run works from, so the KEK check, the preflight, the chain and
+// the replication handoff all use the repositories the run was claimed with. A
+// PUT that moved the policy after the claim changes the next run's pair only.
+func bindRunPair(policy *store.Policy, run store.Run) {
+	if run.LocalRepositoryID != nil {
+		policy.LocalRepositoryID = *run.LocalRepositoryID
+	}
+	policy.ReplicaRepositoryID = run.ReplicaRepositoryID
+}
+
+// preChainFailure records a failure that happened before chain.Run.
+//
+// It decides the outcome by the same rule failChain applies after the chain, so
+// a shutdown or a cancel never depends on which side of the chain boundary it
+// landed on:
+//   - a cancel request wins while the worker's own context is still live: the
+//     run ends canceled and leaves no backup;
+//   - a shutdown of the worker loop (its parent context canceled) ends the run
+//     failed with class backup_failed, which is exactly what failChain reports;
+//   - every other cause keeps the class and code it was given.
+func (d *Dispatcher) preChainFailure(parent context.Context, run store.Run, class, code string, cause error) error {
+	stored, err := d.config.Database.Run(parent, run.ID)
+	if err == nil && stored.CancelRequested && parent.Err() == nil {
+		return d.cancelRun(parent, stored)
+	}
+	if parent.Err() != nil {
+		return d.failRun(parent, run, store.RunErrorBackupFailed, "backup_failed", cause)
+	}
+	return d.failRun(parent, run, class, code, cause)
 }
 
 // registerRunContext derives the cancelable context of one claimed run and
@@ -224,33 +264,35 @@ func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy stor
 // reports that the run already reached a terminal failure and its write is the
 // returned error.
 //
-// A cancel request that arrives during the preflight, the version probe or the
-// connection checks cancels this context, so the preflight reports the canceled
-// code. That is a cancel, not a preflight failure: the run ends canceled and
-// leaves no backup, exactly as a cancel during the chain does.
-func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Policy) (admission, bool, error) {
+// parent is the worker's context and runCtx the cancelable context of this run.
+// The KEK repository read uses the parent because it is a short control-plane
+// read; the preflight and the connection checks use runCtx, so a cancel request
+// stops the running probe. Either way the terminal outcome goes through
+// preChainFailure: a cancel request ends the run canceled and leaves no backup,
+// and a shutdown ends it exactly as failChain reports a shutdown.
+func (d *Dispatcher) admit(parent, runCtx context.Context, run store.Run, policy store.Policy) (admission, bool, error) {
 	// Decision 9: without the KEK, work root or XtraBackup executable the run
 	// was still created, and now fails visibly. Nothing is skipped silently.
 	if !d.config.Settings.Preflight() {
-		return admission{}, true, d.failRun(ctx, run, store.RunErrorUnavailable, "unconfigured",
+		return admission{}, true, d.preChainFailure(parent, run, store.RunErrorUnavailable, "unconfigured",
 			errors.New("backup runtime is not configured"))
 	}
-	if err := d.validateKEK(ctx, run, policy); err != nil {
+	if err := d.validateKEK(parent, run, policy); err != nil {
 		return admission{}, true, err
 	}
-	outcome, code, preflightErr := d.preflightRun(ctx, run, policy)
-	if code == "canceled" || (code != "" && ctx.Err() != nil) {
-		return admission{}, true, d.cancelRun(ctx, run)
+	outcome, code, preflightErr := d.preflightRun(runCtx, run, policy)
+	if code == "canceled" || (code != "" && runCtx.Err() != nil) {
+		return admission{}, true, d.preChainFailure(parent, run, store.RunErrorPreflight, code, preflightErr)
 	}
 	if code != "" {
-		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
+		return admission{}, true, d.failRun(parent, run, store.RunErrorPreflight, code, preflightErr)
 	}
-	connection, identity, err := d.preflightConnection(ctx, policy)
+	connection, identity, err := d.preflightConnection(runCtx, policy)
 	if err != nil {
-		if ctx.Err() != nil {
-			return admission{}, true, d.cancelRun(ctx, run)
+		if runCtx.Err() != nil {
+			return admission{}, true, d.preChainFailure(parent, run, store.RunErrorPreflight, "identity_missing", err)
 		}
-		return admission{}, true, d.failRun(ctx, run, store.RunErrorPreflight, "identity_missing", err)
+		return admission{}, true, d.failRun(parent, run, store.RunErrorPreflight, "identity_missing", err)
 	}
 	return admissionFor(connection, identity, outcome), false, nil
 }
@@ -272,9 +314,11 @@ func admissionFor(connection physical.Connection, identity physical.Identity, ou
 	return admission{Connection: connection, Identity: identity, ToolVersion: outcome.ToolVersion}
 }
 
-// openRunRepository resolves the policy's local repository for one run. A run
+// openRunRepository resolves the pinned local repository for one run. A run
 // canceled before its claim is cancelled here rather than executed; report
-// cancelled=true with the terminal write already done.
+// cancelled=true with the terminal write already done. Every other failure goes
+// through preChainFailure, so a cancel request that arrived in the meantime ends
+// the run canceled instead of as a repository failure.
 func (d *Dispatcher) openRunRepository(ctx context.Context, run store.Run, policy store.Policy) (*local.Repository, bool, error) {
 	// A queued run that received a cancel request before its claim is canceled
 	// without running. The claim skips such rows; this recheck closes the race
@@ -288,15 +332,15 @@ func (d *Dispatcher) openRunRepository(ctx context.Context, run store.Run, polic
 	}
 	repository, err := d.config.Database.Repository(ctx, policy.LocalRepositoryID)
 	if err != nil {
-		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_missing", err)
+		return nil, true, d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "repository_missing", err)
 	}
 	if repository.Kind != store.RepositoryLocal || repository.Local == nil {
-		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_kind",
+		return nil, true, d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "repository_kind",
 			errors.New("local repository required"))
 	}
 	repo, err := local.Open(repository.Local.Root)
 	if err != nil {
-		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
+		return nil, true, d.preChainFailure(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
 	}
 	return repo, false, nil
 }
@@ -371,22 +415,25 @@ func preflightErrorCode(ctx context.Context, err error) (string, bool) {
 	}
 }
 
-// validateKEK rechecks that the KEK is outside the policy's local repository
-// root before chain.Run. A violation fails the run with error_class preflight.
+// validateKEK rechecks that the KEK is outside the run's pinned local
+// repository root before chain.Run. The repository read and every failure exit
+// run under the parent context: this is a short control-plane read, and a
+// cancel request must not be reported as a missing repository. A violation
+// fails the run with error_class preflight.
 func (d *Dispatcher) validateKEK(ctx context.Context, run store.Run, policy store.Policy) error {
 	repository, err := d.config.Database.Repository(ctx, policy.LocalRepositoryID)
 	if err != nil {
-		return d.failRun(ctx, run, store.RunErrorPreflight, "repository_missing", err)
+		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_missing", err)
 	}
 	if repository.Kind != store.RepositoryLocal || repository.Local == nil {
-		return d.failRun(ctx, run, store.RunErrorPreflight, "repository_kind",
+		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "repository_kind",
 			errors.New("local repository required"))
 	}
 	if err := d.config.Settings.ValidateRepositoryRoot(repository.Local.Root); err != nil {
 		d.logEvent(ctx, run.ID, eventPreflightFailed, map[string]any{
 			"check": "kek", "code": "kek_inside_repository",
 		})
-		return d.failRun(ctx, run, store.RunErrorPreflight, "kek_inside_repository", err)
+		return d.preChainFailure(ctx, run, store.RunErrorPreflight, "kek_inside_repository", err)
 	}
 	return nil
 }

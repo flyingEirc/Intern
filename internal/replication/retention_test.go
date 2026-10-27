@@ -626,6 +626,32 @@ func TestDeleteLocalChainSkipsAnotherPairsReservation(t *testing.T) {
 	assertReclaimed(t, f, second, false)
 }
 
+// TestDeleteLocalChainReportsAStatusReadFailure requires a failed ownership read
+// to surface as an error. Turning it into an empty ownership set would report
+// success while reclaiming nothing, leaving the reservation's objects in place
+// with the caller believing they are gone.
+func TestDeleteLocalChainReportsAStatusReadFailure(t *testing.T) {
+	f := newFixture(t)
+	chain := f.newChain(2)
+	f.verifyChain(chain)
+	if _, err := f.store.ReserveLocalDelete(t.Context(), chain.id, f.now); err != nil {
+		t.Fatal(err)
+	}
+	// The pair's replica rows become unreadable, so ownership cannot be decided.
+	if _, err := f.db.ExecContext(t.Context(), `ALTER TABLE replicas RENAME TO replicas_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.DeleteLocalChain(t.Context(), chain.id); err == nil {
+		t.Fatal("DeleteLocalChain reported success while the ownership read failed")
+	}
+	assertReclaimed(t, f, chain, false)
+	reserved, err := f.store.LocalDeletePending(t.Context(), chain.id)
+	if err != nil || len(reserved) != len(chain.backups) {
+		t.Fatalf("reservation of %s = %+v %v; want %d rows kept for a later pass",
+			chain.id, reserved, err, len(chain.backups))
+	}
+}
+
 // rebindReplicas moves one chain's replica rows to another local repository.
 func rebindReplicas(t *testing.T, f *fixture, chain testChain, localRepositoryID string) {
 	t.Helper()

@@ -623,6 +623,33 @@ func completedPrefix(chainID string, members []physicalstore.Backup) (*Point, er
 	return point, nil
 }
 
+// pointRow is the identity one verified-prefix scan needs from a replica row.
+type pointRow struct {
+	backupID, chainID, status string
+	verifiedAt                sql.NullString
+}
+
+// verifiedPrefix is the last item of the longest all-verified prefix of rows
+// already ordered by chain position. An unverified row ends the prefix, so a
+// verified row after a gap never becomes the point.
+func verifiedPrefix(rows []pointRow) (*Point, error) {
+	var point *Point
+	for _, row := range rows {
+		if row.status != StatusVerified {
+			break
+		}
+		verified, err := parseStamp(row.verifiedAt)
+		if err != nil {
+			return nil, err
+		}
+		if verified == nil {
+			return nil, errors.New("replication: verified replica has no verification time")
+		}
+		point = &Point{BackupID: row.backupID, ChainID: row.chainID, At: *verified}
+	}
+	return point, nil
+}
+
 // RemotePoint is the last item of the longest all-verified FIFO prefix for this
 // (source, repository) pair.
 func (r *Replicator) RemotePoint(ctx context.Context, sourceID string) (*Point, error) {
@@ -632,19 +659,34 @@ func (r *Replicator) RemotePoint(ctx context.Context, sourceID string) (*Point, 
 	if err != nil {
 		return nil, err
 	}
-	var point *Point
+	items := make([]pointRow, 0, len(rows))
 	for _, row := range rows {
-		if row.Status != StatusVerified {
-			break
-		}
-		verified, err := parseStamp(row.VerifiedAt)
-		if err != nil {
-			return nil, err
-		}
-		if verified == nil {
-			return nil, errors.New("replication: verified replica has no verification time")
-		}
-		point = &Point{BackupID: row.BackupID, ChainID: row.ChainID, At: *verified}
+		items = append(items, pointRow{
+			backupID: row.BackupID, chainID: row.ChainID, status: row.Status, verifiedAt: row.VerifiedAt,
+		})
 	}
-	return point, nil
+	return verifiedPrefix(items)
+}
+
+// RepositoryRemotePoint is the last item of the longest all-verified prefix of
+// the union of one source's replica rows on one repository, across every
+// (local, replica) pair that replicates to it. The union is ordered by chain
+// position, so the answer never depends on when a copy happened to be proven:
+// a pair that stops producing cannot pin the point, and a point is never
+// claimed from a backup whose predecessor in the stream is unproven. A nil
+// point means the repository has proven nothing for the source.
+func RepositoryRemotePoint(ctx context.Context, db *sql.DB, repositoryID, sourceID string) (*Point, error) {
+	rows, err := replsql.New(db).ReplicasByRepositorySource(ctx, replsql.ReplicasByRepositorySourceParams{
+		RepositoryID: repositoryID, SourceID: sourceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]pointRow, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, pointRow{
+			backupID: row.BackupID, chainID: row.ChainID, status: row.Status, verifiedAt: row.VerifiedAt,
+		})
+	}
+	return verifiedPrefix(items)
 }

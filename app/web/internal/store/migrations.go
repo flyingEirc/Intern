@@ -45,6 +45,18 @@ func latestVersion(versions []int64) int64 {
 	return latest
 }
 
+// LatestVersion is the newest embedded web migration version. Callers that
+// reason about "fully migrated" (the CLI status output, readiness checks and
+// their tests) take it from here instead of pinning a number that every new
+// migration would invalidate.
+func LatestVersion() (int64, error) {
+	versions, err := embeddedVersions()
+	if err != nil {
+		return 0, err
+	}
+	return latestVersion(versions), nil
+}
+
 func checkVersion(current, latest int64) error {
 	if current > latest {
 		return fmt.Errorf("metadata database version %d is newer than embedded latest version %d", current, latest)

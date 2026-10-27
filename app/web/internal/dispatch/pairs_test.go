@@ -3,10 +3,13 @@ package dispatch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
@@ -55,15 +58,24 @@ func (s *sharedFTPFixture) install(t *testing.T) {
 	}
 }
 
-// completeForPolicy publishes one completed local backup whose producing run
-// names policy, so PairBackups can scope it. Each backup needs a distinct id,
-// because the physical backups table keys on it.
-func (s *sharedFTPFixture) completeForPolicy(t *testing.T, policy store.Policy, backupID string) (backupIDResult, chainID string) {
+// completeForPolicy publishes one completed full backup for one policy at the
+// current time, so the run's claim snapshot names that policy's pair.
+func (s *sharedFTPFixture) completeForPolicy(t *testing.T, policy store.Policy, backupID string) (backupIDOut, runID string) {
+	t.Helper()
+	return s.publishMember(t, policy, backupID, "full", time.Now())
+}
+
+// publishMember publishes one completed physical member for one policy at an
+// explicit chain position, and records the completed run that produced it. A
+// full starts a new chain at at; an incremental extends the source's latest
+// chain. Each backup needs a distinct id, because the physical backups table
+// keys on it.
+func (s *sharedFTPFixture) publishMember(t *testing.T, policy store.Policy, backupID, kind string, at time.Time) (backupIDOut, runID string) {
 	t.Helper()
 	physical := physicalstore.New(s.database.DB())
 	plan, err := physical.Plan(t.Context(), physicalstore.PlanRequest{
 		SourceID: s.source.ID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
-		ToolVersion: "8.4.0-7", Kind: "full", MaxChainLength: 3,
+		ToolVersion: "8.4.0-7", Kind: kind, MaxChainLength: 3,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -73,15 +85,24 @@ func (s *sharedFTPFixture) completeForPolicy(t *testing.T, policy store.Policy, 
 		ToolVersion: "8.4.0-7", InstanceID: s.database.InstanceID(), RunID: backupID, BackupID: backupID,
 		ObjectPath:   s.database.InstanceID() + "/" + s.source.ID + "/" + plan.ChainID + "/" + backupID,
 		StagingToken: backupID, WorkDir: s.workRoot() + "/run-" + backupID,
-		KeyID: "key", CreatedAt: time.Now(),
+		KeyID: "key", CreatedAt: at,
 	}); err != nil {
 		t.Fatal(err)
 	}
+	var from uint64
+	if plan.Parent != nil {
+		from = plan.Parent.ToLSN
+	}
+	to := from + 100
+	checkpoints := []byte("backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 100\nlast_lsn = 100\n")
+	if plan.Parent != nil {
+		checkpoints = []byte(fmt.Sprintf("backup_type = incremental\nfrom_lsn = %d\nto_lsn = %d\nlast_lsn = %d\n", from, to, to))
+	}
 	if err = physical.Complete(t.Context(), physicalstore.Completion{
-		BackupID: backupID, FromLSN: 0, ToLSN: 100, LastLSN: 100,
-		CheckpointsRaw: []byte("backup_type = full-backuped\nfrom_lsn = 0\nto_lsn = 100\nlast_lsn = 100\n"),
+		BackupID: backupID, FromLSN: from, ToLSN: to, LastLSN: to,
+		CheckpointsRaw: checkpoints,
 		InfoRaw:        []byte("tool_name = xtrabackup\n"), PayloadSize: 512, PayloadSHA256: "payload",
-		MetadataSize: 128, MetadataSHA256: "metadata", CompletedAt: time.Now(),
+		MetadataSize: 128, MetadataSHA256: "metadata", CompletedAt: at,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +134,10 @@ func TestSharedFTPRepositoryKeepsBothPairsAnswers(t *testing.T) {
 	markReplicaVerified(t, s.database, backupA, s.ftp.ID, s.l1.ID)
 	markReplicaVerified(t, s.database, backupB, s.ftp.ID, s.l2.ID)
 
-	assertSharedProtection(t, s, backupA)
+	// The repository's point is the last item of the union's all-verified
+	// prefix, which is the second pair's later chain, not the earliest pair
+	// point: a pair that stops producing cannot pin the repository.
+	assertSharedProtection(t, s, backupB)
 	assertSharedReplicaList(t, s)
 	assertSharedBackupViews(t, s, backupA, backupB)
 	assertSharedRetry(t, s, backupA, backupB)
@@ -121,9 +145,10 @@ func TestSharedFTPRepositoryKeepsBothPairsAnswers(t *testing.T) {
 }
 
 // assertSharedProtection requires the remote point to be visible through both
-// pairs. Before the fix the loop deduplicated on the repository and used
-// whichever pair came first, hiding the other pair's verified replica.
-func assertSharedProtection(t *testing.T, s *sharedFTPFixture, earliest string) {
+// pairs and to be the union's last verified row. Before the fix the loop
+// deduplicated on the repository and compared proof times, so whichever pair
+// proved first won and the other pair's later chain was hidden.
+func assertSharedProtection(t *testing.T, s *sharedFTPFixture, want string) {
 	t.Helper()
 	protection, err := s.dispatcher.Protection(t.Context(), s.source.ID)
 	if err != nil {
@@ -135,8 +160,8 @@ func assertSharedProtection(t *testing.T, s *sharedFTPFixture, earliest string) 
 	if len(protection.Remote) != 1 {
 		t.Fatalf("remote points = %+v, want one for the shared repository", protection.Remote)
 	}
-	if protection.Remote[0].RepositoryID != s.ftp.ID || protection.Remote[0].BackupID != earliest {
-		t.Fatalf("remote point = %+v, want the earliest verified backup %s", protection.Remote[0], earliest)
+	if protection.Remote[0].RepositoryID != s.ftp.ID || protection.Remote[0].BackupID != want {
+		t.Fatalf("remote point = %+v, want the union's last verified backup %s", protection.Remote[0], want)
 	}
 }
 
@@ -226,20 +251,123 @@ func assertSharedRecovery(t *testing.T, s *sharedFTPFixture, backupA, backupB st
 	assertReplicaPartGone(t, s.database, partID)
 }
 
+// sharedRemotePoint returns the one remote point the shared FTP repository
+// reports, or nil when the repository has proven nothing for the source.
+func (s *sharedFTPFixture) remotePoint(t *testing.T) *PointView {
+	t.Helper()
+	protection, err := s.dispatcher.Protection(t.Context(), s.source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(protection.Remote) > 1 {
+		t.Fatalf("remote points = %+v, want at most one for the shared repository", protection.Remote)
+	}
+	if len(protection.Remote) == 0 {
+		return nil
+	}
+	return &protection.Remote[0]
+}
+
+// requireRemotePoint requires the shared repository's point to be one backup.
+func requireRemotePoint(t *testing.T, s *sharedFTPFixture, want string) {
+	t.Helper()
+	point := s.remotePoint(t)
+	if point == nil {
+		t.Fatalf("the repository reports no remote point, want %s", want)
+	}
+	if point.RepositoryID != s.ftp.ID || point.BackupID != want {
+		t.Fatalf("remote point = %+v, want %s on the shared repository", *point, want)
+	}
+}
+
+// requireNoRemotePoint requires the shared repository to report no point: the
+// first unproven row of the union bounds the prefix before any verified row.
+func requireNoRemotePoint(t *testing.T, s *sharedFTPFixture) {
+	t.Helper()
+	if point := s.remotePoint(t); point != nil {
+		t.Fatalf("remote point = %+v, want none: the union's first unproven row bounds the prefix", *point)
+	}
+}
+
+// TestProtectionPointFollowsChainPositionNotProofTime is the advisor's P1: a
+// pair that stops producing must not pin the point. The first pair proves one
+// backup first, the second pair proves two later backups, and the repository's
+// point is the last verified row of the union ordered by chain position.
+func TestProtectionPointFollowsChainPositionNotProofTime(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	s.install(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pinned, _ := s.publishMember(t, s.policyA, "p1-pinned", "full", base)
+	first, _ := s.publishMember(t, s.policyB, "p1-first", "full", base.Add(time.Hour))
+	last, _ := s.publishMember(t, s.policyB, "p1-last", "full", base.Add(2*time.Hour))
+	// Proof order follows chain order, but nothing may be inferred from it.
+	markReplicaVerifiedAt(t, s.database, pinned, s.ftp.ID, s.l1.ID, base.Add(24*time.Hour))
+	markReplicaVerifiedAt(t, s.database, first, s.ftp.ID, s.l2.ID, base.Add(48*time.Hour))
+	markReplicaVerifiedAt(t, s.database, last, s.ftp.ID, s.l2.ID, base.Add(72*time.Hour))
+
+	requireRemotePoint(t, s, last)
+}
+
+// TestProtectionPointNeverComparesVerifiedAt is the advisor's P2: the two
+// proofs are inverted against the data order. The repository protects the
+// source up to its newest proven backup, so the point is the later chain even
+// though the earlier chain was proven last.
+func TestProtectionPointNeverComparesVerifiedAt(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	s.install(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	older, _ := s.publishMember(t, s.policyA, "p2-older", "full", base)
+	newer, _ := s.publishMember(t, s.policyB, "p2-newer", "full", base.Add(time.Hour))
+	markReplicaVerifiedAt(t, s.database, older, s.ftp.ID, s.l1.ID, base.Add(9*24*time.Hour))
+	markReplicaVerifiedAt(t, s.database, newer, s.ftp.ID, s.l2.ID, base.Add(4*24*time.Hour))
+
+	requireRemotePoint(t, s, newer)
+}
+
+// TestProtectionPointStopsAtAnUnprovenPredecessor is the advisor's P3: a pair
+// that proved nothing is not ignored when its backup precedes the other pair's
+// verified one in chain order. The union's prefix ends there, so the repository
+// claims nothing rather than a point it cannot prove contiguously.
+func TestProtectionPointStopsAtAnUnprovenPredecessor(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	s.install(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pending, _ := s.publishMember(t, s.policyA, "p3-pending", "full", base)
+	verified, _ := s.publishMember(t, s.policyB, "p3-verified", "full", base.Add(time.Hour))
+	upsertReplica(t, s.database, pending, s.ftp.ID, s.l1.ID, "pending")
+	markReplicaVerifiedAt(t, s.database, verified, s.ftp.ID, s.l2.ID, base.Add(2*time.Hour))
+
+	requireNoRemotePoint(t, s)
+}
+
+// TestProtectionPointNeverDependsOnAnUnprovenParent is the advisor's P6: chains
+// are per source, so an incremental on one pair can extend a full on the other.
+// The incremental is verified, its parent full is still pending on the same
+// repository, and the repository therefore reports no point: the reported point
+// would otherwise depend on a backup that is not verified there.
+func TestProtectionPointNeverDependsOnAnUnprovenParent(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	s.install(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	parent, _ := s.publishMember(t, s.policyA, "p6-full", "full", base)
+	incremental, _ := s.publishMember(t, s.policyB, "p6-inc", "incremental", base.Add(time.Hour))
+	upsertReplica(t, s.database, parent, s.ftp.ID, s.l1.ID, "pending")
+	markReplicaVerifiedAt(t, s.database, incremental, s.ftp.ID, s.l2.ID, base.Add(2*time.Hour))
+
+	requireNoRemotePoint(t, s)
+}
+
 // TestSharedFTPCatchUpBindsOnlyItsOwnBackups is the advisor's F2 reproduction:
 // source s with pA (local l1, no replica) and pB (local l2, FTP). pA's backup
 // is never bound to the l2 pair, and pB's own backup reaches the replicator and
 // keeps the FIFO moving.
 func TestSharedFTPCatchUpBindsOnlyItsOwnBackups(t *testing.T) {
 	s := newSharedFTPFixture(t)
-	// pA has no replica: delete the l1 policy's replica binding so only the
+	// pA has no replica: drop the l1 policy's replica binding so only the
 	// plain (l1, no replica) policy remains.
-	if _, err := s.database.DB().ExecContext(t.Context(),
-		`UPDATE policies SET replica_repository_id = NULL WHERE id = ?`, s.policyA.ID); err != nil {
-		t.Fatal(err)
-	}
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
 
-	backupA, _ := s.completeForPolicy(t, s.policyA, "acc2-bA") // produced on l1
+	backupA, _ := s.completeForPolicy(t, plain, "acc2-bA")     // produced on l1
 	backupB, _ := s.completeForPolicy(t, s.policyB, "acc2-bB") // produced on l2, FTP
 
 	d := s.dispatcher
@@ -315,8 +443,276 @@ func TestPeriodicCatchUpRetriesAFailedEnqueue(t *testing.T) {
 	assertQueuedReplica(t, f, backupID, ftp.ID)
 }
 
+// updatePolicyPair replaces one policy's repositories through the same store
+// call the PUT handler makes, so the tests exercise the real edit path.
+func (s *sharedFTPFixture) updatePolicyPair(t *testing.T, policy store.Policy, localID string, replicaID *string) store.Policy {
+	t.Helper()
+	updated, err := s.database.UpdatePolicy(t.Context(), policy.ID, store.PolicyInput{
+		Name: policy.Name, SourceID: policy.SourceID, LocalRepositoryID: localID,
+		ReplicaRepositoryID: replicaID, FullCron: policy.FullCron,
+		IncrementalCron: policy.IncrementalCron, Timezone: policy.Timezone,
+		MaxChainLength: policy.MaxChainLength, Parallel: policy.Parallel,
+		Throttle: policy.Throttle, ZstdLevel: policy.ZstdLevel,
+		PageTracking: policy.PageTracking, Enabled: policy.Enabled,
+	}, store.SystemAudit("policies.update", store.AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+// TestClaimSnapshotsThePolicyPair requires the claim itself to record the
+// (local, replica) pair it ran with: the snapshot is what every later
+// replication read resolves, so a claim that recorded nothing would leave the
+// backup unbound after any policy edit.
+func TestClaimSnapshotsThePolicyPair(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	first := s.queuedRun(t, s.policyB, "claim-snapshot-1")
+	claimed, ok := s.claimRun(t)
+	if !ok || claimed.ID != first.ID {
+		t.Fatalf("claim = %+v %v, want %s", claimed, ok, first.ID)
+	}
+	requirePinnedPair(t, s, claimed, s.l2.ID, s.ftp.ID)
+	// Finish the run so the second claim is possible.
+	if err := s.database.FinishRunFailed(t.Context(), claimed.ID, store.RunErrorBackupFailed, "finished",
+		store.SystemAudit("runs.failed", store.AuditDetail{}), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := s.updatePolicyPair(t, s.policyB, s.l1.ID, &s.ftp.ID)
+	second := s.queuedRun(t, moved, "claim-snapshot-2")
+	reclaimed, ok := s.claimRun(t)
+	if !ok || reclaimed.ID != second.ID {
+		t.Fatalf("second claim = %+v %v, want %s", reclaimed, ok, second.ID)
+	}
+	requirePinnedPair(t, s, reclaimed, s.l1.ID, s.ftp.ID)
+}
+
+// queuedRun creates one queued run of a policy.
+func (s *sharedFTPFixture) queuedRun(t *testing.T, policy store.Policy, key string) store.Run {
+	t.Helper()
+	created, err := s.database.CreateRun(t.Context(), store.RunInput{
+		PolicyID: policy.ID, SourceID: policy.SourceID, Kind: store.RunKindFull,
+		Trigger: store.RunTriggerManual, IdempotencyKey: key, RequestHash: "claim-snapshot",
+		ScheduledAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return created
+}
+
+// claimRun claims the next queued run.
+func (s *sharedFTPFixture) claimRun(t *testing.T) (store.Run, bool) {
+	t.Helper()
+	run, claimed, err := s.database.ClaimRun(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run, claimed
+}
+
+// requirePinnedPair requires the run to carry the given claimed pair.
+func requirePinnedPair(t *testing.T, s *sharedFTPFixture, run store.Run, localID, replicaID string) {
+	t.Helper()
+	stored, err := s.database.Run(t.Context(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.LocalRepositoryID == nil || *stored.LocalRepositoryID != localID {
+		t.Fatalf("run %s local repository = %v, want %s", run.ID, stored.LocalRepositoryID, localID)
+	}
+	if stored.ReplicaRepositoryID == nil || *stored.ReplicaRepositoryID != replicaID {
+		t.Fatalf("run %s replica repository = %v, want %s", run.ID, stored.ReplicaRepositoryID, replicaID)
+	}
+}
+
+// recordingPreflight records the local repository the run asked it to check,
+// then fails so the run stops before chain.Run.
+type recordingPreflight struct{ seen chan string }
+
+func (p recordingPreflight) PreflightSource(_ context.Context, _, localRepositoryID string) (resources.PreflightOutcome, error) {
+	p.seen <- localRepositoryID
+	return resources.PreflightOutcome{
+		Failure: &resources.Failure{Check: "tool", Code: "tool_missing", Message: "probe"},
+	}, nil
+}
+
+// TestRunUsesTheClaimedPairAfterAPolicyEdit requires the run itself — not just
+// the replication reads — to work from the pair the claim snapshotted. The
+// policy moves between the claim and the run, and the preflight must still be
+// told the repository the run was claimed on.
+func TestRunUsesTheClaimedPairAfterAPolicyEdit(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	run := s.queuedRun(t, s.policyA, "pinned-run")
+	claimed, ok := s.claimRun(t)
+	if !ok || claimed.ID != run.ID {
+		t.Fatalf("claim = %+v %v, want %s", claimed, ok, run.ID)
+	}
+	requirePinnedPair(t, s, claimed, s.l1.ID, s.ftp.ID)
+
+	// The PUT lands between the claim and the run.
+	s.updatePolicyPair(t, s.policyA, s.l2.ID, &s.ftp.ID)
+
+	probe := recordingPreflight{seen: make(chan string, 1)}
+	// The fixture's dispatcher is not started: its recovery must not touch the
+	// already-claimed run, so only the injected preflight is replaced.
+	s.dispatcher.config.Preflight = probe
+	if err := s.dispatcher.executeRun(t.Context(), claimed); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case seen := <-probe.seen:
+		if seen != s.l1.ID {
+			t.Fatalf("the preflight checked repository %s, want the claimed %s", seen, s.l1.ID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run never reached preflight")
+	}
+	final := s.run(claimed.ID)
+	if final.Status != store.RunStatusFailed || final.ErrorClass == nil || *final.ErrorClass != store.RunErrorPreflight {
+		t.Fatalf("run %+v, want a preflight failure from the recorded probe", final)
+	}
+}
+
+// TestPolicyEditNeverRebindsAnExistingBackup is the advisor's P4: a PUT that
+// moves the policy's repositories must not bind the backup it already produced
+// to the new pair. The old backup stays on the pair its run was claimed with,
+// and only the new pair's own backup replicates.
+func TestPolicyEditNeverRebindsAnExistingBackup(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	// The policy starts on l1 with no replica repository, exactly as P4 begins.
+	plain := s.updatePolicyPair(t, s.policyA, s.l1.ID, nil)
+	oldBackup, _ := s.completeForPolicy(t, plain, "p4-old")
+
+	// The PUT: the same store call the handler makes.
+	moved := s.updatePolicyPair(t, plain, s.l2.ID, &s.ftp.ID)
+	newBackup, _ := s.completeForPolicy(t, moved, "p4-new")
+
+	if err := s.dispatcher.openPair(t.Context(), s.l2.ID, s.ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertNoQueuedReplica(t, s.fixture, oldBackup, s.ftp.ID)
+	assertQueuedReplica(t, s.fixture, newBackup, s.ftp.ID)
+
+	// The old backup cannot be stepped, failed or verified through the new pair.
+	replicator := s.dispatcher.replicatorForPair(s.l2.ID, s.ftp.ID)
+	if _, err := replicator.Replica(t.Context(), oldBackup); err == nil {
+		t.Fatal("the policy edit rebound an existing backup to the new pair")
+	}
+	if stepped, attempted, _ := replicator.StepItem(t.Context()); attempted && stepped.BackupID == oldBackup {
+		t.Fatalf("the new pair stepped the old backup %s", oldBackup)
+	}
+}
+
+// TestReplicaRetryFindsAnOldBackupAfterAPolicyEdit requires the manual retry to
+// resolve the pair the backup was claimed with, not the policy's current one.
+// The pair set a restarted process installs still contains it, because the
+// completed run's snapshot names it.
+func TestReplicaRetryFindsAnOldBackupAfterAPolicyEdit(t *testing.T) {
+	s := newSharedFTPFixture(t)
+	oldBackup, _ := s.completeForPolicy(t, s.policyA, "retry-old")
+	s.install(t)
+	assertQueuedReplica(t, s.fixture, oldBackup, s.ftp.ID)
+
+	// The PUT moves the policy to the other local repository.
+	s.updatePolicyPair(t, s.policyA, s.l2.ID, &s.ftp.ID)
+
+	pairs, pairErr := s.database.ReplicationPairs(t.Context())
+	if pairErr != nil {
+		t.Fatal(pairErr)
+	}
+	restarted := s.newDispatcher(time.Now)
+	for _, pair := range pairs {
+		if openErr := restarted.openPair(t.Context(), pair.LocalRepositoryID, pair.ReplicaRepositoryID); openErr != nil {
+			t.Fatal(openErr)
+		}
+	}
+	owner := restarted.replicatorForPair(s.l1.ID, s.ftp.ID)
+	if owner == nil {
+		t.Fatal("the pair the old run was claimed with is no longer installed")
+	}
+	if retryErr := restarted.ReplicaRetry(t.Context(), oldBackup, s.ftp.ID); retryErr != nil {
+		t.Fatalf("retry of a backup produced before the policy edit: %v", retryErr)
+	}
+	replica, replicaErr := owner.Replica(t.Context(), oldBackup)
+	if replicaErr != nil || replica.Status != "pending" {
+		t.Fatalf("retried replica = %+v, %v; want pending on its own pair", replica, replicaErr)
+	}
+	if _, err := restarted.replicatorForPair(s.l2.ID, s.ftp.ID).Replica(t.Context(), oldBackup); err == nil {
+		t.Fatal("the policy edit rebound the old backup to the new pair")
+	}
+}
+
+// TestCatchUpSkipsPrunedBackups requires the catch-up to select only backups
+// that are still locally present: a pruned backup has nothing to copy, so it
+// never enters the queue and never warns on every scan.
+func TestCatchUpSkipsPrunedBackups(t *testing.T) {
+	f := newFixture(t)
+	useMemoryRemote(t)
+	local := f.repository("pruned-local")
+	ftp := f.ftpRepository("pruned-ftp")
+	source := f.source("pruned-source", testSocketPath(t))
+	policy := f.replicaPolicy("pruned-policy", source.ID, local.ID, ftp.ID)
+	backupID, chainID := completeLocalBackup(t, f.database, source.ID)
+	insertTerminalRun(t, f.database, policy, backupID, chainID)
+	// The chain was pruned after its copy: the row stays, its payload is gone.
+	if _, err := f.database.DB().ExecContext(t.Context(),
+		`UPDATE backups SET local_present = 0 WHERE id = ?`, backupID); err != nil {
+		t.Fatal(err)
+	}
+
+	d := f.newDispatcher(time.Now)
+	if err := d.openPair(t.Context(), local.ID, ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertNoQueuedReplica(t, f, backupID, ftp.ID)
+	if logs := f.logs.String(); strings.Contains(logs, "replication catch-up skipped a backup") {
+		t.Fatalf("the catch-up warned about a pruned backup: %s", logs)
+	}
+}
+
+// TestPeriodicCatchUpUsesTheDispatcherClock proves the 30s floor on the
+// dispatcher's clock with an enqueue that is not blocked: a backup completed
+// after the pair was installed is queued by the periodic catch-up only once the
+// controlled clock passes the interval. A catch-up that always runs would queue
+// it early, and one that read the real clock would never agree with the
+// recorded mark.
+func TestPeriodicCatchUpUsesTheDispatcherClock(t *testing.T) {
+	f := newFixture(t)
+	useMemoryRemote(t)
+	local := f.repository("clock-local")
+	ftp := f.ftpRepository("clock-ftp")
+	source := f.source("clock-source", testSocketPath(t))
+	policy := f.replicaPolicy("clock-policy", source.ID, local.ID, ftp.ID)
+
+	base := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	now := base
+	d := f.newDispatcher(func() time.Time { return now })
+	// The pair is installed with nothing to queue, so its catch-up mark is base.
+	if err := d.openPair(t.Context(), local.ID, ftp.ID); err != nil {
+		t.Fatal(err)
+	}
+	backupID, _ := completeLocalBackup(t, f.database, source.ID)
+	insertTerminalRun(t, f.database, policy, backupID, "chain-clock")
+	// No enqueue at completion: the periodic catch-up is the only path, and
+	// nothing is blocked, so a row proves the scan really ran.
+	assertNoQueuedReplica(t, f, backupID, ftp.ID)
+
+	now = base.Add(catchUpInterval - time.Second)
+	d.stepReplication(t.Context())
+	assertNoQueuedReplica(t, f, backupID, ftp.ID)
+
+	now = base.Add(catchUpInterval)
+	d.stepReplication(t.Context())
+	assertQueuedReplica(t, f, backupID, ftp.ID)
+}
+
 // TestPeriodicCatchUpRateLimitsHealthyPairs requires the 30s floor: a healthy
-// pair is not re-scanned on every worker cycle.
+// pair is not re-scanned on every worker cycle. The blocked enqueue makes the
+// assertion weak on its own — a scan would warn and still leave no row — so the
+// floor itself is proven by TestPeriodicCatchUpUsesTheDispatcherClock; this test
+// pins that a pair installed at Start is not re-scanned inside the interval.
 func TestPeriodicCatchUpRateLimitsHealthyPairs(t *testing.T) {
 	f := newFixture(t)
 	useMemoryRemote(t)
@@ -331,8 +727,6 @@ func TestPeriodicCatchUpRateLimitsHealthyPairs(t *testing.T) {
 	if err := d.openPair(t.Context(), local.ID, ftp.ID); err != nil {
 		t.Fatal(err)
 	}
-	// Keep the enqueue permanently impossible, so a scan would log a warning;
-	// the rate-limit proof is that the scan does not even run.
 	backupID, _ := completeLocalBackup(t, f.database, source.ID)
 	run := insertTerminalRun(t, f.database, policy, backupID, "chain-rate")
 	blockEnqueue(t, f.database, backupID)
@@ -353,17 +747,35 @@ func markReplicaVerified(t *testing.T, database *store.Store, backupID, reposito
 	upsertReplica(t, database, backupID, repositoryID, localRepositoryID, "verified")
 }
 
+// markReplicaVerifiedAt records a verified replica row with an explicit proof
+// time, so a probe can invert proof order against chain order.
+func markReplicaVerifiedAt(t *testing.T, database *store.Store, backupID, repositoryID, localRepositoryID string, verifiedAt time.Time) {
+	t.Helper()
+	upsertReplicaAt(t, database, backupID, repositoryID, localRepositoryID, "verified", verifiedAt)
+}
+
 // upsertReplica writes one pair-scoped replica row with the given status.
 func upsertReplica(t *testing.T, database *store.Store, backupID, repositoryID, localRepositoryID, status string) {
 	t.Helper()
+	upsertReplicaAt(t, database, backupID, repositoryID, localRepositoryID, status, time.Now())
+}
+
+// upsertReplicaAt writes one pair-scoped replica row; only a verified row keeps
+// the proof time it is given.
+func upsertReplicaAt(t *testing.T, database *store.Store, backupID, repositoryID, localRepositoryID, status string, verifiedAt time.Time) {
+	t.Helper()
 	stamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z")
+	var verified any
+	if status == "verified" {
+		verified = verifiedAt.UTC().Format("2006-01-02T15:04:05.000000000Z")
+	}
 	_, err := database.DB().ExecContext(t.Context(), `INSERT INTO replicas
 (backup_id, repository_id, local_repository_id, idem_key, status, attempts, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
 ON CONFLICT(backup_id, repository_id) DO UPDATE SET
   status = excluded.status, verified_at = excluded.verified_at, local_repository_id = excluded.local_repository_id`,
 		backupID, repositoryID, localRepositoryID, "replicate:"+backupID+":"+repositoryID,
-		status, stamp, stamp, stamp, stamp, stamp)
+		status, stamp, stamp, verified, stamp, stamp)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -64,25 +64,27 @@ type Repository struct {
 }
 
 type Run struct {
-	ID              string
-	PolicyID        string
-	SourceID        string
-	Kind            string
-	Trigger         string
-	IdempotencyKey  string
-	RequestHash     string
-	Status          string
-	ScheduledAt     string
-	CreatedAt       string
-	StartedAt       sql.NullString
-	FinishedAt      sql.NullString
-	BackupID        sql.NullString
-	ChainID         sql.NullString
-	PayloadSize     sql.NullInt64
-	ErrorClass      sql.NullString
-	ErrorCode       sql.NullString
-	CancelRequested int64
-	ActorID         sql.NullString
+	ID                  string
+	PolicyID            string
+	SourceID            string
+	Kind                string
+	Trigger             string
+	IdempotencyKey      string
+	RequestHash         string
+	Status              string
+	ScheduledAt         string
+	CreatedAt           string
+	StartedAt           sql.NullString
+	FinishedAt          sql.NullString
+	BackupID            sql.NullString
+	ChainID             sql.NullString
+	PayloadSize         sql.NullInt64
+	ErrorClass          sql.NullString
+	ErrorCode           sql.NullString
+	CancelRequested     int64
+	ActorID             sql.NullString
+	LocalRepositoryID   sql.NullString
+	ReplicaRepositoryID sql.NullString
 }
 
 type RunLog struct {

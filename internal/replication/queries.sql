@@ -30,6 +30,19 @@ JOIN chains c ON c.id = b.chain_id
 WHERE r.repository_id = ? AND r.local_repository_id = ? AND c.source_id = ?
 ORDER BY b.created_at, b.seq;
 
+-- name: ReplicasByRepositorySource :many
+-- The union of one source's replica rows on one replica repository, across
+-- every local repository that replicates to it. The order is chain position,
+-- not verification time: the chain a backup belongs to started first, then the
+-- backup's seq, so a caller reads one contiguous stream and a pair that stopped
+-- producing cannot pin the point.
+SELECT r.*, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
+FROM replicas r
+JOIN backups b ON b.id = r.backup_id
+JOIN chains c ON c.id = b.chain_id
+WHERE r.repository_id = ? AND c.source_id = ?
+ORDER BY c.started_at, c.id, b.seq;
+
 -- name: ReplicasByBackupIDs :many
 SELECT * FROM replicas
 WHERE repository_id = ? AND local_repository_id = ? AND backup_id IN (sqlc.slice(backup_ids));

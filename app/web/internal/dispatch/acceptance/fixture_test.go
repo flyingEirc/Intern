@@ -78,7 +78,6 @@ type fixture struct {
 	layout     layout
 	secret     secrets
 	database   *store.Store
-	analysis   *sql.DB
 	sealer     *credential.Sealer
 	auth       *auth.Service
 	stopAuth   func()
@@ -105,6 +104,11 @@ type fixture struct {
 	// for instance.
 	childLogs []string
 	closed    bool
+	// analysisMu guards the analysis view. The view is opened on demand and
+	// dropped at every serve-child boundary, and the replication sampler reads
+	// it from its own goroutine.
+	analysisMu sync.Mutex
+	analysis   *sql.DB
 }
 
 type client struct {
@@ -140,7 +144,6 @@ func newFixture(t *testing.T) *fixture {
 	secret := loadSecrets(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	database := openStore(t, paths.metadata)
-	analysis := openAnalysis(t, paths.metadata)
 	must(t, artifact.GenerateKey(paths.kek))
 	sealer, err := credential.Open(paths.kek, paths.metadata, paths.work)
 	must(t, err)
@@ -152,10 +155,12 @@ func newFixture(t *testing.T) *fixture {
 	}
 	svc := &resources.Service{Store: database, Settings: settings}
 	f := &fixture{
-		t: t, layout: paths, secret: secret, database: database, analysis: analysis,
+		t: t, layout: paths, secret: secret, database: database,
 		sealer: sealer, auth: authn, settings: settings, service: svc,
 		instanceID: database.InstanceID(), log: new(lockedBuffer),
 	}
+	f.openAnalysis(t)
+	t.Cleanup(f.closeAnalysisQuiet)
 	f.stopAuth = authn.StartCleanup(context.Background(), time.Minute, logger)
 	t.Cleanup(f.stopAuthOnce)
 	seedUsers(t, f)
@@ -231,13 +236,82 @@ func openStore(t *testing.T, dir string) *store.Store {
 	return database
 }
 
-func openAnalysis(t *testing.T, dir string) *sql.DB {
-	t.Helper()
+// analysisPool opens one SQLite pool over the control-plane database. The pool
+// is a view, never a handle that outlives a serve child: the child owns the
+// database while it runs, and a pool this process kept across the child's exit
+// is the stale view that once hid every later write.
+func analysisPool(dir string) (*sql.DB, error) {
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", filepath.Join(dir, "intern.db"))
-	db, err := sql.Open("sqlite", dsn)
+	return sql.Open("sqlite", dsn)
+}
+
+// analysisView returns the worker's view of the control-plane database,
+// opening a pool when none is open. It never fails a test: the diagnostics read
+// through it from a cleanup, where a missing pool is reported as a dump line.
+func (f *fixture) analysisView() (*sql.DB, error) {
+	f.analysisMu.Lock()
+	defer f.analysisMu.Unlock()
+	if f.analysis != nil {
+		return f.analysis, nil
+	}
+	db, err := analysisPool(f.layout.metadata)
+	if err != nil {
+		return nil, err
+	}
+	f.analysis = db
+	return db, nil
+}
+
+// view is analysisView with the scenario's failure handling.
+func (f *fixture) view(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := f.analysisView()
 	must(t, err)
-	t.Cleanup(func() { must(t, db.Close()) })
 	return db
+}
+
+// openAnalysis opens the view eagerly, so a database that cannot be opened
+// fails where it is opened rather than at the first cross-check.
+func (f *fixture) openAnalysis(t *testing.T) {
+	t.Helper()
+	_, err := f.analysisView()
+	must(t, err)
+}
+
+// closeAnalysis drops the view. Every serve-child boundary calls it: before a
+// child starts, because the child takes the database over, and after a child
+// stops or is killed, because a pool that spans the boundary is the stale view
+// this fixture must never cross-check against.
+func (f *fixture) closeAnalysis(t *testing.T) {
+	t.Helper()
+	f.analysisMu.Lock()
+	db := f.analysis
+	f.analysis = nil
+	f.analysisMu.Unlock()
+	if db == nil {
+		return
+	}
+	must(t, db.Close())
+}
+
+// reopenAnalysis closes the view and opens a fresh one, so the next read is the
+// child's committed state read through a new connection.
+func (f *fixture) reopenAnalysis(t *testing.T) {
+	t.Helper()
+	f.closeAnalysis(t)
+	f.openAnalysis(t)
+}
+
+// closeAnalysisQuiet drops the view at teardown, where a close error has no
+// assertion left to fail.
+func (f *fixture) closeAnalysisQuiet() {
+	f.analysisMu.Lock()
+	db := f.analysis
+	f.analysis = nil
+	f.analysisMu.Unlock()
+	if db != nil {
+		_ = db.Close()
+	}
 }
 
 func seedUsers(t *testing.T, f *fixture) {
@@ -450,7 +524,7 @@ func (f *fixture) allLogs(t *testing.T, runID string) []store.RunLog {
 // data column exactly as the store does when it serves the same rows.
 func (f *fixture) sqliteLogs(t *testing.T, runID string) []store.RunLog {
 	t.Helper()
-	rows, err := f.analysis.QueryContext(t.Context(),
+	rows, err := f.view(t).QueryContext(t.Context(),
 		`SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? ORDER BY seq`, runID)
 	must(t, err)
 	defer func() { must(t, rows.Close()) }()
@@ -545,14 +619,21 @@ func (f *fixture) waitReplica(t *testing.T, backupID, status string) dispatch.Re
 }
 
 // waitAllReplicasVerified waits until every replica row of the fixture source
-// is verified, so a later protection read compares settled points.
-func (f *fixture) waitAllReplicasVerified(t *testing.T) {
+// is verified and the replica of the named backup is one of them, so a later
+// protection read compares settled points. Naming the backup is what makes the
+// wait cover the copy the scenario is about: a view that only lists older rows
+// is settled the moment it is read, and the hold would then be measured against
+// a backup that was never replicated. The statuses are read through the live
+// view, so a replica the serving child wrote is visible here.
+func (f *fixture) waitAllReplicasVerified(t *testing.T, backupID string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Minute)
+	var statuses map[string]string
 	for time.Now().Before(deadline) {
-		statuses, err := f.replicaStatuses()
+		var err error
+		statuses, err = f.replicaStatuses()
 		must(t, err)
-		settled := len(statuses) > 0
+		settled := statuses[backupID] == "verified"
 		for _, status := range statuses {
 			if status != "verified" {
 				settled = false
@@ -564,7 +645,7 @@ func (f *fixture) waitAllReplicasVerified(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("not every replica reached verified before the deadline")
+	t.Fatalf("the replica of %s and every other replica of the source were not verified before the deadline: %v", backupID, statuses)
 }
 
 // waitXtrabackup waits until the run is running AND its real backup process is
@@ -645,6 +726,13 @@ func (f *fixture) shutdownInProcess(t *testing.T) {
 func (f *fixture) startServeChild(t *testing.T) {
 	t.Helper()
 	f.shutdownInProcess(t)
+	// The child owns the database from here on. The worker keeps no pool open
+	// across that handover: a pool left open here is a connection the child
+	// cannot make sense of and this process cannot keep current, and every
+	// read after the child stops goes through the fresh pool reopenAnalysis
+	// opens. Dropping it before a leftover child is killed keeps the same
+	// rule for that kill.
+	f.closeAnalysis(t)
 	if f.child != nil && f.child.ProcessState == nil {
 		_ = f.child.Process.Kill()
 		_ = f.child.Wait()
@@ -731,6 +819,11 @@ func (f *fixture) waitChild(t *testing.T, bound time.Duration) {
 		t.Fatalf("serve child did not exit within %s", bound)
 	case <-done:
 	}
+	// The child has stopped: its connections are gone, and this process's view
+	// must be opened again before anything reads it. Reopening here, before the
+	// scenario's next cross-check, is what makes that read the child's
+	// committed state instead of a view frozen at the child's exit.
+	f.reopenAnalysis(t)
 }
 
 func (f *fixture) pendingDirs() []string {
@@ -746,14 +839,14 @@ func (f *fixture) workDirs() []string {
 func (f *fixture) sqliteCount(t *testing.T, query string, args ...any) int {
 	t.Helper()
 	var n int
-	must(t, f.analysis.QueryRowContext(t.Context(), query, args...).Scan(&n))
+	must(t, f.view(t).QueryRowContext(t.Context(), query, args...).Scan(&n))
 	return n
 }
 
 func (f *fixture) sqliteString(t *testing.T, query string, args ...any) string {
 	t.Helper()
 	var value string
-	must(t, f.analysis.QueryRowContext(t.Context(), query, args...).Scan(&value))
+	must(t, f.view(t).QueryRowContext(t.Context(), query, args...).Scan(&value))
 	return value
 }
 
@@ -841,28 +934,48 @@ func (f *fixture) listLocalObjects(t *testing.T) []string {
 // assertNoSecret scans every byte the run may have written in the clear: the
 // control-plane database file, its WAL and SHM companions, the in-process
 // dispatcher log, the caller's extra payload and the serve child's captured
-// stdout/stderr. The child log is read from its own handle so a scan during
-// the run sees what has been written so far.
+// stdout/stderr.
+//
+// The database files are read by a re-execed helper, never by this process.
+// Under POSIX rules, closing any descriptor on one of them here releases every
+// fcntl lock this process holds on that file, including the shared lock SQLite
+// keeps on the -shm companion. Without that lock the serving child treats
+// itself as the last connection, checkpoints and unlinks the WAL, and this
+// process is left reading a detached inode: every write of every later child
+// becomes invisible, which is exactly the stale view that once made a SIGKILL
+// recovery cross-check report "no rows". TestW4ReadFileChild holds the other
+// half of that contract.
+//
+// The child log is read from its own handle so a scan during the run sees what
+// has been written so far; it is a plain log, not a database companion.
 func (f *fixture) assertNoSecret(t *testing.T, extra []byte) {
 	t.Helper()
-	payloads := [][]byte{f.log.bytes(), extra, f.childOutput(t)}
-	for _, name := range []string{"intern.db", "intern.db-wal", "intern.db-shm"} {
-		path := filepath.Join(f.layout.metadata, name)
-		raw, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		must(t, err)
-		payloads = append(payloads, raw)
-	}
+	needles := make([][]byte, 0, 4)
 	for _, secret := range []string{f.secret.source, f.secret.ftp, f.secret.admin, f.secret.operator} {
-		needle := []byte(secret)
-		for _, payload := range payloads {
-			if bytes.Contains(payload, needle) {
-				t.Fatal("secret appeared in the clear")
-			}
+		needles = append(needles, []byte(secret))
+	}
+	for _, payload := range [][]byte{f.log.bytes(), extra, f.childOutput(t)} {
+		if containsAny(payload, needles) {
+			t.Fatal("secret appeared in the clear")
 		}
 	}
+	for _, name := range []string{"intern.db", "intern.db-wal", "intern.db-shm"} {
+		if f.scanFileInChild(t, filepath.Join(f.layout.metadata, name), needles) {
+			t.Fatalf("secret appeared in the clear in %s", name)
+		}
+	}
+}
+
+// containsAny reports whether any needle occurs in one payload. An empty needle
+// would match every payload, so it is skipped: loadSecrets already refuses one,
+// and a scan that cannot distinguish "absent" from "empty" is not a scan.
+func containsAny(payload []byte, needles [][]byte) bool {
+	for _, needle := range needles {
+		if len(needle) > 0 && bytes.Contains(payload, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // childOutput reads the serve child's captured output file by path: a fresh
@@ -944,7 +1057,11 @@ func (f *fixture) dumpDiagnostics(t *testing.T) {
 // is diagnosed from: which pair it belongs to, how far it got, why it stopped
 // and when it may try again.
 func (f *fixture) diagnosticReplicas() []string {
-	rows, err := f.analysis.QueryContext(context.Background(),
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: replica rows unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
 		`SELECT backup_id, repository_id, local_repository_id, status, attempts, permanent,
 COALESCE(last_error_code, ''), next_attempt_at FROM replicas
 ORDER BY local_repository_id, repository_id, backup_id LIMIT ?`, diagnosticReplicaRows)
@@ -979,7 +1096,11 @@ func (f *fixture) diagnosticRuns() []string {
 	if f.sourceID == "" {
 		return []string{"W4 diagnostics: no source was created"}
 	}
-	rows, err := f.analysis.QueryContext(context.Background(),
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: runs unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
 		`SELECT id, policy_id, kind, "trigger", status, COALESCE(error_class, ''), COALESCE(error_code, ''),
 COALESCE(backup_id, ''), cancel_requested, scheduled_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
 FROM runs WHERE source_id = ?
@@ -1013,7 +1134,11 @@ ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' TH
 // diagnosticLogs prints the last diagnosticRunLogLines stored events of one run,
 // oldest first.
 func (f *fixture) diagnosticLogs(runID string) []string {
-	rows, err := f.analysis.QueryContext(context.Background(),
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: run_logs of %s unavailable: %v", runID, err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
 		`SELECT seq, ts, level, event, substr(COALESCE(message, ''), 1, ?) FROM run_logs
 WHERE run_id = ? ORDER BY seq DESC LIMIT ?`, diagnosticMessageWidth, runID, diagnosticRunLogLines)
 	if err != nil {
@@ -1150,10 +1275,40 @@ func (f *fixture) redact(lines []string) ([]string, int) {
 func (f *fixture) sqliteRunOutcome(t *testing.T, runID string) (string, string, string) {
 	t.Helper()
 	var status, class, code string
-	must(t, f.analysis.QueryRowContext(t.Context(),
+	must(t, f.view(t).QueryRowContext(t.Context(),
 		`SELECT status, COALESCE(error_class, ''), COALESCE(error_code, '') FROM runs WHERE id = ?`, runID,
 	).Scan(&status, &class, &code))
 	return status, class, code
+}
+
+// requireViewRun proves the analysis view is the live database and not a
+// snapshot frozen at the moment an earlier serve child closed it. The row must
+// have been written by a serve child this scenario drove, so a view without it
+// cannot judge anything that child did: it is the explicit check that turns a
+// frozen view into a failure here instead of a "no rows" from whichever
+// cross-check happens to read it next. Every cross-check that follows a child
+// lifecycle starts here.
+func (f *fixture) requireViewRun(t *testing.T, runID, wantStatus string) {
+	t.Helper()
+	view := f.view(t)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var status string
+		err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = ?`, runID).Scan(&status)
+		if err == nil {
+			if wantStatus != "" && status != wantStatus {
+				t.Fatalf("analysis view: run %s is %s, want %s", runID, status, wantStatus)
+			}
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			must(t, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the analysis view has no row for run %s, which a serve child of this scenario wrote: the view is stale, and no cross-check read from it is evidence", runID)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func newClient(t *testing.T, httpClient *http.Client, base, role string) *client {
@@ -1784,9 +1939,15 @@ func uploadedBehindRemote(protection dispatch.Protection, statuses map[string]st
 	return observed
 }
 
-// replicaStatuses reads every replica status of the fixture source from SQLite.
+// replicaStatuses reads every replica status of the fixture source from the
+// live view. The replication sampler calls it from its own goroutine, so it
+// reports an error instead of failing the test.
 func (f *fixture) replicaStatuses() (map[string]string, error) {
-	rows, err := f.analysis.QueryContext(context.Background(),
+	db, err := f.analysisView()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(context.Background(),
 		`SELECT r.backup_id, r.status FROM replicas r
 JOIN backups b ON b.id = r.backup_id JOIN chains c ON c.id = b.chain_id
 WHERE c.source_id = ? AND r.repository_id = ?`, f.sourceID, f.ftpID)

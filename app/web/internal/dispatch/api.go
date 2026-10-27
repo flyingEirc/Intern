@@ -181,14 +181,15 @@ type ChainView struct {
 
 // Protection reads the local and remote protection points for one source.
 //
-// The remote point is computed per replica repository, but from every pair that
-// repository serves for this source: one FTP repository shared by two local
-// repositories has one queue per pair, and each queue only proves the copies of
-// its own local repository. The reported point is therefore the earliest of the
-// pair points, because a remote repository can only be claimed to protect the
-// source up to the point every one of its queues has proven. A pair that holds
-// no backups of the source contributes nothing: its RemotePoint is nil, and
-// treating that as "no protection" would erase a point proven by another pair.
+// The remote point is computed per replica repository, over the union of that
+// source's replica rows on the repository across every pair that replicates to
+// it: one FTP repository shared by two local repositories has one queue per
+// pair, and each queue only proves the copies of its own local repository. The
+// union is ordered by chain position and the point is the last item of its
+// longest all-verified prefix, so a pair that stops producing cannot pin the
+// point, and a point is never claimed across a backup that is not verified on
+// that repository. Verification time is never compared: it says when a copy was
+// proven, not where the copy sits in the chain.
 func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protection, error) {
 	local, err := replication.LocalPoint(ctx, physicalstore.New(d.config.Database.DB()), sourceID)
 	if err != nil {
@@ -206,47 +207,26 @@ func (d *Dispatcher) Protection(ctx context.Context, sourceID string) (Protectio
 	return protection, nil
 }
 
-// remotePoints derives one point per replica repository from the pairs that
-// actually hold backups of the source. The point is the earliest of those
-// pairs' points: the repository can only be claimed to protect the source up to
-// what every queue has proven.
+// remotePoints derives one point per installed replica repository, in the order
+// the pairs were installed. A repository that has proven nothing for the source
+// has no point and is omitted.
 func (d *Dispatcher) remotePoints(ctx context.Context, sourceID string) ([]PointView, error) {
-	holders, err := d.config.Database.SourceLocalRepositories(ctx, sourceID)
-	if err != nil {
-		return nil, err
-	}
-	holds := make(map[string]struct{}, len(holders))
-	for _, localID := range holders {
-		holds[localID] = struct{}{}
-	}
-	points := map[string]*replication.Point{}
-	order := make([]string, 0, len(d.replicaSnapshot()))
+	seen := make(map[string]struct{}, len(d.replicaSnapshot()))
+	views := make([]PointView, 0, len(d.replicaSnapshot()))
 	for _, slot := range d.replicaSnapshot() {
-		if _, ok := holds[slot.localID]; !ok {
+		if _, ok := seen[slot.replicaID]; ok {
 			continue
 		}
-		remote, err := slot.replicator.RemotePoint(ctx, sourceID)
+		seen[slot.replicaID] = struct{}{}
+		point, err := replication.RepositoryRemotePoint(ctx, d.config.Database.DB(), slot.replicaID, sourceID)
 		if err != nil {
 			return nil, err
 		}
-		if remote == nil {
+		if point == nil {
 			continue
 		}
-		earliest, seen := points[slot.replicaID]
-		if !seen {
-			order = append(order, slot.replicaID)
-			points[slot.replicaID] = remote
-			continue
-		}
-		if remote.At.Before(earliest.At) {
-			points[slot.replicaID] = remote
-		}
-	}
-	views := make([]PointView, 0, len(order))
-	for _, repositoryID := range order {
-		point := points[repositoryID]
 		views = append(views, PointView{
-			RepositoryID: repositoryID, BackupID: point.BackupID,
+			RepositoryID: slot.replicaID, BackupID: point.BackupID,
 			ChainID: point.ChainID, At: store.ScheduleStamp(point.At),
 		})
 	}
@@ -342,22 +322,19 @@ func (d *Dispatcher) ReplicaRetry(ctx context.Context, backupID, repositoryID st
 }
 
 // pairForBackup resolves the (local, replica) pair whose queue holds the
-// replica row of one backup: the local repository of the policy whose run
-// produced the backup. A missing pair or an uninstalled replicator reports
-// store.ErrNotFound, which the API answers as a 404.
+// replica row of one backup: the pair its producing run was claimed with. The
+// run snapshot is the binding, so a retry still finds an old backup after a PUT
+// moved the policy to another repository. A missing pair or an uninstalled
+// replicator reports store.ErrNotFound, which the API answers as a 404.
 func (d *Dispatcher) pairForBackup(ctx context.Context, backupID, repositoryID string) (*replication.Replicator, error) {
 	run, err := d.config.Database.RunByBackupID(ctx, backupID)
-	if err != nil {
+	if err != nil || run.LocalRepositoryID == nil {
 		return nil, store.ErrNotFound
 	}
-	policy, err := d.config.Database.Policy(ctx, run.PolicyID)
-	if err != nil {
+	if run.ReplicaRepositoryID == nil || *run.ReplicaRepositoryID != repositoryID {
 		return nil, store.ErrNotFound
 	}
-	if policy.ReplicaRepositoryID == nil || *policy.ReplicaRepositoryID != repositoryID {
-		return nil, store.ErrNotFound
-	}
-	replicator := d.replicatorForPair(policy.LocalRepositoryID, repositoryID)
+	replicator := d.replicatorForPair(*run.LocalRepositoryID, repositoryID)
 	if replicator == nil {
 		return nil, store.ErrNotFound
 	}

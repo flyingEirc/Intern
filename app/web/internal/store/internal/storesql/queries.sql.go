@@ -80,19 +80,27 @@ func (q *Queries) ChangePassword(ctx context.Context, arg ChangePasswordParams) 
 }
 
 const claimNextRun = `-- name: ClaimNextRun :one
-UPDATE runs SET status = 'running', started_at = ?1
+UPDATE runs SET
+    status = 'running',
+    started_at = ?1,
+    local_repository_id = (SELECT p.local_repository_id FROM policies p WHERE p.id = runs.policy_id),
+    replica_repository_id = (SELECT p.replica_repository_id FROM policies p WHERE p.id = runs.policy_id)
 WHERE id = (
     SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
 ) AND status = 'queued'
 AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
-RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id
+RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
 `
 
 // Global backup concurrency is 1: a queued row is claimed only when no run is
 // already running. That is also per-source exclusion. One claimant at a time
 // holds the database write lock, so the loser's statement runs after the
 // winner's commit and no longer matches. No result means no claimable run.
+//
+// The claim also snapshots the policy's (local, replica) pair onto the row, in
+// the same statement that reads the policy, so the run and its replication
+// binding can never disagree: a later PUT moves the next run's pair only.
 func (q *Queries) ClaimNextRun(ctx context.Context, startedAt sql.NullString) (Run, error) {
 	row := q.db.QueryRowContext(ctx, claimNextRun, startedAt)
 	var i Run
@@ -116,6 +124,8 @@ func (q *Queries) ClaimNextRun(ctx context.Context, startedAt sql.NullString) (R
 		&i.ErrorCode,
 		&i.CancelRequested,
 		&i.ActorID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
 	)
 	return i, err
 }
@@ -163,6 +173,46 @@ func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const completedRunReplicationPairs = `-- name: CompletedRunReplicationPairs :many
+SELECT DISTINCT r.local_repository_id AS local_repository_id, r.replica_repository_id AS replica_repository_id
+FROM runs r
+JOIN repositories lr ON lr.id = r.local_repository_id
+JOIN repositories rr ON rr.id = r.replica_repository_id
+WHERE r.status = 'completed' AND r.replica_repository_id IS NOT NULL
+ORDER BY r.local_repository_id, r.replica_repository_id
+`
+
+type CompletedRunReplicationPairsRow struct {
+	LocalRepositoryID   sql.NullString
+	ReplicaRepositoryID sql.NullString
+}
+
+// The pairs completed runs were claimed with, kept while the run's snapshot
+// still names a replica repository that exists. These pairs stay installed so
+// their backups keep replicating after a policy edit.
+func (q *Queries) CompletedRunReplicationPairs(ctx context.Context) ([]CompletedRunReplicationPairsRow, error) {
+	rows, err := q.db.QueryContext(ctx, completedRunReplicationPairs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CompletedRunReplicationPairsRow{}
+	for rows.Next() {
+		var i CompletedRunReplicationPairsRow
+		if err := rows.Scan(&i.LocalRepositoryID, &i.ReplicaRepositoryID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const countActiveFullsForSource = `-- name: CountActiveFullsForSource :one
@@ -684,7 +734,7 @@ func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, err
 }
 
 const getRun = `-- name: GetRun :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE id = ?
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE id = ?
 `
 
 func (q *Queries) GetRun(ctx context.Context, id string) (Run, error) {
@@ -710,12 +760,14 @@ func (q *Queries) GetRun(ctx context.Context, id string) (Run, error) {
 		&i.ErrorCode,
 		&i.CancelRequested,
 		&i.ActorID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
 	)
 	return i, err
 }
 
 const getRunByIdempotencyKey = `-- name: GetRunByIdempotencyKey :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE idempotency_key = ?
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE idempotency_key = ?
 `
 
 func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey string) (Run, error) {
@@ -741,6 +793,8 @@ func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey str
 		&i.ErrorCode,
 		&i.CancelRequested,
 		&i.ActorID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
 	)
 	return i, err
 }
@@ -901,7 +955,7 @@ const insertRun = `-- name: InsertRun :one
 INSERT INTO runs (
     id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash,
     status, scheduled_at, created_at, actor_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?) RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?) RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
 `
 
 type InsertRunParams struct {
@@ -951,6 +1005,8 @@ func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (Run, erro
 		&i.ErrorCode,
 		&i.CancelRequested,
 		&i.ActorID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
 	)
 	return i, err
 }
@@ -983,7 +1039,7 @@ func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) erro
 }
 
 const interruptedRuns = `-- name: InterruptedRuns :many
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE status = 'running'
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE status = 'running'
 `
 
 func (q *Queries) InterruptedRuns(ctx context.Context) ([]Run, error) {
@@ -1015,6 +1071,8 @@ func (q *Queries) InterruptedRuns(ctx context.Context) ([]Run, error) {
 			&i.ErrorCode,
 			&i.CancelRequested,
 			&i.ActorID,
+			&i.LocalRepositoryID,
+			&i.ReplicaRepositoryID,
 		); err != nil {
 			return nil, err
 		}
@@ -1171,7 +1229,7 @@ func (q *Queries) ListRepositories(ctx context.Context, arg ListRepositoriesPara
 }
 
 const listRuns = `-- name: ListRuns :many
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs
 WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
     AND (CAST(?2 AS TEXT) = '' OR policy_id = CAST(?2 AS TEXT))
     AND (CAST(?3 AS TEXT) = '' OR source_id = CAST(?3 AS TEXT))
@@ -1222,6 +1280,8 @@ func (q *Queries) ListRuns(ctx context.Context, arg ListRunsParams) ([]Run, erro
 			&i.ErrorCode,
 			&i.CancelRequested,
 			&i.ActorID,
+			&i.LocalRepositoryID,
+			&i.ReplicaRepositoryID,
 		); err != nil {
 			return nil, err
 		}
@@ -1331,20 +1391,21 @@ func (q *Queries) MaxRunLogSeq(ctx context.Context, runID string) (int64, error)
 const pairBackups = `-- name: PairBackups :many
 SELECT DISTINCT r.backup_id AS backup_id
 FROM runs r
-JOIN policies p ON p.id = r.policy_id
-WHERE p.local_repository_id = ? AND p.replica_repository_id = ?
+WHERE r.local_repository_id = ? AND r.replica_repository_id = ?
   AND r.backup_id IS NOT NULL
 `
 
 type PairBackupsParams struct {
-	LocalRepositoryID   string
+	LocalRepositoryID   sql.NullString
 	ReplicaRepositoryID sql.NullString
 }
 
-// Every backup published by a run of a policy with exactly this
-// (local_repository_id, replica_repository_id) pair. A backup produced by a
-// policy on another local repository is never selected, so one replica
-// repository shared by two local repositories never queues the other's backup.
+// Every backup published by a run claimed with exactly this
+// (local_repository_id, replica_repository_id) pair. A backup produced on
+// another local repository is never selected, so one replica repository shared
+// by two local repositories never queues the other's backup. The catch-up then
+// keeps only the backups that are still locally present: a pruned backup has
+// nothing to copy and must not warn on every scan.
 func (q *Queries) PairBackups(ctx context.Context, arg PairBackupsParams) ([]sql.NullString, error) {
 	rows, err := q.db.QueryContext(ctx, pairBackups, arg.LocalRepositoryID, arg.ReplicaRepositoryID)
 	if err != nil {
@@ -1480,7 +1541,7 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 }
 
 const runByBackupID = `-- name: RunByBackupID :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1
 `
 
 func (q *Queries) RunByBackupID(ctx context.Context, backupID sql.NullString) (Run, error) {
@@ -1506,6 +1567,8 @@ func (q *Queries) RunByBackupID(ctx context.Context, backupID sql.NullString) (R
 		&i.ErrorCode,
 		&i.CancelRequested,
 		&i.ActorID,
+		&i.LocalRepositoryID,
+		&i.ReplicaRepositoryID,
 	)
 	return i, err
 }
@@ -1632,25 +1695,23 @@ func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicySchedulePa
 }
 
 const sourceLocalRepositories = `-- name: SourceLocalRepositories :many
-SELECT DISTINCT p.local_repository_id AS local_repository_id
+SELECT DISTINCT r.local_repository_id AS local_repository_id
 FROM runs r
-JOIN policies p ON p.id = r.policy_id
-WHERE r.source_id = ? AND r.backup_id IS NOT NULL
-ORDER BY p.local_repository_id
+WHERE r.source_id = ? AND r.backup_id IS NOT NULL AND r.local_repository_id IS NOT NULL
+ORDER BY r.local_repository_id
 `
 
-// The local repositories that hold one source's backups: every policy whose
-// run published a backup of that source. The physical schema keeps no local
-// repository on a backup, so the producing run's policy is the durable binding.
-func (q *Queries) SourceLocalRepositories(ctx context.Context, sourceID string) ([]string, error) {
+// The local repositories that hold one source's backups, from each producing
+// run's snapshot. A policy edit never moves a backup that already exists.
+func (q *Queries) SourceLocalRepositories(ctx context.Context, sourceID string) ([]sql.NullString, error) {
 	rows, err := q.db.QueryContext(ctx, sourceLocalRepositories, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []string{}
+	items := []sql.NullString{}
 	for rows.Next() {
-		var local_repository_id string
+		var local_repository_id sql.NullString
 		if err := rows.Scan(&local_repository_id); err != nil {
 			return nil, err
 		}

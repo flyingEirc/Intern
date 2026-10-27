@@ -1,12 +1,14 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
@@ -44,7 +46,11 @@ const (
 	RunErrorRecoveryFailed = "recovery_failed"
 )
 
-// Run is one backup attempt of one policy.
+// Run is one backup attempt of one policy. LocalRepositoryID and
+// ReplicaRepositoryID are the pair the claim snapshotted from the policy, so
+// replication resolves the backup's repositories from the run itself and a
+// later policy edit never moves a backup that already exists. They are internal
+// replication state and stay off the wire, like the idempotency key.
 type Run struct {
 	ID              string  `json:"id"`
 	PolicyID        string  `json:"policy_id"`
@@ -63,10 +69,12 @@ type Run struct {
 	ErrorCode       *string `json:"error_code"`
 	CancelRequested bool    `json:"cancel_requested"`
 	ActorID         *string `json:"actor_id"`
-	// IdempotencyKey and RequestHash are internal claim and conflict state and
-	// are deliberately not part of the wire representation.
-	IdempotencyKey string `json:"-"`
-	RequestHash    string `json:"-"`
+	// IdempotencyKey, RequestHash and the claimed (local, replica) pair are
+	// internal claim state and are deliberately not part of the wire shape.
+	IdempotencyKey      string  `json:"-"`
+	RequestHash         string  `json:"-"`
+	LocalRepositoryID   *string `json:"-"`
+	ReplicaRepositoryID *string `json:"-"`
 }
 
 // RunLog is one bounded event of one run.
@@ -111,6 +119,8 @@ func runFromRow(row storesql.Run) Run {
 	nullableString(&run.ErrorClass, row.ErrorClass)
 	nullableString(&run.ErrorCode, row.ErrorCode)
 	nullableString(&run.ActorID, row.ActorID)
+	nullableString(&run.LocalRepositoryID, row.LocalRepositoryID)
+	nullableString(&run.ReplicaRepositoryID, row.ReplicaRepositoryID)
 	return run
 }
 
@@ -277,6 +287,10 @@ func (s *Store) CreateRun(ctx context.Context, in RunInput) (Run, error) {
 // skipped: the API canceled them before execution. It returns false when no
 // claimable run exists. Global backup concurrency is 1: a claim is refused
 // while any run is already running, which is also per-source exclusion.
+//
+// The claim snapshots the policy's (local, replica) pair onto the row in the
+// same statement, so the repositories the run actually uses are the ones
+// replication later resolves for its backup.
 func (s *Store) ClaimRun(ctx context.Context) (Run, bool, error) {
 	row, err := storesql.New(s.db).ClaimNextRun(ctx, nullableTime(time.Now()))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -523,13 +537,13 @@ func (s *Store) HasActiveFull(ctx context.Context, sourceID string) (bool, error
 	return count > 0, nil
 }
 
-// PairBackups lists the backups published by runs of the policies that use one
-// (local repository, replica repository) pair. A backup produced on another
-// local repository is never listed, so a shared replica repository cannot bind
-// it to this pair.
+// PairBackups lists the backups published by runs claimed with one
+// (local repository, replica repository) pair. The run's snapshot is the
+// binding, so a backup produced on another local repository is never listed and
+// a policy edit never moves an existing backup to a pair it never ran on.
 func (s *Store) PairBackups(ctx context.Context, localRepositoryID, replicaRepositoryID string) ([]string, error) {
 	rows, err := storesql.New(s.db).PairBackups(ctx, storesql.PairBackupsParams{
-		LocalRepositoryID: localRepositoryID, ReplicaRepositoryID: nullable(replicaRepositoryID),
+		LocalRepositoryID: nullString(&localRepositoryID), ReplicaRepositoryID: nullable(replicaRepositoryID),
 	})
 	if err != nil {
 		return nil, err
@@ -544,9 +558,79 @@ func (s *Store) PairBackups(ctx context.Context, localRepositoryID, replicaRepos
 }
 
 // SourceLocalRepositories lists the local repositories that hold one source's
-// backups: the repositories of the policies whose runs published them.
+// backups, from each producing run's snapshot.
 func (s *Store) SourceLocalRepositories(ctx context.Context, sourceID string) ([]string, error) {
-	return storesql.New(s.db).SourceLocalRepositories(ctx, sourceID)
+	rows, err := storesql.New(s.db).SourceLocalRepositories(ctx, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	holders := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.Valid {
+			holders = append(holders, row.String)
+		}
+	}
+	return holders, nil
+}
+
+// ReplicationPair is one (local, replica) repository pair the dispatcher serves.
+type ReplicationPair struct {
+	LocalRepositoryID   string `json:"local_repository_id"`
+	ReplicaRepositoryID string `json:"replica_repository_id"`
+}
+
+// ReplicationPairs is the installed pair set: every pair a completed run was
+// claimed with, plus every pair a current policy names. The run snapshots keep
+// old backups replicating after a policy edit; the policy rows make new runs
+// replicate on the pair the edit introduced. A pair whose local or replica
+// repository row no longer exists is not installed, because it could never be
+// opened.
+func (s *Store) ReplicationPairs(ctx context.Context) ([]ReplicationPair, error) {
+	queries := storesql.New(s.db)
+	completed, err := queries.CompletedRunReplicationPairs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	policies, err := queries.ListPolicies(ctx, storesql.ListPoliciesParams{Before: "", RowLimit: 1_000_000})
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]ReplicationPair, 0, len(completed)+len(policies))
+	for _, row := range completed {
+		candidates = append(candidates, ReplicationPair{
+			LocalRepositoryID: row.LocalRepositoryID.String, ReplicaRepositoryID: row.ReplicaRepositoryID.String,
+		})
+	}
+	for _, policy := range policies {
+		candidates = append(candidates, ReplicationPair{
+			LocalRepositoryID: policy.LocalRepositoryID, ReplicaRepositoryID: policy.ReplicaRepositoryID.String,
+		})
+	}
+	return installedPairs(candidates), nil
+}
+
+// installedPairs drops the candidates that name no pair and the repeats, then
+// orders the rest so the pair set is stable across calls.
+func installedPairs(candidates []ReplicationPair) []ReplicationPair {
+	seen := make(map[ReplicationPair]struct{}, len(candidates))
+	pairs := make([]ReplicationPair, 0, len(candidates))
+	for _, pair := range candidates {
+		if pair.LocalRepositoryID == "" || pair.ReplicaRepositoryID == "" {
+			continue
+		}
+		if _, ok := seen[pair]; ok {
+			continue
+		}
+		seen[pair] = struct{}{}
+		pairs = append(pairs, pair)
+	}
+	slices.SortFunc(pairs, func(left, right ReplicationPair) int {
+		if order := cmp.Compare(left.LocalRepositoryID, right.LocalRepositoryID); order != 0 {
+			return order
+		}
+		return cmp.Compare(left.ReplicaRepositoryID, right.ReplicaRepositoryID)
+	})
+	return pairs
 }
 
 // RunLog reads one log row. A missing row reports ErrNotFound.

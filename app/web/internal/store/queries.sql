@@ -223,7 +223,15 @@ ORDER BY id DESC LIMIT sqlc.arg(row_limit);
 -- already running. That is also per-source exclusion. One claimant at a time
 -- holds the database write lock, so the loser's statement runs after the
 -- winner's commit and no longer matches. No result means no claimable run.
-UPDATE runs SET status = 'running', started_at = sqlc.arg(started_at)
+--
+-- The claim also snapshots the policy's (local, replica) pair onto the row, in
+-- the same statement that reads the policy, so the run and its replication
+-- binding can never disagree: a later PUT moves the next run's pair only.
+UPDATE runs SET
+    status = 'running',
+    started_at = sqlc.arg(started_at),
+    local_repository_id = (SELECT p.local_repository_id FROM policies p WHERE p.id = runs.policy_id),
+    replica_repository_id = (SELECT p.replica_repository_id FROM policies p WHERE p.id = runs.policy_id)
 WHERE id = (
     SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
@@ -288,22 +296,32 @@ SELECT COUNT(*) FROM runs
 WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running');
 
 -- name: SourceLocalRepositories :many
--- The local repositories that hold one source's backups: every policy whose
--- run published a backup of that source. The physical schema keeps no local
--- repository on a backup, so the producing run's policy is the durable binding.
-SELECT DISTINCT p.local_repository_id AS local_repository_id
+-- The local repositories that hold one source's backups, from each producing
+-- run's snapshot. A policy edit never moves a backup that already exists.
+SELECT DISTINCT r.local_repository_id AS local_repository_id
 FROM runs r
-JOIN policies p ON p.id = r.policy_id
-WHERE r.source_id = ? AND r.backup_id IS NOT NULL
-ORDER BY p.local_repository_id;
+WHERE r.source_id = ? AND r.backup_id IS NOT NULL AND r.local_repository_id IS NOT NULL
+ORDER BY r.local_repository_id;
 
 -- name: PairBackups :many
--- Every backup published by a run of a policy with exactly this
--- (local_repository_id, replica_repository_id) pair. A backup produced by a
--- policy on another local repository is never selected, so one replica
--- repository shared by two local repositories never queues the other's backup.
+-- Every backup published by a run claimed with exactly this
+-- (local_repository_id, replica_repository_id) pair. A backup produced on
+-- another local repository is never selected, so one replica repository shared
+-- by two local repositories never queues the other's backup. The catch-up then
+-- keeps only the backups that are still locally present: a pruned backup has
+-- nothing to copy and must not warn on every scan.
 SELECT DISTINCT r.backup_id AS backup_id
 FROM runs r
-JOIN policies p ON p.id = r.policy_id
-WHERE p.local_repository_id = ? AND p.replica_repository_id = ?
+WHERE r.local_repository_id = ? AND r.replica_repository_id = ?
   AND r.backup_id IS NOT NULL;
+
+-- name: CompletedRunReplicationPairs :many
+-- The pairs completed runs were claimed with, kept while the run's snapshot
+-- still names a replica repository that exists. These pairs stay installed so
+-- their backups keep replicating after a policy edit.
+SELECT DISTINCT r.local_repository_id AS local_repository_id, r.replica_repository_id AS replica_repository_id
+FROM runs r
+JOIN repositories lr ON lr.id = r.local_repository_id
+JOIN repositories rr ON rr.id = r.replica_repository_id
+WHERE r.status = 'completed' AND r.replica_repository_id IS NOT NULL
+ORDER BY r.local_repository_id, r.replica_repository_id;

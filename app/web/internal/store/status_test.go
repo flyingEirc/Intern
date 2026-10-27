@@ -65,17 +65,28 @@ func TestStatusDatabaseIsReadOnly(t *testing.T) {
 }
 
 // unmigratedStatus is the status of a metadata directory with no applied
-// migration set: every embedded latest, nothing applied. The replication latest
-// comes from the embedded set, so a new replication migration does not leave
-// this expectation stale.
+// migration set: every embedded latest, nothing applied. Both latests come from
+// their embedded sets, so a new web or replication migration does not leave this
+// expectation stale.
 func unmigratedStatus(t *testing.T) Status {
 	t.Helper()
 	latest := replicationLatest(t)
+	web := webLatest(t)
 	return Status{
-		LatestVersion: 6, PendingMigrations: 6,
+		LatestVersion: web, PendingMigrations: int(web),
 		PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1,
 		ReplicationLatestVersion: latest, ReplicationPending: int(latest),
 	}
+}
+
+// webLatest is the newest embedded web migration version.
+func webLatest(t *testing.T) int64 {
+	t.Helper()
+	versions, err := embeddedVersions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return latestVersion(versions)
 }
 
 func assertStatus(t *testing.T, got Status, err error, want Status) {

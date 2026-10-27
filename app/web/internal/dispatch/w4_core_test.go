@@ -285,9 +285,10 @@ func insertTerminalRun(t *testing.T, database *store.Store, policy store.Policy,
 	}
 	now := store.ScheduleStamp(time.Now())
 	_, err = database.DB().ExecContext(t.Context(), `
-INSERT INTO runs (id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size)
-VALUES (?, ?, ?, 'full', 'manual', ?, 'lazy-repl', 'completed', ?, ?, ?, ?, ?, ?, 512)`,
-		id.String(), policy.ID, policy.SourceID, "lazy-repl:"+id.String(), now, now, now, now, backupID, chainID)
+INSERT INTO runs (id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, local_repository_id, replica_repository_id)
+VALUES (?, ?, ?, 'full', 'manual', ?, 'lazy-repl', 'completed', ?, ?, ?, ?, ?, ?, 512, ?, ?)`,
+		id.String(), policy.ID, policy.SourceID, "lazy-repl:"+id.String(), now, now, now, now, backupID, chainID,
+		policy.LocalRepositoryID, policy.ReplicaRepositoryID)
 	if err != nil {
 		t.Fatal(err)
 	}

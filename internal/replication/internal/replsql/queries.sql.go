@@ -400,6 +400,92 @@ func (q *Queries) ReplicasByBackupIDs(ctx context.Context, arg ReplicasByBackupI
 	return items, nil
 }
 
+const replicasByRepositorySource = `-- name: ReplicasByRepositorySource :many
+SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, r.local_repository_id, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
+FROM replicas r
+JOIN backups b ON b.id = r.backup_id
+JOIN chains c ON c.id = b.chain_id
+WHERE r.repository_id = ? AND c.source_id = ?
+ORDER BY c.started_at, c.id, b.seq
+`
+
+type ReplicasByRepositorySourceParams struct {
+	RepositoryID string
+	SourceID     string
+}
+
+type ReplicasByRepositorySourceRow struct {
+	BackupID          string
+	RepositoryID      string
+	IdemKey           string
+	Status            string
+	Attempts          int64
+	Permanent         int64
+	NextAttemptAt     string
+	UploadedAt        sql.NullString
+	VerifiedAt        sql.NullString
+	FailedSince       sql.NullString
+	AlertSince        sql.NullString
+	LastErrorCode     sql.NullString
+	LastReplyCode     sql.NullInt64
+	CreatedAt         string
+	UpdatedAt         string
+	LocalRepositoryID string
+	ChainID           string
+	BackupCreatedAt   string
+	ChainSeq          int64
+	SourceID          string
+}
+
+// The union of one source's replica rows on one replica repository, across
+// every local repository that replicates to it. The order is chain position,
+// not verification time: the chain a backup belongs to started first, then the
+// backup's seq, so a caller reads one contiguous stream and a pair that stopped
+// producing cannot pin the point.
+func (q *Queries) ReplicasByRepositorySource(ctx context.Context, arg ReplicasByRepositorySourceParams) ([]ReplicasByRepositorySourceRow, error) {
+	rows, err := q.db.QueryContext(ctx, replicasByRepositorySource, arg.RepositoryID, arg.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ReplicasByRepositorySourceRow{}
+	for rows.Next() {
+		var i ReplicasByRepositorySourceRow
+		if err := rows.Scan(
+			&i.BackupID,
+			&i.RepositoryID,
+			&i.IdemKey,
+			&i.Status,
+			&i.Attempts,
+			&i.Permanent,
+			&i.NextAttemptAt,
+			&i.UploadedAt,
+			&i.VerifiedAt,
+			&i.FailedSince,
+			&i.AlertSince,
+			&i.LastErrorCode,
+			&i.LastReplyCode,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.LocalRepositoryID,
+			&i.ChainID,
+			&i.BackupCreatedAt,
+			&i.ChainSeq,
+			&i.SourceID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const replicasBySource = `-- name: ReplicasBySource :many
 SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, r.local_repository_id, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
 FROM replicas r

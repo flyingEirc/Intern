@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,7 +102,8 @@ func TestExclusiveOwnershipAndReadOnlyStatus(t *testing.T) {
 		t.Fatalf("second writer: %v", err)
 	}
 	status, err := ReadStatus(t.Context(), dir)
-	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != 6 || status.LatestVersion != 6 || status.PendingMigrations != 0 {
+	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != webLatest(t) ||
+		status.LatestVersion != webLatest(t) || status.PendingMigrations != 0 {
 		t.Fatalf("status under writer lock: %+v, %v", status, err)
 	}
 	if err = s.Close(); err != nil {
@@ -190,7 +192,10 @@ func TestReadyRequiresLiveExactVersion(t *testing.T) {
 	if err := s.Ready(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 6"); err != nil {
+	// Removing the newest applied row leaves the embedded version ahead of the
+	// stored one, which is exactly the "not fully migrated" state Ready refuses.
+	if _, err := s.db.ExecContext(t.Context(), fmt.Sprintf(
+		"DELETE FROM web_goose_db_version WHERE version_id = %d", webLatest(t))); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Ready(t.Context()); err == nil {

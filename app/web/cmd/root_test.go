@@ -29,8 +29,10 @@ func executeMigration(t *testing.T, dir, subcommand string) store.Status {
 func TestMigrateStatusBeforeInitialization(t *testing.T) {
 	cleanConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "metadata")
+	latest := latestWebVersion(t)
 	before := executeMigration(t, dir, "status")
-	if before.CurrentVersion != 0 || before.LatestVersion != 6 || before.PendingMigrations != 6 || before.InstanceID != "" {
+	if before.CurrentVersion != 0 || before.LatestVersion != latest ||
+		before.PendingMigrations != int(latest) || before.InstanceID != "" {
 		t.Fatalf("initial status: %+v", before)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -41,8 +43,9 @@ func TestMigrateStatusBeforeInitialization(t *testing.T) {
 func TestMigrateCommands(t *testing.T) {
 	cleanConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "metadata")
+	latest := latestWebVersion(t)
 	after := executeMigration(t, dir, "up")
-	if after.CurrentVersion != 6 || after.PendingMigrations != 0 || after.InstanceID == "" {
+	if after.CurrentVersion != latest || after.PendingMigrations != 0 || after.InstanceID == "" {
 		t.Fatalf("migrated status: %+v", after)
 	}
 	repeated := executeMigration(t, dir, "up")
@@ -62,4 +65,15 @@ func TestMigrateCommands(t *testing.T) {
 	if err = command.ExecuteContext(t.Context()); err == nil {
 		t.Fatal("migrate up bypassed ownership lock")
 	}
+}
+
+// latestWebVersion is the newest embedded web migration version, so a new
+// migration does not leave these expectations pinned to a stale number.
+func latestWebVersion(t *testing.T) int64 {
+	t.Helper()
+	latest, err := store.LatestVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return latest
 }
