@@ -75,7 +75,9 @@ func (d *Dispatcher) TriggerRun(ctx context.Context, policyID, kind, key, reques
 		d.logger.ErrorContext(ctx, "cannot create run", "policy_id", policyID, "error", err)
 		return TriggerInternal, nil
 	}
-	d.ensurePolicyReplicator(ctx, policy, run.ID)
+	// No replicator is opened here: the trigger request never dials the remote.
+	// The completion path enqueues, and the replication worker opens the pair
+	// (with its catch-up) if completion could not.
 	d.logEvent(ctx, run.ID, eventQueued, nil)
 	return TriggerCreated, CreatedRun{RunID: run.ID}
 }

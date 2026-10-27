@@ -32,8 +32,8 @@ func idemKey(backupID, repositoryID string) string {
 // Enqueue queues one completed, locally present backup. Enqueue is idempotent:
 // the idem_key makes a repeated call a no-op rather than a second copy.
 func (r *Replicator) Enqueue(ctx context.Context, backupID string) error {
-	if backupID == "" || r.RepositoryID == "" {
-		return errors.New("replication: backup and repository are required")
+	if backupID == "" || r.RepositoryID == "" || r.LocalRepositoryID == "" {
+		return errors.New("replication: backup, repository and local repository are required")
 	}
 	backup, err := r.Store.Backup(ctx, backupID)
 	if err != nil {
@@ -42,9 +42,15 @@ func (r *Replicator) Enqueue(ctx context.Context, backupID string) error {
 	if err = acceptable(backup); err != nil {
 		return err
 	}
+	return r.insert(ctx, backupID)
+}
+
+// insert writes the replica row of one acceptable backup. Every enqueue path
+// goes through it, so the local repository binding is never omitted.
+func (r *Replicator) insert(ctx context.Context, backupID string) error {
 	now := stamp(r.clock())
 	return replsql.New(r.DB).InsertReplica(ctx, replsql.InsertReplicaParams{
-		BackupID: backupID, RepositoryID: r.RepositoryID,
+		BackupID: backupID, RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
 		IdemKey: idemKey(backupID, r.RepositoryID), NextAttemptAt: now,
 		CreatedAt: now, UpdatedAt: now,
 	})
@@ -62,26 +68,23 @@ func acceptable(backup physicalstore.Backup) error {
 }
 
 // EnqueueCompleted queues every completed, locally present backup of one source
-// in creation order. Local backups are never held back by replication.
+// in creation order. Local backups are never held back by replication. It is
+// idempotent in the same way Enqueue is, so it is the durable catch-up: a pair
+// that was unreachable when a backup completed still queues that backup once
+// the pair is installed.
 func (r *Replicator) EnqueueCompleted(ctx context.Context, sourceID string) error {
 	if sourceID == "" {
 		return errors.New("replication: source is required")
 	}
-	if r.RepositoryID == "" {
-		return errors.New("replication: repository is required")
+	if r.RepositoryID == "" || r.LocalRepositoryID == "" {
+		return errors.New("replication: repository and local repository are required")
 	}
 	rows, err := replsql.New(r.DB).CompletedBackupsBySource(ctx, sourceID)
 	if err != nil {
 		return err
 	}
-	now := stamp(r.clock())
-	q := replsql.New(r.DB)
 	for _, row := range rows {
-		if err = q.InsertReplica(ctx, replsql.InsertReplicaParams{
-			BackupID: row.ID, RepositoryID: r.RepositoryID,
-			IdemKey: idemKey(row.ID, r.RepositoryID), NextAttemptAt: now,
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
+		if err = r.insert(ctx, row.ID); err != nil {
 			return err
 		}
 	}
@@ -96,9 +99,11 @@ type queueItem struct {
 	failedSince                *time.Time
 }
 
-// queue reads this repository's replicas in FIFO order per source.
+// queue reads this (local, repository) pair's replicas in FIFO order per source.
 func (r *Replicator) queue(ctx context.Context) ([]queueItem, error) {
-	rows, err := replsql.New(r.DB).ReplicasForRepository(ctx, r.RepositoryID)
+	rows, err := replsql.New(r.DB).ReplicasForRepository(ctx, replsql.ReplicasForRepositoryParams{
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -155,18 +160,43 @@ func (r *Replicator) nextEligible(ctx context.Context, now time.Time) (*queueIte
 	return nil, nil
 }
 
+// Stepped identifies the item one Step attempt processed, with the status and
+// error code it ended in. A caller logs this item; it is never inferred from the
+// queue afterwards, which could name a different backup.
+type Stepped struct {
+	BackupID, RepositoryID, LocalRepositoryID string
+	Status, Code                              string
+}
+
 // Step processes at most one due, FIFO-eligible item end-to-end: upload then
-// verification readback. It reports whether an item was attempted, and that
-// attempt's failure. Callers serialize Step; local backups are unaffected.
+// verification readback. It reports whether an item was attempted. Callers
+// serialize Step; local backups are unaffected.
 func (r *Replicator) Step(ctx context.Context) (bool, error) {
+	_, attempted, err := r.StepItem(ctx)
+	return attempted, err
+}
+
+// StepItem is Step with the attempted item's identity. The returned item is the
+// one this call really stepped, so a caller can name it without a second, racy
+// lookup; attempted is false and the item is zero when nothing was due.
+func (r *Replicator) StepItem(ctx context.Context) (Stepped, bool, error) {
 	if err := r.check(); err != nil {
-		return false, err
+		return Stepped{}, false, err
 	}
 	item, err := r.nextEligible(ctx, r.clock())
 	if err != nil || item == nil {
-		return false, err
+		return Stepped{}, false, err
 	}
-	return true, r.process(ctx, item)
+	stepErr := r.process(ctx, item)
+	stepped := Stepped{
+		BackupID: item.backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
+	}
+	// The attempt already persisted its outcome; this read only describes it.
+	if replica, readErr := r.Replica(ctx, item.backupID); readErr == nil {
+		stepped.Status, stepped.Code = replica.Status, replica.LastErrorCode
+	}
+	return stepped, true, stepErr
 }
 
 // process runs one attempt for one item and records its outcome.
@@ -233,6 +263,7 @@ func (r *Replicator) begin(ctx context.Context, item *queueItem) error {
 	}
 	changed, err := replsql.New(r.DB).SetReplicaUploading(ctx, replsql.SetReplicaUploadingParams{
 		UpdatedAt: stamp(r.clock()), BackupID: item.backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	})
 	if err != nil {
 		return err
@@ -301,6 +332,7 @@ func (r *Replicator) writeFailure(ctx context.Context, item *queueItem, failure 
 		LastErrorCode: sql.NullString{String: failure.code, Valid: true},
 		LastReplyCode: replyCodeOf(failure),
 		UpdatedAt:     stamp(now), BackupID: item.backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	}); err != nil {
 		return err
 	}
@@ -309,6 +341,7 @@ func (r *Replicator) writeFailure(ctx context.Context, item *queueItem, failure 
 	}
 	return q.SetReplicaAlert(ctx, replsql.SetReplicaAlertParams{
 		AlertSince: nullableStamp(now), BackupID: item.backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	})
 }
 
@@ -352,6 +385,7 @@ func (r *Replicator) Retry(ctx context.Context, backupID string) error {
 	now := stamp(r.clock())
 	return replsql.New(r.DB).ResetReplicaAttempt(ctx, replsql.ResetReplicaAttemptParams{
 		NextAttemptAt: now, UpdatedAt: now, BackupID: backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	})
 }
 
@@ -364,22 +398,27 @@ func (r *Replicator) Recover(ctx context.Context) error {
 	if r.DB == nil || r.Store == nil || r.Local == nil || r.Remote == nil {
 		return errors.New("replication: database, store, local repository and remote are required")
 	}
-	if r.RepositoryID == "" || r.InstanceID == "" {
-		return errors.New("replication: repository and instance are required")
+	if r.RepositoryID == "" || r.LocalRepositoryID == "" || r.InstanceID == "" {
+		return errors.New("replication: repository, local repository and instance are required")
 	}
 	now := stamp(r.clock())
 	if err := replsql.New(r.DB).ResetUploadingReplicas(ctx, replsql.ResetUploadingReplicasParams{
 		NextAttemptAt: now, UpdatedAt: now, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	}); err != nil {
 		return err
 	}
 	return errors.Join(r.recoverParts(ctx), r.recoverLocalDeletes(ctx))
 }
 
-// recoverParts retries CleanupPart for every recorded temporary key. A failed
-// cleanup keeps the row.
+// recoverParts retries CleanupPart for every recorded temporary key of this
+// (local, remote) pair. A failed cleanup keeps the row. A part left by the same
+// replica repository under another local repository belongs to that pair, whose
+// own replicator recovers it.
 func (r *Replicator) recoverParts(ctx context.Context) error {
-	parts, err := replsql.New(r.DB).Parts(ctx, r.RepositoryID)
+	parts, err := replsql.New(r.DB).Parts(ctx, replsql.PartsParams{
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
+	})
 	if err != nil {
 		return err
 	}
@@ -411,7 +450,9 @@ func (r *Replicator) keepPart(ctx context.Context, partID int64, cause error) er
 
 // Replica reads one replica row. A missing row reports sql.ErrNoRows.
 func (r *Replicator) Replica(ctx context.Context, backupID string) (Replica, error) {
-	row, err := replsql.New(r.DB).GetReplica(ctx, replsql.GetReplicaParams{BackupID: backupID, RepositoryID: r.RepositoryID})
+	row, err := replsql.New(r.DB).GetReplica(ctx, replsql.GetReplicaParams{
+		BackupID: backupID, RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID,
+	})
 	if err != nil {
 		return Replica{}, err
 	}
@@ -421,7 +462,7 @@ func (r *Replicator) Replica(ctx context.Context, backupID string) (Replica, err
 // List reads every replica of one source in FIFO order.
 func (r *Replicator) List(ctx context.Context, sourceID string) ([]Replica, error) {
 	rows, err := replsql.New(r.DB).ReplicasBySource(ctx, replsql.ReplicasBySourceParams{
-		RepositoryID: r.RepositoryID, SourceID: sourceID,
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID, SourceID: sourceID,
 	})
 	if err != nil {
 		return nil, err
@@ -451,7 +492,7 @@ func (r *Replicator) ReplicaStatuses(ctx context.Context, backupIDs []string) (m
 		return statuses, nil
 	}
 	rows, err := replsql.New(r.DB).ReplicasByBackupIDs(ctx, replsql.ReplicasByBackupIDsParams{
-		RepositoryID: r.RepositoryID, BackupIds: backupIDs,
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID, BackupIds: backupIDs,
 	})
 	if err != nil {
 		return nil, err
@@ -534,7 +575,7 @@ func completedPrefix(chainID string, members []physicalstore.Backup) (*Point, er
 // (source, repository) pair.
 func (r *Replicator) RemotePoint(ctx context.Context, sourceID string) (*Point, error) {
 	rows, err := replsql.New(r.DB).ReplicasBySource(ctx, replsql.ReplicasBySourceParams{
-		RepositoryID: r.RepositoryID, SourceID: sourceID,
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID, SourceID: sourceID,
 	})
 	if err != nil {
 		return nil, err

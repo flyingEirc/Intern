@@ -11,7 +11,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "metadata")
 	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 6, PendingMigrations: 6, PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1, ReplicationLatestVersion: 1, ReplicationPending: 1})
+	assertStatus(t, status, err, unmigratedStatus(t))
 	if _, err = os.Lstat(dir); !os.IsNotExist(err) {
 		t.Fatalf("status created directory: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestStatusDoesNotCreateMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err = ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 6, PendingMigrations: 6, PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1, ReplicationLatestVersion: 1, ReplicationPending: 1})
+	assertStatus(t, status, err, unmigratedStatus(t))
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("status created files: %v, %v", entries, err)
@@ -37,7 +37,7 @@ func TestStatusDoesNotMigrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, Status{LatestVersion: 6, PendingMigrations: 6, PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1, ReplicationLatestVersion: 1, ReplicationPending: 1})
+	assertStatus(t, status, err, unmigratedStatus(t))
 	after, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("status changed database: %v", err)
@@ -61,6 +61,20 @@ func TestStatusDatabaseIsReadOnly(t *testing.T) {
 	defer db.Close()
 	if _, err = db.ExecContext(t.Context(), "DELETE FROM instance"); err == nil {
 		t.Fatal("read-only database accepted a write")
+	}
+}
+
+// unmigratedStatus is the status of a metadata directory with no applied
+// migration set: every embedded latest, nothing applied. The replication latest
+// comes from the embedded set, so a new replication migration does not leave
+// this expectation stale.
+func unmigratedStatus(t *testing.T) Status {
+	t.Helper()
+	latest := replicationLatest(t)
+	return Status{
+		LatestVersion: 6, PendingMigrations: 6,
+		PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1,
+		ReplicationLatestVersion: latest, ReplicationPending: int(latest),
 	}
 }
 

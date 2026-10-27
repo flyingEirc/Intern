@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/replication"
 )
 
 // replicationWorker steps every replicator round-robin, one item at a time.
@@ -30,6 +31,7 @@ func (d *Dispatcher) replicationWorker(ctx context.Context) {
 // stepReplication runs at most one FIFO-eligible item, starting after the last
 // replicator that did work so a busy first repository cannot starve the rest.
 func (d *Dispatcher) stepReplication(ctx context.Context) bool {
+	d.claimPolicyReplicators(ctx)
 	d.retryFailedReplicators(ctx)
 	d.mu.Lock()
 	slots := append([]replicaHandle(nil), d.replicas...)
@@ -37,17 +39,16 @@ func (d *Dispatcher) stepReplication(ctx context.Context) bool {
 	d.mu.Unlock()
 	next, attempted, err := roundRobin(len(slots), start, func(i int) (bool, error) {
 		slot := slots[i]
-		did, stepErr := slot.replicator.Step(ctx)
+		stepped, did, stepErr := slot.replicator.StepItem(ctx)
 		if stepErr != nil {
 			if ctx.Err() != nil {
 				return false, stepErr
 			}
 			d.logger.ErrorContext(ctx, "replication step failed",
-				"repository_id", slot.replicaID, "error", stepErr)
-			return false, nil
+				"backup_id", stepped.BackupID, "repository_id", slot.replicaID, "error", stepErr)
 		}
 		if did {
-			d.logReplicationStep(ctx, slot)
+			d.logReplicationStep(ctx, slot, stepped)
 		}
 		return did, nil
 	})
@@ -79,25 +80,21 @@ func roundRobin(n, start int, step func(int) (bool, error)) (int, bool, error) {
 	return start, false, nil
 }
 
-func (d *Dispatcher) logReplicationStep(ctx context.Context, slot replicaHandle) {
-	var backupID, status, code string
-	err := d.config.Database.DB().QueryRowContext(ctx,
-		`SELECT backup_id, status, COALESCE(last_error_code, '') FROM replicas WHERE repository_id = ? ORDER BY updated_at DESC LIMIT 1`,
-		slot.replicaID,
-	).Scan(&backupID, &status, &code)
-	if err != nil {
-		return
-	}
-	run, err := d.config.Database.RunByBackupID(ctx, backupID)
+// logReplicationStep reports the item this step really processed. The backup id
+// and its status come from the attempt itself, never from a second query that
+// could name a different row.
+func (d *Dispatcher) logReplicationStep(ctx context.Context, slot replicaHandle, stepped replication.Stepped) {
+	run, err := d.config.Database.RunByBackupID(ctx, stepped.BackupID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			d.logger.ErrorContext(ctx, "cannot load originating run for replication step",
-				"backup_id", backupID, "error", err)
+				"backup_id", stepped.BackupID, "error", err)
 		}
 		return
 	}
 	d.logEvent(ctx, run.ID, eventReplicationStep, map[string]any{
-		"backup_id": backupID, "repository_id": slot.replicaID, "status": status, "code": code,
+		"backup_id": stepped.BackupID, "repository_id": slot.replicaID,
+		"status": stepped.Status, "code": stepped.Code,
 	})
 }
 

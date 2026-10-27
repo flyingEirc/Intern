@@ -75,16 +75,17 @@ func (q *Queries) DeletePart(ctx context.Context, id int64) error {
 }
 
 const getReplica = `-- name: GetReplica :one
-SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at FROM replicas WHERE backup_id = ? AND repository_id = ?
+SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at, local_repository_id FROM replicas WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
 `
 
 type GetReplicaParams struct {
-	BackupID     string
-	RepositoryID string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) GetReplica(ctx context.Context, arg GetReplicaParams) (Replica, error) {
-	row := q.db.QueryRowContext(ctx, getReplica, arg.BackupID, arg.RepositoryID)
+	row := q.db.QueryRowContext(ctx, getReplica, arg.BackupID, arg.RepositoryID, arg.LocalRepositoryID)
 	var i Replica
 	err := row.Scan(
 		&i.BackupID,
@@ -102,6 +103,7 @@ func (q *Queries) GetReplica(ctx context.Context, arg GetReplicaParams) (Replica
 		&i.LastReplyCode,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.LocalRepositoryID,
 	)
 	return i, err
 }
@@ -132,26 +134,33 @@ func (q *Queries) InsertPart(ctx context.Context, arg InsertPartParams) error {
 
 const insertReplica = `-- name: InsertReplica :exec
 
-INSERT INTO replicas (backup_id, repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
-VALUES (?, ?, ?, 'pending', ?, ?, ?)
-ON CONFLICT DO NOTHING
+INSERT INTO replicas (backup_id, repository_id, local_repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+ON CONFLICT(backup_id, repository_id) DO UPDATE SET
+    local_repository_id = excluded.local_repository_id
+WHERE replicas.local_repository_id = ''
 `
 
 type InsertReplicaParams struct {
-	BackupID      string
-	RepositoryID  string
-	IdemKey       string
-	NextAttemptAt string
-	CreatedAt     string
-	UpdatedAt     string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
+	IdemKey           string
+	NextAttemptAt     string
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 // Replication queue reads and writes. These queries also read the physical
 // chains/backups tables, so this entry lists the physical schema as well.
+// A row written before the local repository was recorded has an empty value and
+// is inert. Binding it here keeps its uploaded state, attempt history and part
+// obligations instead of adding a duplicate queue entry beside it.
 func (q *Queries) InsertReplica(ctx context.Context, arg InsertReplicaParams) error {
 	_, err := q.db.ExecContext(ctx, insertReplica,
 		arg.BackupID,
 		arg.RepositoryID,
+		arg.LocalRepositoryID,
 		arg.IdemKey,
 		arg.NextAttemptAt,
 		arg.CreatedAt,
@@ -235,11 +244,21 @@ func (q *Queries) PartFailed(ctx context.Context, arg PartFailedParams) error {
 }
 
 const parts = `-- name: Parts :many
-SELECT id, backup_id, repository_id, member, part, attempts, last_error_code, created_at FROM replica_parts WHERE repository_id = ? ORDER BY id
+SELECT p.id, p.backup_id, p.repository_id, p.member, p.part, p.attempts, p.last_error_code, p.created_at FROM replica_parts p
+JOIN replicas r ON r.backup_id = p.backup_id AND r.repository_id = p.repository_id
+WHERE p.repository_id = ? AND r.local_repository_id = ?
+ORDER BY p.id
 `
 
-func (q *Queries) Parts(ctx context.Context, repositoryID string) ([]ReplicaPart, error) {
-	rows, err := q.db.QueryContext(ctx, parts, repositoryID)
+type PartsParams struct {
+	RepositoryID      string
+	LocalRepositoryID string
+}
+
+// A part belongs to one replica row, so joining that row scopes the cleanup to
+// this (local, remote) pair instead of every pair sharing the FTP repository.
+func (q *Queries) Parts(ctx context.Context, arg PartsParams) ([]ReplicaPart, error) {
+	rows, err := q.db.QueryContext(ctx, parts, arg.RepositoryID, arg.LocalRepositoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -270,19 +289,70 @@ func (q *Queries) Parts(ctx context.Context, repositoryID string) ([]ReplicaPart
 	return items, nil
 }
 
+const pendingLocalDeletesForPair = `-- name: PendingLocalDeletesForPair :many
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l
+JOIN backups b ON b.id = l.backup_id
+JOIN replicas r ON r.backup_id = l.backup_id AND r.repository_id = ?
+WHERE r.local_repository_id = ? AND l.instance_id = ? AND l.kind = 'object' AND b.status = 'completed'
+ORDER BY l.id
+`
+
+type PendingLocalDeletesForPairParams struct {
+	RepositoryID      string
+	LocalRepositoryID string
+	InstanceID        string
+}
+
+type PendingLocalDeletesForPairRow struct {
+	ID       int64
+	BackupID string
+	Target   string
+}
+
+// Recovery must reclaim each reservation in the local repository that holds the
+// object. A reservation only exists after every member was verified on this
+// replica repository, so its members always have a replica row for the pair; the
+// join is therefore exact, and a reservation belonging to another local
+// repository sharing this FTP repository is left to that pair.
+func (q *Queries) PendingLocalDeletesForPair(ctx context.Context, arg PendingLocalDeletesForPairParams) ([]PendingLocalDeletesForPairRow, error) {
+	rows, err := q.db.QueryContext(ctx, pendingLocalDeletesForPair, arg.RepositoryID, arg.LocalRepositoryID, arg.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PendingLocalDeletesForPairRow{}
+	for rows.Next() {
+		var i PendingLocalDeletesForPairRow
+		if err := rows.Scan(&i.ID, &i.BackupID, &i.Target); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const replicasByBackupIDs = `-- name: ReplicasByBackupIDs :many
-SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at FROM replicas WHERE repository_id = ? AND backup_id IN (/*SLICE:backup_ids*/?)
+SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at, local_repository_id FROM replicas
+WHERE repository_id = ? AND local_repository_id = ? AND backup_id IN (/*SLICE:backup_ids*/?)
 `
 
 type ReplicasByBackupIDsParams struct {
-	RepositoryID string
-	BackupIds    []string
+	RepositoryID      string
+	LocalRepositoryID string
+	BackupIds         []string
 }
 
 func (q *Queries) ReplicasByBackupIDs(ctx context.Context, arg ReplicasByBackupIDsParams) ([]Replica, error) {
 	query := replicasByBackupIDs
 	var queryParams []interface{}
 	queryParams = append(queryParams, arg.RepositoryID)
+	queryParams = append(queryParams, arg.LocalRepositoryID)
 	if len(arg.BackupIds) > 0 {
 		for _, v := range arg.BackupIds {
 			queryParams = append(queryParams, v)
@@ -315,6 +385,7 @@ func (q *Queries) ReplicasByBackupIDs(ctx context.Context, arg ReplicasByBackupI
 			&i.LastReplyCode,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LocalRepositoryID,
 		); err != nil {
 			return nil, err
 		}
@@ -330,43 +401,45 @@ func (q *Queries) ReplicasByBackupIDs(ctx context.Context, arg ReplicasByBackupI
 }
 
 const replicasBySource = `-- name: ReplicasBySource :many
-SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
+SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, r.local_repository_id, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ? AND c.source_id = ?
+WHERE r.repository_id = ? AND r.local_repository_id = ? AND c.source_id = ?
 ORDER BY b.created_at, b.seq
 `
 
 type ReplicasBySourceParams struct {
-	RepositoryID string
-	SourceID     string
+	RepositoryID      string
+	LocalRepositoryID string
+	SourceID          string
 }
 
 type ReplicasBySourceRow struct {
-	BackupID        string
-	RepositoryID    string
-	IdemKey         string
-	Status          string
-	Attempts        int64
-	Permanent       int64
-	NextAttemptAt   string
-	UploadedAt      sql.NullString
-	VerifiedAt      sql.NullString
-	FailedSince     sql.NullString
-	AlertSince      sql.NullString
-	LastErrorCode   sql.NullString
-	LastReplyCode   sql.NullInt64
-	CreatedAt       string
-	UpdatedAt       string
-	ChainID         string
-	BackupCreatedAt string
-	ChainSeq        int64
-	SourceID        string
+	BackupID          string
+	RepositoryID      string
+	IdemKey           string
+	Status            string
+	Attempts          int64
+	Permanent         int64
+	NextAttemptAt     string
+	UploadedAt        sql.NullString
+	VerifiedAt        sql.NullString
+	FailedSince       sql.NullString
+	AlertSince        sql.NullString
+	LastErrorCode     sql.NullString
+	LastReplyCode     sql.NullInt64
+	CreatedAt         string
+	UpdatedAt         string
+	LocalRepositoryID string
+	ChainID           string
+	BackupCreatedAt   string
+	ChainSeq          int64
+	SourceID          string
 }
 
 func (q *Queries) ReplicasBySource(ctx context.Context, arg ReplicasBySourceParams) ([]ReplicasBySourceRow, error) {
-	rows, err := q.db.QueryContext(ctx, replicasBySource, arg.RepositoryID, arg.SourceID)
+	rows, err := q.db.QueryContext(ctx, replicasBySource, arg.RepositoryID, arg.LocalRepositoryID, arg.SourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -390,6 +463,7 @@ func (q *Queries) ReplicasBySource(ctx context.Context, arg ReplicasBySourcePara
 			&i.LastReplyCode,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LocalRepositoryID,
 			&i.ChainID,
 			&i.BackupCreatedAt,
 			&i.ChainSeq,
@@ -409,38 +483,44 @@ func (q *Queries) ReplicasBySource(ctx context.Context, arg ReplicasBySourcePara
 }
 
 const replicasForRepository = `-- name: ReplicasForRepository :many
-SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
+SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permanent, r.next_attempt_at, r.uploaded_at, r.verified_at, r.failed_since, r.alert_since, r.last_error_code, r.last_reply_code, r.created_at, r.updated_at, r.local_repository_id, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ?
+WHERE r.repository_id = ? AND r.local_repository_id = ?
 ORDER BY c.source_id, b.created_at, b.seq
 `
 
-type ReplicasForRepositoryRow struct {
-	BackupID        string
-	RepositoryID    string
-	IdemKey         string
-	Status          string
-	Attempts        int64
-	Permanent       int64
-	NextAttemptAt   string
-	UploadedAt      sql.NullString
-	VerifiedAt      sql.NullString
-	FailedSince     sql.NullString
-	AlertSince      sql.NullString
-	LastErrorCode   sql.NullString
-	LastReplyCode   sql.NullInt64
-	CreatedAt       string
-	UpdatedAt       string
-	ChainID         string
-	BackupCreatedAt string
-	ChainSeq        int64
-	SourceID        string
+type ReplicasForRepositoryParams struct {
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
-func (q *Queries) ReplicasForRepository(ctx context.Context, repositoryID string) ([]ReplicasForRepositoryRow, error) {
-	rows, err := q.db.QueryContext(ctx, replicasForRepository, repositoryID)
+type ReplicasForRepositoryRow struct {
+	BackupID          string
+	RepositoryID      string
+	IdemKey           string
+	Status            string
+	Attempts          int64
+	Permanent         int64
+	NextAttemptAt     string
+	UploadedAt        sql.NullString
+	VerifiedAt        sql.NullString
+	FailedSince       sql.NullString
+	AlertSince        sql.NullString
+	LastErrorCode     sql.NullString
+	LastReplyCode     sql.NullInt64
+	CreatedAt         string
+	UpdatedAt         string
+	LocalRepositoryID string
+	ChainID           string
+	BackupCreatedAt   string
+	ChainSeq          int64
+	SourceID          string
+}
+
+func (q *Queries) ReplicasForRepository(ctx context.Context, arg ReplicasForRepositoryParams) ([]ReplicasForRepositoryRow, error) {
+	rows, err := q.db.QueryContext(ctx, replicasForRepository, arg.RepositoryID, arg.LocalRepositoryID)
 	if err != nil {
 		return nil, err
 	}
@@ -464,6 +544,7 @@ func (q *Queries) ReplicasForRepository(ctx context.Context, repositoryID string
 			&i.LastReplyCode,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.LocalRepositoryID,
 			&i.ChainID,
 			&i.BackupCreatedAt,
 			&i.ChainSeq,
@@ -485,14 +566,15 @@ func (q *Queries) ReplicasForRepository(ctx context.Context, repositoryID string
 const resetReplicaAttempt = `-- name: ResetReplicaAttempt :exec
 UPDATE replicas
 SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
 `
 
 type ResetReplicaAttemptParams struct {
-	NextAttemptAt string
-	UpdatedAt     string
-	BackupID      string
-	RepositoryID  string
+	NextAttemptAt     string
+	UpdatedAt         string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 // A manual retry restarts the attempt budget and the schedule but keeps the
@@ -503,23 +585,30 @@ func (q *Queries) ResetReplicaAttempt(ctx context.Context, arg ResetReplicaAttem
 		arg.UpdatedAt,
 		arg.BackupID,
 		arg.RepositoryID,
+		arg.LocalRepositoryID,
 	)
 	return err
 }
 
 const resetUploadingReplicas = `-- name: ResetUploadingReplicas :exec
 UPDATE replicas SET status = 'pending', next_attempt_at = ?, updated_at = ?
-WHERE repository_id = ? AND status = 'uploading'
+WHERE repository_id = ? AND local_repository_id = ? AND status = 'uploading'
 `
 
 type ResetUploadingReplicasParams struct {
-	NextAttemptAt string
-	UpdatedAt     string
-	RepositoryID  string
+	NextAttemptAt     string
+	UpdatedAt         string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) ResetUploadingReplicas(ctx context.Context, arg ResetUploadingReplicasParams) error {
-	_, err := q.db.ExecContext(ctx, resetUploadingReplicas, arg.NextAttemptAt, arg.UpdatedAt, arg.RepositoryID)
+	_, err := q.db.ExecContext(ctx, resetUploadingReplicas,
+		arg.NextAttemptAt,
+		arg.UpdatedAt,
+		arg.RepositoryID,
+		arg.LocalRepositoryID,
+	)
 	return err
 }
 
@@ -577,17 +666,23 @@ func (q *Queries) SetMemberStatus(ctx context.Context, arg SetMemberStatusParams
 
 const setReplicaAlert = `-- name: SetReplicaAlert :exec
 UPDATE replicas SET alert_since = ?
-WHERE backup_id = ? AND repository_id = ? AND alert_since IS NULL
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ? AND alert_since IS NULL
 `
 
 type SetReplicaAlertParams struct {
-	AlertSince   sql.NullString
-	BackupID     string
-	RepositoryID string
+	AlertSince        sql.NullString
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) SetReplicaAlert(ctx context.Context, arg SetReplicaAlertParams) error {
-	_, err := q.db.ExecContext(ctx, setReplicaAlert, arg.AlertSince, arg.BackupID, arg.RepositoryID)
+	_, err := q.db.ExecContext(ctx, setReplicaAlert,
+		arg.AlertSince,
+		arg.BackupID,
+		arg.RepositoryID,
+		arg.LocalRepositoryID,
+	)
 	return err
 }
 
@@ -596,20 +691,21 @@ UPDATE replicas
 SET status = ?, attempts = ?, permanent = ?, next_attempt_at = ?,
     failed_since = COALESCE(failed_since, ?), last_error_code = ?, last_reply_code = ?,
     updated_at = ?
-WHERE backup_id = ? AND repository_id = ?
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
 `
 
 type SetReplicaFailedParams struct {
-	Status        string
-	Attempts      int64
-	Permanent     int64
-	NextAttemptAt string
-	FailedSince   sql.NullString
-	LastErrorCode sql.NullString
-	LastReplyCode sql.NullInt64
-	UpdatedAt     string
-	BackupID      string
-	RepositoryID  string
+	Status            string
+	Attempts          int64
+	Permanent         int64
+	NextAttemptAt     string
+	FailedSince       sql.NullString
+	LastErrorCode     sql.NullString
+	LastReplyCode     sql.NullInt64
+	UpdatedAt         string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedParams) error {
@@ -624,6 +720,7 @@ func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedPara
 		arg.UpdatedAt,
 		arg.BackupID,
 		arg.RepositoryID,
+		arg.LocalRepositoryID,
 	)
 	return err
 }
@@ -632,15 +729,16 @@ const setReplicaUploaded = `-- name: SetReplicaUploaded :exec
 UPDATE replicas
 SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, ?), next_attempt_at = ?, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
 `
 
 type SetReplicaUploadedParams struct {
-	UploadedAt    sql.NullString
-	NextAttemptAt string
-	UpdatedAt     string
-	BackupID      string
-	RepositoryID  string
+	UploadedAt        sql.NullString
+	NextAttemptAt     string
+	UpdatedAt         string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 // uploaded keeps failed_since: the copy is committed but still unprotected until
@@ -652,23 +750,31 @@ func (q *Queries) SetReplicaUploaded(ctx context.Context, arg SetReplicaUploaded
 		arg.UpdatedAt,
 		arg.BackupID,
 		arg.RepositoryID,
+		arg.LocalRepositoryID,
 	)
 	return err
 }
 
 const setReplicaUploading = `-- name: SetReplicaUploading :execrows
 UPDATE replicas SET status = 'uploading', updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND status IN ('pending', 'failed', 'uploading')
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+  AND status IN ('pending', 'failed', 'uploading')
 `
 
 type SetReplicaUploadingParams struct {
-	UpdatedAt    string
-	BackupID     string
-	RepositoryID string
+	UpdatedAt         string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) SetReplicaUploading(ctx context.Context, arg SetReplicaUploadingParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, setReplicaUploading, arg.UpdatedAt, arg.BackupID, arg.RepositoryID)
+	result, err := q.db.ExecContext(ctx, setReplicaUploading,
+		arg.UpdatedAt,
+		arg.BackupID,
+		arg.RepositoryID,
+		arg.LocalRepositoryID,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -680,15 +786,16 @@ UPDATE replicas
 SET status = 'verified', verified_at = ?, uploaded_at = COALESCE(uploaded_at, ?),
     permanent = 0, failed_since = NULL, alert_since = NULL, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
 `
 
 type SetReplicaVerifiedParams struct {
-	VerifiedAt   sql.NullString
-	UploadedAt   sql.NullString
-	UpdatedAt    string
-	BackupID     string
-	RepositoryID string
+	VerifiedAt        sql.NullString
+	UploadedAt        sql.NullString
+	UpdatedAt         string
+	BackupID          string
+	RepositoryID      string
+	LocalRepositoryID string
 }
 
 func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerifiedParams) error {
@@ -698,6 +805,7 @@ func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerified
 		arg.UpdatedAt,
 		arg.BackupID,
 		arg.RepositoryID,
+		arg.LocalRepositoryID,
 	)
 	return err
 }

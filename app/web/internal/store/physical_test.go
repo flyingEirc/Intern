@@ -8,6 +8,7 @@ import (
 	"time"
 
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication"
 )
 
 func TestPhysicalAndWebShareDatabase(t *testing.T) {
@@ -69,8 +70,10 @@ func TestPhysicalPendingMigrationAndFutureReadiness(t *testing.T) {
 func TestPhysicalStatusBeforeDatabaseCreation(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "not-created")
 	status, err := ReadStatus(t.Context(), dir)
+	latest := replicationLatest(t)
 	if err != nil || status.PhysicalCurrentVersion != 0 || status.PhysicalLatestVersion != 1 || status.PhysicalPendingMigrations != 1 ||
-		status.ReplicationCurrentVersion != 0 || status.ReplicationLatestVersion != 1 || status.ReplicationPending != 1 {
+		status.ReplicationCurrentVersion != 0 || status.ReplicationLatestVersion != latest ||
+		status.ReplicationPending != int(latest) {
 		t.Fatalf("uninitialized status: %+v %v", status, err)
 	}
 	if _, err = os.Stat(dir); !os.IsNotExist(err) {
@@ -116,25 +119,39 @@ func assertPhysicalStatus(t *testing.T, dir string, current int64, pending int) 
 }
 
 // TestReplicationPendingMigrationAndFutureReadiness mirrors the physical cases
-// for the replication migration set, so Ready and ReadStatus agree about it.
+// for the replication migration set, so Ready and ReadStatus agree about it. The
+// expected latest comes from the embedded set, so adding a migration does not
+// silently leave this test asserting an old version.
 func TestReplicationPendingMigrationAndFutureReadiness(t *testing.T) {
+	latest := replicationLatest(t)
 	for _, tc := range []struct {
 		name    string
 		query   string
 		current int64
 		pending int
 	}{
-		{"pending", "DELETE FROM replication_goose_db_version WHERE version_id = 1", 0, 1},
-		{"missing table", "DROP TABLE replication_goose_db_version", 0, 1},
+		{"pending", "DELETE FROM replication_goose_db_version", 0, int(latest)},
+		{"missing table", "DROP TABLE replication_goose_db_version", 0, int(latest)},
 		{"future", "INSERT INTO replication_goose_db_version (version_id, is_applied) VALUES (42, 1)", 42, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertReplicationSchemaState(t, tc.name, tc.query, tc.current, tc.pending)
+			assertReplicationSchemaState(t, tc.name, tc.query, tc.current, tc.pending, latest)
 		})
 	}
 }
 
-func assertReplicationSchemaState(t *testing.T, name, query string, current int64, pending int) {
+// replicationLatest is the embedded replication migration version, read without
+// a database.
+func replicationLatest(t *testing.T) int64 {
+	t.Helper()
+	_, latest, err := replication.Version(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return latest
+}
+
+func assertReplicationSchemaState(t *testing.T, name, query string, current int64, pending int, latest int64) {
 	t.Helper()
 	dir := privateTempDir(t)
 	s := openTestStore(t, dir)
@@ -144,17 +161,17 @@ func assertReplicationSchemaState(t *testing.T, name, query string, current int6
 	if err := s.Ready(t.Context()); err == nil || !strings.Contains(err.Error(), "replication database version") {
 		t.Fatalf("unready replication schema: %v", err)
 	}
-	assertReplicationStatus(t, dir, current, pending)
+	assertReplicationStatus(t, dir, current, pending, latest)
 	if name == "future" {
 		assertReplicationDowngradeRejected(t, s, dir)
 	}
 }
 
-func assertReplicationStatus(t *testing.T, dir string, current int64, pending int) {
+func assertReplicationStatus(t *testing.T, dir string, current int64, pending int, latest int64) {
 	t.Helper()
 	status, err := ReadStatus(t.Context(), dir)
 	if err != nil || status.ReplicationCurrentVersion != current ||
-		status.ReplicationLatestVersion != 1 || status.ReplicationPending != pending {
+		status.ReplicationLatestVersion != latest || status.ReplicationPending != pending {
 		t.Fatalf("replication status: %+v %v", status, err)
 	}
 }

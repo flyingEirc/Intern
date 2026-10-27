@@ -21,13 +21,12 @@ func cronKey(policyID, kind string, scheduledAt time.Time) string {
 }
 
 // admissionKey builds the frozen admission idempotency key for the coalesced
-// full a refused incremental queues: policy:<id>:full:admission:<latest chain
-// id, or none>.
-func admissionKey(policyID, chainID string) string {
-	if chainID == "" {
-		chainID = "none"
-	}
-	return fmt.Sprintf("policy:%s:full:admission:%s", policyID, chainID)
+// full a refused incremental queues: policy:<id>:full:admission:<scheduled_at>.
+// The stamp makes the key unique per attempt, which is what lets a new full be
+// queued after an admission full already failed. Coalescing is not this key's
+// job: HasActiveFull keeps at most one queued or running full per source.
+func admissionKey(policyID string, scheduledAt time.Time) string {
+	return fmt.Sprintf("policy:%s:full:admission:%s", policyID, store.ScheduleStamp(scheduledAt))
 }
 
 // schedule computes the next fire time of one standard cron expression in the
@@ -201,7 +200,8 @@ func (d *Dispatcher) insertCronRun(ctx context.Context, policy store.Policy, kin
 	if err != nil {
 		return store.Run{}, false, err
 	}
-	d.ensurePolicyReplicator(ctx, policy, run.ID)
+	// The insert path never dials the remote. The replication worker opens the
+	// pair and runs its catch-up, so an unreachable FTP cannot delay a cron run.
 	d.logEvent(ctx, run.ID, eventQueued, nil)
 	return run, true, nil
 }

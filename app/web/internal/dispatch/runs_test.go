@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -534,5 +535,32 @@ func TestDispatcherStopIsIdempotentAndBounded(t *testing.T) {
 		}
 	case <-time.After(shutdownWait + time.Second):
 		t.Fatal("Stop did not return inside the bounded shutdown window")
+	}
+}
+
+// TestCanceledRunContextStillRecordsTheOutcome proves the shutdown path records
+// a terminal status even though the drain cancels the run context first: the
+// write is detached from that cancellation with a bounded window, so a SIGTERM
+// during a backup leaves canceled or failed, never running. Without the
+// detached context every attempt fails on "context canceled" and the row stays
+// running until the next start's recovery.
+func TestCanceledRunContextStillRecordsTheOutcome(t *testing.T) {
+	q := newQueueFixture(t)
+	run := q.queued("shutdown-outcome", store.RunKindFull, store.RunTriggerManual, time.Now().UTC())
+	if _, claimed, err := q.database.ClaimRun(q.t.Context()); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	ctx, cancel := context.WithCancel(q.t.Context())
+	cancel()
+	d := q.newDispatcher(time.Now)
+	if err := d.failRun(ctx, run, store.RunErrorBackupFailed, "backup_failed", context.Canceled); err != nil {
+		t.Fatalf("failRun on a canceled context: %v", err)
+	}
+	stored := q.run(run.ID)
+	if stored.Status != store.RunStatusFailed || stored.ErrorClass == nil || *stored.ErrorClass != store.RunErrorBackupFailed {
+		t.Fatalf("stored run = %+v, want failed/backup_failed", stored)
+	}
+	if logs := q.eventNames(run.ID); len(logs) == 0 || logs[len(logs)-1] != eventFailed {
+		t.Fatalf("run log = %v, want a final failed event", logs)
 	}
 }

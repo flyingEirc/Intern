@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
 func TestEnqueueIsIdempotent(t *testing.T) {
@@ -606,4 +607,116 @@ func assertNoVerifyTemps(t *testing.T, work string) {
 	for _, entry := range entries {
 		t.Fatalf("verification left %s behind", entry.Name())
 	}
+}
+
+// TestSharedReplicaRepositoryKeepsLocalRepositoriesApart is N2: one replica
+// repository serves two local repositories. Each pair has its own replicator, and
+// neither may step the other's backup. Both backups are real published objects,
+// so a cross-pair step would fail on the wrong root instead of passing silently;
+// the test therefore proves the queue scoping, not just the outcome.
+func TestSharedReplicaRepositoryKeepsLocalRepositoriesApart(t *testing.T) {
+	f := newEngine(t)
+	otherRepo := openSecondLocalRepository(t, f)
+
+	// Two independent sources, each in its own local repository. A separate
+	// source per repository keeps the FIFO prefix logic out of the way: what is
+	// under test is the repository binding.
+	first := f.newBackupIn(f.repo, engineSourceID, 0)
+	second := f.newBackupIn(otherRepo, engineOtherSource, 0)
+
+	firstReplicator := f.replicator(nil)
+	secondReplicator := f.replicator(nil)
+	secondReplicator.Local = otherRepo
+	secondReplicator.LocalRepositoryID = engineOtherLocalRepoID
+
+	// Production enqueues a backup only on the policy's own pair.
+	for _, enqueue := range []struct {
+		replicator *Replicator
+		record     backupRecord
+	}{{firstReplicator, first}, {secondReplicator, second}} {
+		if err := enqueue.replicator.Enqueue(t.Context(), enqueue.record.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Each pair's queue holds only the rows bound to its own local repository,
+	// even though both rows name the same replica repository. The scoping is
+	// load-bearing: the second pair's object is absent from the first root, so a
+	// pair that stepped the other's backup would fail instead of verifying it.
+	assertQueueHoldsOnly(t, firstReplicator, first.id)
+	assertQueueHoldsOnly(t, secondReplicator, second.id)
+	if _, err := f.repo.Size(second.objectPath + "/" + memberPayload); err == nil {
+		t.Fatal("the second pair's payload is visible in the first local repository")
+	}
+
+	// One step per pair reaches verified through this pair's own root.
+	stepped := assertPairStepsItsOwn(t, firstReplicator, first.id, engineLocalRepoID)
+	if stepped.Status != StatusVerified {
+		t.Fatalf("first pair status = %q, want %s", stepped.Status, StatusVerified)
+	}
+	stepped = assertPairStepsItsOwn(t, secondReplicator, second.id, engineOtherLocalRepoID)
+	if stepped.Status != StatusVerified {
+		t.Fatalf("second pair status = %q, want %s", stepped.Status, StatusVerified)
+	}
+
+	// Every replica reaches verified without an error; the step above already
+	// proved which local repository produced it.
+	for _, pair := range []struct {
+		replicator *Replicator
+		record     backupRecord
+	}{
+		{firstReplicator, first},
+		{secondReplicator, second},
+	} {
+		replica, err := pair.replicator.Replica(t.Context(), pair.record.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replica.Status != StatusVerified || replica.LastErrorCode != "" {
+			t.Fatalf("replica of %s = %+v, want verified without an error", pair.record.id, replica)
+		}
+	}
+}
+
+// openSecondLocalRepository creates the second local repository of the shared
+// replica repository, outside the fixture's own root.
+func openSecondLocalRepository(t *testing.T, f *engineFixture) *local.Repository {
+	t.Helper()
+	root := filepath.Join(filepath.Dir(f.root), "objects-other")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := local.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	return repo
+}
+
+// assertQueueHoldsOnly requires one pair's queue to hold exactly one item: the
+// backup stored in that pair's local repository.
+func assertQueueHoldsOnly(t *testing.T, replicator *Replicator, want string) {
+	t.Helper()
+	items, err := replicator.queue(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].backupID != want {
+		t.Fatalf("%s pair queue = %+v, want only %s", replicator.RepositoryID, items, want)
+	}
+}
+
+// assertPairStepsItsOwn steps one pair and requires it to have processed its own
+// backup out of its own local repository.
+func assertPairStepsItsOwn(t *testing.T, replicator *Replicator, wantBackup, wantLocal string) Stepped {
+	t.Helper()
+	stepped, attempted, err := replicator.StepItem(t.Context())
+	if err != nil || !attempted {
+		t.Fatalf("step = %+v, attempted %v, %v", stepped, attempted, err)
+	}
+	if stepped.BackupID != wantBackup || stepped.LocalRepositoryID != wantLocal {
+		t.Fatalf("stepped %+v, want %s in %s", stepped, wantBackup, wantLocal)
+	}
+	return stepped
 }

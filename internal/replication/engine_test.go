@@ -28,14 +28,18 @@ import (
 )
 
 const (
-	engineSourceID     = "source-a"
-	engineRepoID       = "ftp-primary"
-	engineInstanceID   = "instance-1"
-	engineServerUUID   = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-	engineServerVer    = "8.4.11"
-	engineToolVer      = "8.4.0-7"
-	engineOtherSource  = "source-b"
-	engineObjectPrefix = engineInstanceID + "/"
+	engineSourceID    = "source-a"
+	engineRepoID      = "ftp-primary"
+	engineLocalRepoID = "local-primary"
+	// engineOtherLocalRepoID is a second local repository behind the same replica
+	// repository, which is the shared-FTP shape.
+	engineOtherLocalRepoID = "local-secondary"
+	engineInstanceID       = "instance-1"
+	engineServerUUID       = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	engineServerVer        = "8.4.11"
+	engineToolVer          = "8.4.0-7"
+	engineOtherSource      = "source-b"
+	engineObjectPrefix     = engineInstanceID + "/"
 )
 
 // engineFixture is a real control-plane database with the physical and
@@ -98,8 +102,9 @@ func (f *engineFixture) replicator(keyFile *string) *Replicator {
 	}
 	return &Replicator{
 		DB: f.db, Store: f.store, Local: f.repo, Remote: f.remote,
-		RepositoryID: engineRepoID, InstanceID: engineInstanceID,
-		KeyFile: key, WorkRoot: f.work,
+		RepositoryID: engineRepoID, LocalRepositoryID: engineLocalRepoID,
+		InstanceID: engineInstanceID,
+		KeyFile:    key, WorkRoot: f.work,
 		Policy: Policy{BaseDelay: time.Minute, MaxDelay: time.Hour, AlertAfter: 6 * time.Hour, MaxAttempts: 3},
 		Now:    func() time.Time { return f.now },
 	}
@@ -138,6 +143,13 @@ type backupRecord struct {
 // real artifact streams, exactly as the physical chain does.
 func (f *engineFixture) newBackup(sourceID string, member int) backupRecord {
 	f.t.Helper()
+	return f.newBackupIn(f.repo, sourceID, member)
+}
+
+// newBackupIn is newBackup into one chosen local repository, so a test can place
+// two repositories' objects behind one replica repository.
+func (f *engineFixture) newBackupIn(repo *local.Repository, sourceID string, member int) backupRecord {
+	f.t.Helper()
 	kind := "incremental"
 	if member == 0 {
 		kind = "full"
@@ -160,7 +172,7 @@ func (f *engineFixture) newBackup(sourceID string, member int) backupRecord {
 	}); err != nil {
 		f.t.Fatalf("begin: %v", err)
 	}
-	record := f.publish(objectPath, backupID, sourceID, plan.ChainID, plan.Seq)
+	record := f.publish(repo, objectPath, backupID, sourceID, plan.ChainID, plan.Seq)
 	record.chainID = plan.ChainID
 	f.tick()
 	if err = f.store.Complete(f.t.Context(), physicalstore.Completion{
@@ -188,9 +200,9 @@ func checkpointBytes(member int) []byte {
 // publish builds one chain-like object: both members are real zstd/Tink streams
 // written through the artifact pipeline into the local staging directory, exactly
 // as the physical chain publishes them.
-func (f *engineFixture) publish(objectPath, backupID, sourceID, chainID string, seq int) backupRecord {
+func (f *engineFixture) publish(repo *local.Repository, objectPath, backupID, sourceID, chainID string, seq int) backupRecord {
 	f.t.Helper()
-	staging, err := f.repo.BeginOwned(objectPath, backupID)
+	staging, err := repo.BeginOwned(objectPath, backupID)
 	if err != nil {
 		f.t.Fatalf("begin object: %v", err)
 	}

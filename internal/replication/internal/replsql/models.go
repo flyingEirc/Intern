@@ -58,21 +58,22 @@ type CleanupLedger struct {
 }
 
 type Replica struct {
-	BackupID      string
-	RepositoryID  string
-	IdemKey       string
-	Status        string
-	Attempts      int64
-	Permanent     int64
-	NextAttemptAt string
-	UploadedAt    sql.NullString
-	VerifiedAt    sql.NullString
-	FailedSince   sql.NullString
-	AlertSince    sql.NullString
-	LastErrorCode sql.NullString
-	LastReplyCode sql.NullInt64
-	CreatedAt     string
-	UpdatedAt     string
+	BackupID          string
+	RepositoryID      string
+	IdemKey           string
+	Status            string
+	Attempts          int64
+	Permanent         int64
+	NextAttemptAt     string
+	UploadedAt        sql.NullString
+	VerifiedAt        sql.NullString
+	FailedSince       sql.NullString
+	AlertSince        sql.NullString
+	LastErrorCode     sql.NullString
+	LastReplyCode     sql.NullInt64
+	CreatedAt         string
+	UpdatedAt         string
+	LocalRepositoryID string
 }
 
 type ReplicaMember struct {

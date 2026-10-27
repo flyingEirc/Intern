@@ -41,8 +41,11 @@ const (
 	instanceID  = "r1-instance"
 	primaryRepo = "ftp-primary"
 	quotaRepo   = "ftp-quota"
-	socketPath  = "/var/run/mysqld/mysqld.sock"
-	dataDir     = "/var/lib/mysql"
+	// localRepo is the R1 fixture's single local repository identity. The
+	// scenarios share one local root, so every replicator is scoped to it.
+	localRepo  = "local-primary"
+	socketPath = "/var/run/mysqld/mysqld.sock"
+	dataDir    = "/var/lib/mysql"
 )
 
 // members is the fixed upload order of one replica.
@@ -248,7 +251,7 @@ func (w *worker) loadManifest() {
 func (w *worker) replicator(repositoryID string, remote replication.Remote, keyPath string, policy replication.Policy) *replication.Replicator {
 	return &replication.Replicator{
 		DB: w.db, Store: w.store, Local: w.repo, Remote: remote,
-		RepositoryID: repositoryID, InstanceID: instanceID, KeyFile: keyPath, WorkRoot: w.paths.work,
+		RepositoryID: repositoryID, LocalRepositoryID: localRepo, InstanceID: instanceID, KeyFile: keyPath, WorkRoot: w.paths.work,
 		MaxExpandedBytes: 4 << 30, Policy: policy, Now: func() time.Time { return w.now },
 	}
 }
@@ -301,7 +304,9 @@ func (w *worker) replica(t *testing.T, replicator *replication.Replicator, backu
 // the accessor, so no remote is attached.
 func (w *worker) replicaFor(t *testing.T, repositoryID, backupID string) replication.Replica {
 	t.Helper()
-	record, err := (&replication.Replicator{DB: w.db, RepositoryID: repositoryID}).Replica(t.Context(), backupID)
+	record, err := (&replication.Replicator{
+		DB: w.db, RepositoryID: repositoryID, LocalRepositoryID: localRepo,
+	}).Replica(t.Context(), backupID)
 	must(t, err)
 	return record
 }

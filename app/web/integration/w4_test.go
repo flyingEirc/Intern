@@ -34,12 +34,13 @@ var w4ResultMarkers = []string{
 
 var w4StateMarkers = []string{
 	"chain=seq:1,2,3", "lsn_continuous=true", "conflict=409", "replicas_verified=3",
-	"protection_requires_verified=true", "lists_agree=sqlite,local,ftp",
-	"running_max=1", "claim_full_before_incremental=true",
-	"canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true",
+	"protection_requires_verified=true uploaded_window=observed",
+	"logs_agree=sqlite", "lists_agree=sqlite,local,ftp",
+	"running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint",
+	"canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true",
 	"sigterm_exit_bounded=true no_false_completed=true recovered=true",
-	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed",
-	"sse_end=true sse_ordered=true secrets=clean",
+	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_backup=completed remote_held=true sqlite_interrupted=true",
+	"sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed",
 }
 
 // TestW4NativeContainers serves the real dispatcher and Web handler inside the

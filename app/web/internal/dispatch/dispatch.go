@@ -310,6 +310,11 @@ func (d *Dispatcher) openPolicyReplicators(ctx context.Context) error {
 	return nil
 }
 
+// openPair installs the replicator of one (local, replica) pair. A successful
+// install always runs the durable catch-up, because an install is the moment the
+// pair becomes usable: at Start, after a lazy open, and after a retried reopen.
+// The catch-up is an idempotent insert per completed backup, so an unreachable
+// remote only delays the copy and never loses it.
 func (d *Dispatcher) openPair(ctx context.Context, localID, replicaID string) error {
 	if d.replicatorForPair(localID, replicaID) != nil {
 		d.clearReplicatorFailed(localID, replicaID)
@@ -319,11 +324,12 @@ func (d *Dispatcher) openPair(ctx context.Context, localID, replicaID string) er
 	if err != nil {
 		return err
 	}
-	replicator, closer, err := d.openReplicator(ctx, replicaRow, localRow.Local.Root)
+	replicator, closer, err := d.openReplicator(ctx, replicaRow, localRow, localRow.Local.Root)
 	if err != nil {
 		return err
 	}
 	d.installReplicator(localID, replicaID, replicator, closer)
+	d.catchUpReplication(ctx, localID, replicaID, replicator)
 	return nil
 }
 
@@ -365,10 +371,11 @@ func (d *Dispatcher) installReplicator(localID, replicaID string, replicator *re
 }
 
 // ensurePolicyReplicator returns the replicator for a policy's (local, replica)
-// pair, opening it under the dispatcher lock if this process has not seen the
-// pair yet. A policy created after Start therefore still gets a worker. Open
-// failures are logged and retried on the next enqueue or replication step; they
-// never panic or fail the backup itself.
+// pair, opening it — and running the pair's catch-up — when this process has not
+// seen the pair yet. It is called from the completion path only: a trigger never
+// dials the remote. Open failures are logged, retried by the replication worker,
+// and never fail the backup itself; the backup they leave unqueued is picked up
+// by the catch-up that runs when the pair is finally installed.
 func (d *Dispatcher) ensurePolicyReplicator(ctx context.Context, policy store.Policy, runID string) *replication.Replicator {
 	if policy.ReplicaRepositoryID == nil {
 		return nil
@@ -384,6 +391,51 @@ func (d *Dispatcher) ensurePolicyReplicator(ctx context.Context, policy store.Po
 		return nil
 	}
 	return d.replicatorForPair(localID, replicaID)
+}
+
+// catchUpReplication queues every completed, locally present backup of every
+// source this pair serves. EnqueueCompleted is an idempotent insert per backup,
+// so running it at each install is what makes a replica durable across an
+// unavailable remote: a backup completed while the pair was down is queued by
+// the catch-up instead of being lost, and FIFO order is preserved because the
+// insert order is the creation order.
+func (d *Dispatcher) catchUpReplication(ctx context.Context, localID, replicaID string, replicator *replication.Replicator) {
+	sources, err := d.pairSources(ctx, localID, replicaID)
+	if err != nil {
+		d.logger.ErrorContext(ctx, "cannot list the pair's sources for the replication catch-up",
+			"local_repository_id", localID, "repository_id", replicaID, "error", err)
+		return
+	}
+	for _, sourceID := range sources {
+		if err = replicator.EnqueueCompleted(ctx, sourceID); err != nil {
+			d.logger.ErrorContext(ctx, "cannot run the replication catch-up",
+				"local_repository_id", localID, "repository_id", replicaID,
+				"source_id", sourceID, "error", err)
+			return
+		}
+	}
+}
+
+// pairSources returns the distinct sources of the policies that use one pair.
+func (d *Dispatcher) pairSources(ctx context.Context, localID, replicaID string) ([]string, error) {
+	policies, err := d.config.Database.Policies(ctx, "", 1_000_000)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	sources := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ReplicaRepositoryID == nil || *policy.ReplicaRepositoryID != replicaID ||
+			policy.LocalRepositoryID != localID {
+			continue
+		}
+		if _, ok := seen[policy.SourceID]; ok {
+			continue
+		}
+		seen[policy.SourceID] = struct{}{}
+		sources = append(sources, policy.SourceID)
+	}
+	return sources, nil
 }
 
 func (d *Dispatcher) markReplicatorFailed(localID, replicaID string) {
@@ -412,9 +464,43 @@ func (d *Dispatcher) logReplicatorUnavailable(ctx context.Context, runID, replic
 	})
 }
 
-// retryFailedReplicators reopens pairs whose last lazy open failed. A later
-// Step therefore picks up a policy that was created after Start once the
-// remote becomes reachable.
+// claimPolicyReplicators opens the pairs of policies this process has not
+// installed yet, then runs their catch-up. The replication worker calls it each
+// cycle, so a policy created after Start reaches a replicator even if no run ever
+// completed again; the completion path is the fast route, this is the durable
+// one. It dials nothing when every pair is already installed.
+func (d *Dispatcher) claimPolicyReplicators(ctx context.Context) {
+	if !d.config.Settings.Credentials() {
+		return
+	}
+	policies, err := d.config.Database.Policies(ctx, "", 1_000_000)
+	if err != nil {
+		d.logger.ErrorContext(ctx, "cannot list policies for the replication worker", "error", err)
+		return
+	}
+	seen := map[string]struct{}{}
+	for _, policy := range policies {
+		if policy.ReplicaRepositoryID == nil {
+			continue
+		}
+		key := pairKey(policy.LocalRepositoryID, *policy.ReplicaRepositoryID)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if d.replicatorForPair(policy.LocalRepositoryID, *policy.ReplicaRepositoryID) != nil {
+			continue
+		}
+		if err = d.openPair(ctx, policy.LocalRepositoryID, *policy.ReplicaRepositoryID); err != nil {
+			d.markReplicatorFailed(policy.LocalRepositoryID, *policy.ReplicaRepositoryID)
+			d.logReplicatorUnavailable(ctx, "", *policy.ReplicaRepositoryID, err)
+		}
+	}
+}
+
+// retryFailedReplicators reopens pairs whose last open failed. A later Step
+// therefore picks up a pair once the remote becomes reachable, and the reopen's
+// catch-up queues every backup completed while it was down.
 func (d *Dispatcher) retryFailedReplicators(ctx context.Context) {
 	d.mu.Lock()
 	keys := make([]string, 0, len(d.replicatorFailed))
@@ -444,7 +530,11 @@ func closeAll(recovered []recoveredRepository) {
 	}
 }
 
-func (d *Dispatcher) openReplicator(ctx context.Context, repository store.Repository, localRoot string) (*replication.Replicator, func() error, error) {
+// openReplicator opens the FTP remote and the policy's local repository. The
+// replicator records both identities, so its queue is the rows of this pair
+// only and a replica repository shared by two local repositories cannot make it
+// read the other's backups.
+func (d *Dispatcher) openReplicator(ctx context.Context, repository, localRow store.Repository, localRoot string) (*replication.Replicator, func() error, error) {
 	settings := d.config.Settings
 	if !settings.Credentials() {
 		return nil, nil, fmt.Errorf("dispatch: FTP repository %s needs a configured KEK", repository.ID)
@@ -473,8 +563,9 @@ func (d *Dispatcher) openReplicator(ctx context.Context, repository store.Reposi
 	replicator := &replication.Replicator{
 		DB: d.config.Database.DB(), Store: physicalstore.New(d.config.Database.DB()),
 		Local: localRepository, Remote: remote,
-		RepositoryID: repository.ID, InstanceID: d.config.Database.InstanceID(),
-		KeyFile: settings.KeyFile, WorkRoot: d.workRoot(),
+		RepositoryID: repository.ID, LocalRepositoryID: localRow.ID,
+		InstanceID: d.config.Database.InstanceID(),
+		KeyFile:    settings.KeyFile, WorkRoot: d.workRoot(),
 		Now: d.now,
 	}
 	return replicator, func() error {

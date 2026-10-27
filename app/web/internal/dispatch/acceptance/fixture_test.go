@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"encoding/json/v2"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -96,7 +97,7 @@ type fixture struct {
 	listen     string
 	certPool   *x509.CertPool
 	child      *exec.Cmd
-	childLog   *os.File
+	childLog   string
 	closed     bool
 }
 
@@ -162,13 +163,18 @@ func newFixture(t *testing.T) *fixture {
 // root, which the container creates for the mysql uid, or below t.TempDir() when
 // the variable is absent (a local native run).
 func newLayout(t *testing.T) layout {
-	t.Helper()
 	root := os.Getenv("INTERN_W4_ROOT")
 	if root == "" {
 		root = t.TempDir()
 	} else {
+		// The harness creates INTERN_W4_ROOT itself; the fixture root below it
+		// is this worker's to create, with the same 0700 mode requirePrivateDir
+		// checks below, so the non-recursive Mkdir calls that follow have a
+		// parent. MkdirAll leaves an existing directory alone; a pre-existing
+		// root with another mode fails the check instead of being repaired.
 		must(t, os.MkdirAll(root, 0o700))
 		root = filepath.Join(root, "fixture")
+		must(t, os.MkdirAll(root, 0o700))
 	}
 	paths := layout{
 		root: root, metadata: filepath.Join(root, "metadata"), kek: filepath.Join(root, "keys", "intern.key"),
@@ -409,11 +415,54 @@ func (f *fixture) listRuns(t *testing.T, query string) []store.Run {
 	return page.Items
 }
 
-func (f *fixture) listLogs(t *testing.T, runID string) []store.RunLog {
+// allLogs reads the whole /runs/{id}/logs sequence through its paged endpoint:
+// every page, ascending, until the endpoint stops returning rows.
+func (f *fixture) allLogs(t *testing.T, runID string) []store.RunLog {
 	t.Helper()
-	var page logsPage
-	must(t, json.Unmarshal(f.operator.request(t, http.MethodGet, "/api/v1/runs/"+runID+"/logs", "", http.StatusOK), &page))
-	return page.Items
+	const pageLimit = 1000
+	out := make([]store.RunLog, 0, 16)
+	var after int64
+	for {
+		path := fmt.Sprintf("/api/v1/runs/%s/logs?limit=%d", runID, pageLimit)
+		if after > 0 {
+			path += "&after_seq=" + strconv.FormatInt(after, 10)
+		}
+		var page logsPage
+		must(t, json.Unmarshal(f.operator.request(t, http.MethodGet, path, "", http.StatusOK), &page))
+		if len(page.Items) == 0 {
+			return out
+		}
+		out = append(out, page.Items...)
+		after = page.Items[len(page.Items)-1].Seq
+		if len(page.Items) < pageLimit {
+			return out
+		}
+	}
+}
+
+// sqliteLogs reads one run's stored log rows in sequence order, decoding the
+// data column exactly as the store does when it serves the same rows.
+func (f *fixture) sqliteLogs(t *testing.T, runID string) []store.RunLog {
+	t.Helper()
+	rows, err := f.analysis.QueryContext(t.Context(),
+		`SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? ORDER BY seq`, runID)
+	must(t, err)
+	defer func() { must(t, rows.Close()) }()
+	var out []store.RunLog
+	for rows.Next() {
+		var entry store.RunLog
+		var data sql.NullString
+		must(t, rows.Scan(&entry.RunID, &entry.Seq, &entry.TS, &entry.Level, &entry.Event, &entry.Message, &data))
+		if data.Valid && data.String != "" {
+			var decoded any
+			if err := json.Unmarshal([]byte(data.String), &decoded); err == nil {
+				entry.Data = decoded
+			}
+		}
+		out = append(out, entry)
+	}
+	must(t, rows.Err())
+	return out
 }
 
 func (f *fixture) getBackup(t *testing.T, id string) dispatch.BackupView {
@@ -489,6 +538,29 @@ func (f *fixture) waitReplica(t *testing.T, backupID, status string) dispatch.Re
 	return dispatch.ReplicaView{}
 }
 
+// waitAllReplicasVerified waits until every replica row of the fixture source
+// is verified, so a later protection read compares settled points.
+func (f *fixture) waitAllReplicasVerified(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		statuses, err := f.replicaStatuses()
+		must(t, err)
+		settled := len(statuses) > 0
+		for _, status := range statuses {
+			if status != "verified" {
+				settled = false
+				break
+			}
+		}
+		if settled {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("not every replica reached verified before the deadline")
+}
+
 func (f *fixture) waitXtrabackup(t *testing.T, runID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Minute)
@@ -497,7 +569,7 @@ func (f *fixture) waitXtrabackup(t *testing.T, runID string) {
 		if run.Status == store.RunStatusCompleted || run.Status == store.RunStatusFailed || run.Status == store.RunStatusCanceled {
 			t.Fatalf("run %s ended as %s before xtrabackup was observed", runID, run.Status)
 		}
-		if run.Status == store.RunStatusRunning && xtrabackupRunning() {
+		if run.Status == store.RunStatusRunning && f.xtrabackupRunning() {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -560,7 +632,7 @@ func (f *fixture) startServeChild(t *testing.T) {
 	logPath := filepath.Join(f.layout.root, "serve-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".log")
 	logFile, err := os.Create(logPath)
 	must(t, err)
-	f.childLog = logFile
+	f.childLog = logPath
 	command := exec.Command(executable, "-test.v", "-test.run=^TestW4ServeChild$", "-test.timeout=15m")
 	command.Env = append(os.Environ(),
 		"INTERN_W4_SERVE=1",
@@ -660,6 +732,45 @@ func (f *fixture) sqliteString(t *testing.T, query string, args ...any) string {
 	return value
 }
 
+// completedBackupsForRun counts the completed backups the physical chain
+// recorded for one web run. backups.run_id is the chain's own identifier, so
+// the join goes through runs.backup_id, the published backup of the run.
+func (f *fixture) completedBackupsForRun(t *testing.T, runID string) int {
+	t.Helper()
+	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups WHERE status = 'completed'
+AND id IN (SELECT backup_id FROM runs WHERE id = ? AND backup_id IS NOT NULL)`, runID)
+}
+
+// completedBackupsForPolicy counts one policy's completed backups, read before
+// and after a fault so a published row cannot hide behind another policy's
+// successful run.
+func (f *fixture) completedBackupsForPolicy(t *testing.T, policyID string) int {
+	t.Helper()
+	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups b JOIN runs r ON r.backup_id = b.id
+WHERE r.policy_id = ? AND b.status = 'completed'`, policyID)
+}
+
+// completedBackupsSinceFault counts the completed backups of the faulted run's
+// policy created at or after that run started. Backup intervals are globally
+// disjoint, so any row in that window belongs to the faulted run: a non-zero
+// count is a backup the fault should have prevented.
+func (f *fixture) completedBackupsSinceFault(t *testing.T, runID string) int {
+	t.Helper()
+	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups b JOIN runs r ON r.policy_id = (
+SELECT policy_id FROM runs WHERE id = ?)
+WHERE b.status = 'completed' AND b.created_at >= (SELECT started_at FROM runs WHERE id = ?)`, runID, runID)
+}
+
+// childExitCode reports the serve child's exit status after waitChild. A
+// signal death is reported as a non-zero code.
+func (f *fixture) childExitCode(t *testing.T) int {
+	t.Helper()
+	if f.child == nil || f.child.ProcessState == nil {
+		t.Fatal("serve child has not exited")
+	}
+	return f.child.ProcessState.ExitCode()
+}
+
 func (f *fixture) openFTP(t *testing.T) *ftp.Repository {
 	t.Helper()
 	host := os.Getenv("INTERN_W4_FTP_HOST")
@@ -702,11 +813,23 @@ func (f *fixture) listLocalObjects(t *testing.T) []string {
 	return keys
 }
 
+// assertNoSecret scans every byte the run may have written in the clear: the
+// control-plane database file, its WAL and SHM companions, the in-process
+// dispatcher log, the caller's extra payload and the serve child's captured
+// stdout/stderr. The child log is read from its own handle so a scan during
+// the run sees what has been written so far.
 func (f *fixture) assertNoSecret(t *testing.T, extra []byte) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(f.layout.metadata, "intern.db"))
-	must(t, err)
-	payloads := [][]byte{f.log.bytes(), extra, raw}
+	payloads := [][]byte{f.log.bytes(), extra, f.childOutput(t)}
+	for _, name := range []string{"intern.db", "intern.db-wal", "intern.db-shm"} {
+		path := filepath.Join(f.layout.metadata, name)
+		raw, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		must(t, err)
+		payloads = append(payloads, raw)
+	}
 	for _, secret := range []string{f.secret.source, f.secret.ftp, f.secret.admin, f.secret.operator} {
 		needle := []byte(secret)
 		for _, payload := range payloads {
@@ -715,6 +838,22 @@ func (f *fixture) assertNoSecret(t *testing.T, extra []byte) {
 			}
 		}
 	}
+}
+
+// childOutput reads the serve child's captured output file by path: a fresh
+// read never moves the offset the child itself writes through. Empty when no
+// child has been started by this fixture.
+func (f *fixture) childOutput(t *testing.T) []byte {
+	t.Helper()
+	if f.childLog == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(f.childLog)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	must(t, err)
+	return raw
 }
 
 func newClient(t *testing.T, httpClient *http.Client, base, role string) *client {
@@ -851,38 +990,153 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func xtrabackupRunning() bool {
+// xtrabackupRunning reports whether the configured xtrabackup executable is
+// running as a descendant of this worker or of the serve child it started. The
+// identity is the resolved /proc/<pid>/exe target, never a comm value or an
+// argv basename, and the parent chain must reach one of this fixture's own
+// processes, so a supervisor or a stale process cannot be mistaken for the
+// tool of the run under test.
+func (f *fixture) xtrabackupRunning() bool {
+	want, err := filepath.EvalSymlinks(xtrabackupBin)
+	if err != nil {
+		return false
+	}
+	roots := []int{os.Getpid()}
+	if f.child != nil && f.child.Process != nil {
+		roots = append(roots, f.child.Process.Pid)
+	}
+	return anyProcessMatches(want, roots)
+}
+
+// anyProcessMatches walks /proc for one process whose executable is want and
+// whose parent chain reaches one of roots.
+func anyProcessMatches(want string, roots []int) bool {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return false
 	}
-	self := strconv.Itoa(os.Getpid())
 	for _, entry := range entries {
-		if entry.Name() == self || !digitsOnly(entry.Name()) {
-			continue
-		}
-		dir := filepath.Join("/proc", entry.Name())
-		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
-		raw, _ := os.ReadFile(filepath.Join(dir, "cmdline"))
-		if xtrabackupProcess(string(comm), raw) {
+		pid, ok := procPID(entry.Name())
+		if ok && executableIs(pid, want) && descendsFrom(pid, roots) {
 			return true
 		}
 	}
 	return false
 }
 
-func xtrabackupProcess(comm string, cmdline []byte) bool {
-	if strings.TrimSpace(comm) == "xtrabackup" {
+// procPID parses one /proc entry name. This worker's own pid is skipped: it is
+// the ancestor every match is tested against, never the tool.
+func procPID(name string) (int, bool) {
+	if name == strconv.Itoa(os.Getpid()) || !digitsOnly(name) {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(name)
+	return pid, err == nil
+}
+
+// executableIs reports whether /proc/<pid>/exe resolves to the given file.
+func executableIs(pid int, want string) bool {
+	target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		return false
+	}
+	target = strings.TrimSuffix(target, " (deleted)")
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil || resolved != want {
+		return false
+	}
+	// A configured wrapper script runs its interpreter instead; the process
+	// identity is then the interpreter plus an argv entry that resolves to the
+	// configured file, never a bare basename match.
+	if !isScript(want) {
 		return true
 	}
-	for _, part := range bytes.Split(bytes.TrimRight(cmdline, "\x00"), []byte{0}) {
-		if len(part) > 0 && filepath.Base(string(part)) == "xtrabackup" {
+	return scriptInterpreter(pid, want) && argvResolvesTo(pid, want)
+}
+
+// isScript reports whether the file starts with a shebang.
+func isScript(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = file.Close() }()
+	var magic [2]byte
+	if _, err := io.ReadFull(file, magic[:]); err != nil {
+		return false
+	}
+	return magic[0] == '#' && magic[1] == '!'
+}
+
+// scriptInterpreter reports whether the process runs a shebang interpreter.
+func scriptInterpreter(pid int, script string) bool {
+	comm, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return false
+	}
+	switch strings.TrimSpace(string(comm)) {
+	case "perl", "sh", "bash", "dash", "python", "python3":
+		return true
+	}
+	return false
+}
+
+// argvResolvesTo reports whether one argv entry names the given file.
+func argvResolvesTo(pid int, want string) bool {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	for _, part := range bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0}) {
+		if len(part) == 0 {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(string(part)); err == nil && resolved == want {
 			return true
 		}
 	}
 	return false
 }
 
+// descendsFrom walks /proc/<pid>/stat parent links looking for one of roots.
+func descendsFrom(pid int, roots []int) bool {
+	wanted := make(map[int]struct{}, len(roots))
+	for _, root := range roots {
+		wanted[root] = struct{}{}
+	}
+	for depth := 0; depth < 32 && pid > 1; depth++ {
+		parent, err := parentPID(pid)
+		if err != nil || parent <= 1 {
+			return false
+		}
+		if _, ok := wanted[parent]; ok {
+			return true
+		}
+		pid = parent
+	}
+	return false
+}
+
+// parentPID reads the ppid field of /proc/<pid>/stat. The comm field may hold
+// spaces and parentheses, so the fields after the last ')' are what count.
+func parentPID(pid int) (int, error) {
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, err
+	}
+	text := string(raw)
+	end := strings.LastIndexByte(text, ')')
+	if end < 0 || end+2 >= len(text) {
+		return 0, fmt.Errorf("stat of %d is malformed", pid)
+	}
+	fields := strings.Fields(text[end+2:])
+	if len(fields) < 2 {
+		return 0, fmt.Errorf("stat of %d is malformed", pid)
+	}
+	return strconv.Atoi(fields[1])
+}
+
+// digitsOnly reports whether a /proc entry name is a plain pid.
 func digitsOnly(value string) bool {
 	if value == "" {
 		return false
@@ -893,6 +1147,234 @@ func digitsOnly(value string) bool {
 		}
 	}
 	return true
+}
+
+// parseStamp parses one stored or served UTC timestamp.
+func parseStamp(t *testing.T, value string) time.Time {
+	t.Helper()
+	if value == "" {
+		t.Fatal("missing timestamp")
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	must(t, err)
+	return parsed
+}
+
+// replicationWatch samples the protection points and the replica rows while
+// replication is in progress. Every sample reads the protection API first and
+// the replica statuses from SQLite immediately after: a status can only move
+// forward to verified, so a verify that lands between the two reads can hide a
+// violation but can never invent one.
+type replicationWatch struct {
+	f               *fixture
+	stopCh          chan struct{}
+	doneCh          chan struct{}
+	mu              sync.Mutex
+	samples, behind int
+	seen, verified  map[string]struct{}
+	failure         string
+	stopped         bool
+}
+
+// replicationReport is the aggregate evidence of one sampling run.
+type replicationReport struct {
+	samples, behind, seen, verified int
+}
+
+// watchReplication starts sampling. Call report to stop and evaluate it; the
+// test cleanup also stops the goroutine, so a failing scenario cannot leave a
+// sampler polling a client that a later scenario replaces.
+func (f *fixture) watchReplication(t *testing.T) *replicationWatch {
+	t.Helper()
+	w := &replicationWatch{
+		f: f, stopCh: make(chan struct{}), doneCh: make(chan struct{}),
+		seen: map[string]struct{}{}, verified: map[string]struct{}{},
+	}
+	go func() {
+		defer close(w.doneCh)
+		ticker := time.NewTicker(replicaSampleInterval)
+		defer ticker.Stop()
+		for {
+			if !w.sample() {
+				return
+			}
+			select {
+			case <-w.stopCh:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	t.Cleanup(func() { w.stopAfterFailure() })
+	return w
+}
+
+// stopAfterFailure is the cleanup path: stop the goroutine once, whether report
+// already did or the scenario failed before reaching it.
+func (w *replicationWatch) stopAfterFailure() {
+	w.mu.Lock()
+	stopped := w.stopped
+	w.stopped = true
+	w.mu.Unlock()
+	if stopped {
+		return
+	}
+	close(w.stopCh)
+	<-w.doneCh
+}
+
+// sample reads one protection point and the replica statuses behind it. It
+// reports false once a read failed: the goroutine stops instead of retrying a
+// broken client for the rest of the scenario.
+func (w *replicationWatch) sample() bool {
+	protection, statuses, err := w.read()
+	if err != nil {
+		w.fail(err.Error())
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.recordLocked(statuses)
+	if violation := unverifiedRemotePoint(protection, statuses); violation != "" {
+		w.failLocked(violation)
+	}
+	if uploadedBehindLocal(protection, statuses) {
+		w.behind++
+	}
+	return true
+}
+
+// read fetches the protection view and then the replica statuses. The order
+// matters: verified only moves forward, so a verify landing between the two
+// reads can hide a violation but can never invent one.
+func (w *replicationWatch) read() (dispatch.Protection, map[string]string, error) {
+	raw, err := w.f.operator.get("/api/v1/sources/" + w.f.sourceID + "/protection")
+	if err != nil {
+		return dispatch.Protection{}, nil, err
+	}
+	var protection dispatch.Protection
+	if err = json.Unmarshal(raw, &protection); err != nil {
+		return dispatch.Protection{}, nil, fmt.Errorf("protection body: %w", err)
+	}
+	statuses, err := w.f.replicaStatuses()
+	if err != nil {
+		return dispatch.Protection{}, nil, fmt.Errorf("replica statuses: %w", err)
+	}
+	return protection, statuses, nil
+}
+
+// recordLocked counts the sample and the backup coverage it proved.
+func (w *replicationWatch) recordLocked(statuses map[string]string) {
+	w.samples++
+	for backup, status := range statuses {
+		w.seen[backup] = struct{}{}
+		if status == "verified" {
+			w.verified[backup] = struct{}{}
+		}
+	}
+}
+
+// unverifiedRemotePoint reports the first remote point whose replica is not
+// verified in the same snapshot, empty when the whole prefix is verified.
+func unverifiedRemotePoint(protection dispatch.Protection, statuses map[string]string) string {
+	for _, point := range protection.Remote {
+		status, known := statuses[point.BackupID]
+		if !known || status != "verified" {
+			return fmt.Sprintf("remote protection advanced to %s while its replica was %q", point.BackupID, status)
+		}
+	}
+	return ""
+}
+
+// uploadedBehindLocal reports a real sample of the uploaded-but-unverified
+// window: the local point is ahead of the newest remote point and its own
+// replica is still pending, uploading or uploaded.
+func uploadedBehindLocal(protection dispatch.Protection, statuses map[string]string) bool {
+	if protection.Local == nil {
+		return false
+	}
+	latest := ""
+	if len(protection.Remote) > 0 {
+		latest = protection.Remote[len(protection.Remote)-1].BackupID
+	}
+	if latest == protection.Local.BackupID {
+		return false
+	}
+	switch statuses[protection.Local.BackupID] {
+	case "pending", "uploading", "uploaded":
+		return true
+	}
+	return false
+}
+
+// replicaStatuses reads every replica status of the fixture source from SQLite.
+func (f *fixture) replicaStatuses() (map[string]string, error) {
+	rows, err := f.analysis.QueryContext(context.Background(),
+		`SELECT r.backup_id, r.status FROM replicas r
+JOIN backups b ON b.id = r.backup_id JOIN chains c ON c.id = b.chain_id
+WHERE c.source_id = ? AND r.repository_id = ?`, f.sourceID, f.ftpID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	statuses := map[string]string{}
+	for rows.Next() {
+		var backup, status string
+		if err := rows.Scan(&backup, &status); err != nil {
+			return nil, err
+		}
+		statuses[backup] = status
+	}
+	return statuses, rows.Err()
+}
+
+func (w *replicationWatch) fail(message string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.failLocked(message)
+}
+
+func (w *replicationWatch) failLocked(message string) {
+	if w.failure == "" {
+		w.failure = message
+	}
+}
+
+// report stops the sampler and evaluates its evidence.
+func (w *replicationWatch) report(t *testing.T) replicationReport {
+	t.Helper()
+	w.stopAfterFailure()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.failure != "" {
+		t.Fatal(w.failure)
+	}
+	if w.samples == 0 {
+		t.Fatal("the replication sampler never ran a complete sample")
+	}
+	return replicationReport{samples: w.samples, behind: w.behind, seen: len(w.seen), verified: len(w.verified)}
+}
+
+// get performs one read used from the sampler goroutine, where a test helper
+// may not call t.Fatal.
+func (c *client) get(path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s as %s: status %d", path, c.role, resp.StatusCode)
+	}
+	return raw, nil
 }
 
 func must(t *testing.T, err error) {

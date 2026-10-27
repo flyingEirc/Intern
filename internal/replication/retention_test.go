@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	testSourceID     = "source"
-	testRepositoryID = "ftp-repository"
-	testInstanceID   = "instance"
+	testSourceID        = "source"
+	testRepositoryID    = "ftp-repository"
+	testLocalRepository = "local-repository"
+	testInstanceID      = "instance"
 )
 
 var objectMembers = []string{"payload.bin", "envelope.json", "metadata.bin", "metadata.envelope.json"}
@@ -88,8 +89,8 @@ func openRepository(t *testing.T, root string) *local.Repository {
 func (f *fixture) replicator(repo *local.Repository) *Replicator {
 	return &Replicator{
 		DB: f.db, Store: f.store, Local: repo, Remote: newFakeRemote(),
-		RepositoryID: testRepositoryID,
-		InstanceID:   testInstanceID, WorkRoot: filepath.Join(filepath.Dir(f.root), "work"),
+		RepositoryID: testRepositoryID, LocalRepositoryID: testLocalRepository,
+		InstanceID: testInstanceID, WorkRoot: filepath.Join(filepath.Dir(f.root), "work"),
 		Now: func() time.Time { return f.now },
 	}
 }
@@ -205,10 +206,11 @@ func (f *fixture) verify(backups ...string) {
 	for _, backupID := range backups {
 		stamp := f.now.Format("2006-01-02T15:04:05.000000000Z")
 		_, err := f.db.ExecContext(f.t.Context(), `INSERT INTO replicas
-(backup_id, repository_id, idem_key, status, attempts, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
-VALUES (?, ?, ?, 'verified', 1, ?, ?, ?, ?, ?)
+(backup_id, repository_id, local_repository_id, idem_key, status, attempts, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'verified', 1, ?, ?, ?, ?, ?)
 ON CONFLICT(backup_id, repository_id) DO UPDATE SET status = 'verified', verified_at = excluded.verified_at`,
-			backupID, testRepositoryID, "replicate:"+backupID+":"+testRepositoryID, stamp, stamp, stamp, stamp, stamp)
+			backupID, testRepositoryID, testLocalRepository, "replicate:"+backupID+":"+testRepositoryID,
+			stamp, stamp, stamp, stamp, stamp)
 		if err != nil {
 			f.t.Fatalf("record verified replica %s: %v", backupID, err)
 		}

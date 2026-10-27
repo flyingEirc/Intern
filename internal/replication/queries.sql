@@ -2,19 +2,24 @@
 -- chains/backups tables, so this entry lists the physical schema as well.
 
 -- name: InsertReplica :exec
-INSERT INTO replicas (backup_id, repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
-VALUES (?, ?, ?, 'pending', ?, ?, ?)
-ON CONFLICT DO NOTHING;
+-- A row written before the local repository was recorded has an empty value and
+-- is inert. Binding it here keeps its uploaded state, attempt history and part
+-- obligations instead of adding a duplicate queue entry beside it.
+INSERT INTO replicas (backup_id, repository_id, local_repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+ON CONFLICT(backup_id, repository_id) DO UPDATE SET
+    local_repository_id = excluded.local_repository_id
+WHERE replicas.local_repository_id = '';
 
 -- name: GetReplica :one
-SELECT * FROM replicas WHERE backup_id = ? AND repository_id = ?;
+SELECT * FROM replicas WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
 -- name: ReplicasForRepository :many
 SELECT r.*, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c.source_id
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ?
+WHERE r.repository_id = ? AND r.local_repository_id = ?
 ORDER BY c.source_id, b.created_at, b.seq;
 
 -- name: ReplicasBySource :many
@@ -22,11 +27,12 @@ SELECT r.*, b.chain_id, b.created_at AS backup_created_at, b.seq AS chain_seq, c
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ? AND c.source_id = ?
+WHERE r.repository_id = ? AND r.local_repository_id = ? AND c.source_id = ?
 ORDER BY b.created_at, b.seq;
 
 -- name: ReplicasByBackupIDs :many
-SELECT * FROM replicas WHERE repository_id = ? AND backup_id IN (sqlc.slice(backup_ids));
+SELECT * FROM replicas
+WHERE repository_id = ? AND local_repository_id = ? AND backup_id IN (sqlc.slice(backup_ids));
 
 -- name: SourceChains :many
 SELECT * FROM chains WHERE source_id = ? ORDER BY started_at, rowid;
@@ -39,7 +45,8 @@ ORDER BY b.created_at, b.seq;
 
 -- name: SetReplicaUploading :execrows
 UPDATE replicas SET status = 'uploading', updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND status IN ('pending', 'failed', 'uploading');
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+  AND status IN ('pending', 'failed', 'uploading');
 
 -- name: SetReplicaUploaded :exec
 -- uploaded keeps failed_since: the copy is committed but still unprotected until
@@ -47,36 +54,36 @@ WHERE backup_id = ? AND repository_id = ? AND status IN ('pending', 'failed', 'u
 UPDATE replicas
 SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, ?), next_attempt_at = ?, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?;
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
 -- name: SetReplicaVerified :exec
 UPDATE replicas
 SET status = 'verified', verified_at = ?, uploaded_at = COALESCE(uploaded_at, ?),
     permanent = 0, failed_since = NULL, alert_since = NULL, last_error_code = NULL,
     last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?;
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
 -- name: SetReplicaFailed :exec
 UPDATE replicas
 SET status = ?, attempts = ?, permanent = ?, next_attempt_at = ?,
     failed_since = COALESCE(failed_since, ?), last_error_code = ?, last_reply_code = ?,
     updated_at = ?
-WHERE backup_id = ? AND repository_id = ?;
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
 -- name: SetReplicaAlert :exec
 UPDATE replicas SET alert_since = ?
-WHERE backup_id = ? AND repository_id = ? AND alert_since IS NULL;
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ? AND alert_since IS NULL;
 
 -- name: ResetReplicaAttempt :exec
 -- A manual retry restarts the attempt budget and the schedule but keeps the
 -- history counters: the item has been unprotected since failed_since.
 UPDATE replicas
 SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ?;
+WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?;
 
 -- name: ResetUploadingReplicas :exec
 UPDATE replicas SET status = 'pending', next_attempt_at = ?, updated_at = ?
-WHERE repository_id = ? AND status = 'uploading';
+WHERE repository_id = ? AND local_repository_id = ? AND status = 'uploading';
 
 -- name: UpsertMember :exec
 INSERT INTO replica_members (backup_id, repository_id, member, status, digest, size, updated_at)
@@ -103,10 +110,27 @@ VALUES (?, ?, ?, ?, ?);
 SELECT * FROM replica_parts WHERE part = ?;
 
 -- name: Parts :many
-SELECT * FROM replica_parts WHERE repository_id = ? ORDER BY id;
+-- A part belongs to one replica row, so joining that row scopes the cleanup to
+-- this (local, remote) pair instead of every pair sharing the FTP repository.
+SELECT p.* FROM replica_parts p
+JOIN replicas r ON r.backup_id = p.backup_id AND r.repository_id = p.repository_id
+WHERE p.repository_id = ? AND r.local_repository_id = ?
+ORDER BY p.id;
 
 -- name: DeletePart :exec
 DELETE FROM replica_parts WHERE id = ?;
 
 -- name: PartFailed :exec
 UPDATE replica_parts SET attempts = attempts + 1, last_error_code = ? WHERE id = ?;
+
+-- name: PendingLocalDeletesForPair :many
+-- Recovery must reclaim each reservation in the local repository that holds the
+-- object. A reservation only exists after every member was verified on this
+-- replica repository, so its members always have a replica row for the pair; the
+-- join is therefore exact, and a reservation belonging to another local
+-- repository sharing this FTP repository is left to that pair.
+SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l
+JOIN backups b ON b.id = l.backup_id
+JOIN replicas r ON r.backup_id = l.backup_id AND r.repository_id = ?
+WHERE r.local_repository_id = ? AND l.instance_id = ? AND l.kind = 'object' AND b.status = 'completed'
+ORDER BY l.id;

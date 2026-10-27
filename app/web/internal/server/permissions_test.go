@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -160,7 +161,9 @@ func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target
 	if role != "anonymous" {
 		cookie = cookies[role]
 	}
-	if strings.Contains(path, "/api/v1/runs/:id") {
+	// Every runs route needs a row: the list must be non-empty for an allowed
+	// role, and detail, logs, cancel and events need a real run id.
+	if strings.HasPrefix(path, "/api/v1/runs") {
 		seeded.runID = f.createRunRow(t, seeded.policyID, seeded.freeSource)
 	}
 	if path == "/api/v1/policies/:id/runs" {
@@ -191,7 +194,21 @@ func assertMatrixStatus(t *testing.T, f *authFixture, req *http.Request, method 
 		}
 		return
 	}
-	requestAPI(t, f.client, req, status)
+	recorder := requestAPI(t, f.client, req, status)
+	if req.URL.Path != "/api/v1/runs" || status != http.StatusOK {
+		return
+	}
+	// An allowed role must see the seeded run: 200 on an empty list would let a
+	// handler that returns nothing at all pass this matrix.
+	var page struct {
+		Items []store.Run `json:"items"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+		t.Fatalf("runs list body %s: %v", recorder.Body, err)
+	}
+	if len(page.Items) == 0 {
+		t.Fatalf("runs list is empty for %s; want the seeded run", req.URL.Path)
+	}
 }
 
 // seededResources holds the rows a matrix case may reference. The policy points

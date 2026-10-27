@@ -191,21 +191,26 @@ func (f *FTPRemote) CleanupPart(ctx context.Context, key string) error {
 	return f.Repository.CleanupPart(ctx, key)
 }
 
-// Replicator owns replica state for one remote repository. Remote keys are the
-// local object path plus the member name, so the remote instance must be the
-// local instance. One caller runs Step; Now injects the clock.
+// Replicator owns replica state for one (local, remote) repository pair. Remote
+// keys are the local object path plus the member name, so the remote instance
+// must be the local instance. A replica repository shared by several local
+// repositories therefore needs one Replicator per pair: LocalRepositoryID
+// scopes every queue read and every write, so a replicator never copies,
+// verifies, or reclaims a backup stored in another local repository. One
+// caller runs Step; Now injects the clock.
 type Replicator struct {
-	DB               *sql.DB
-	Store            *physicalstore.Store
-	Local            *local.Repository
-	Remote           Remote
-	RepositoryID     string
-	InstanceID       string
-	KeyFile          string
-	WorkRoot         string
-	MaxExpandedBytes int64
-	Policy           Policy
-	Now              func() time.Time
+	DB                *sql.DB
+	Store             *physicalstore.Store
+	Local             *local.Repository
+	Remote            Remote
+	RepositoryID      string
+	LocalRepositoryID string
+	InstanceID        string
+	KeyFile           string
+	WorkRoot          string
+	MaxExpandedBytes  int64
+	Policy            Policy
+	Now               func() time.Time
 	// hook is nil in production and set only by an integration-tagged entry point.
 	hook stepHook
 }

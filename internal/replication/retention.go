@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication/internal/replsql"
 )
 
 // Retention reasons are fixed, safe codes a caller may persist and display.
@@ -185,14 +186,34 @@ func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error
 	return r.reclaimReserved(ctx, reserved)
 }
 
-// recoverLocalDeletes finishes every pending local-delete reservation for this
-// instance. A committed reservation stays authorized after a later pin.
+// recoverLocalDeletes finishes every pending local-delete reservation that
+// belongs to this (local, remote) pair, reclaiming it through this pair's local
+// root. A committed reservation stays authorized after a later pin. A
+// reservation of another local repository sharing the same replica repository
+// is not this pair's work: its object is not in this root, so reclaiming it here
+// would either fail or, worse, remove a same-named directory from the wrong
+// repository.
 func (r *Replicator) recoverLocalDeletes(ctx context.Context) error {
-	reserved, err := r.Store.LocalDeletePendingForInstance(ctx, r.InstanceID)
+	reserved, err := r.pendingLocalDeletes(ctx)
 	if err != nil {
 		return err
 	}
 	return r.reclaimReserved(ctx, reserved)
+}
+
+// pendingLocalDeletes reads the reservations this pair owns.
+func (r *Replicator) pendingLocalDeletes(ctx context.Context) ([]store.LocalDelete, error) {
+	rows, err := replsql.New(r.DB).PendingLocalDeletesForPair(ctx, replsql.PendingLocalDeletesForPairParams{
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID, InstanceID: r.InstanceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reserved := make([]store.LocalDelete, 0, len(rows))
+	for _, row := range rows {
+		reserved = append(reserved, store.LocalDelete{ID: row.ID, BackupID: row.BackupID, Target: row.Target})
+	}
+	return reserved, nil
 }
 
 // reclaimReserved finishes one reservation. A row is removed only after its

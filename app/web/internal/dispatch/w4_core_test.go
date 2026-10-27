@@ -96,8 +96,9 @@ func TestReplicatorOpensForPolicyCreatedAfterStart(t *testing.T) {
 
 // TestFailedReplicatorOpenIsRetriedAndRecorded drives the open-failure rule: a
 // broken remote becomes a structured replication_step event with code
-// replicator_unavailable, the run stays completed, the replication worker
-// retries the open, and a later Step carries the backup to the recovered pair.
+// replicator_unavailable, the run stays completed, and the worker's retried open
+// itself queues the backup. Nothing enqueues it a second time by hand: the
+// reopen's catch-up is what makes the replica durable.
 func TestFailedReplicatorOpenIsRetriedAndRecorded(t *testing.T) {
 	f := newFixture(t)
 	d := f.start(nil)
@@ -117,6 +118,7 @@ func TestFailedReplicatorOpenIsRetriedAndRecorded(t *testing.T) {
 	if d.replicatorForPair(local.ID, ftp.ID) != nil {
 		t.Fatal("a failed open must not install a replicator")
 	}
+	assertNoQueuedReplica(t, f, backupID, ftp.ID)
 	step := eventByName(t, f.events(run.ID), eventReplicationStep)
 	data := asObject(t, step.Data)
 	if data["status"] != "failed" || data["code"] != replicatorUnavailable || data["repository_id"] != ftp.ID {
@@ -126,18 +128,13 @@ func TestFailedReplicatorOpenIsRetriedAndRecorded(t *testing.T) {
 		t.Fatalf("run status = %s, the failed open must never fail the backup", final.Status)
 	}
 
-	// The worker's next step retries the open. Once the pair is installed, the
-	// next enqueue for the same backup lands on it: the copy is only delayed,
-	// never lost. Stop covers the lazily opened replicator's handles.
+	// The worker's next cycle retries the open. The reopen runs the pair's
+	// catch-up, so the backup completed while the remote was down is queued by
+	// that catch-up alone. Stop covers the lazily opened replicator's handles.
 	waitFor(t, "the retried open to install the replicator", func() bool {
 		d.stepReplication(t.Context())
 		return d.replicatorForPair(local.ID, ftp.ID) != nil
 	})
-	replicator := d.replicatorForPair(local.ID, ftp.ID)
-	if replicator == nil {
-		t.Fatal("the retried open never installed the replicator")
-	}
-	d.enqueueReplication(t.Context(), run, policy, backupID)
 	assertQueuedReplica(t, f, backupID, ftp.ID)
 	if err := d.Stop(); err != nil {
 		t.Fatal(err)
@@ -147,9 +144,62 @@ func TestFailedReplicatorOpenIsRetriedAndRecorded(t *testing.T) {
 	}
 }
 
+// TestReplicaSurvivesAReplicaOutageAcrossRestart is the N1 restart variant: the
+// open fails, the process restarts with the FTP repository available, and the
+// pair opened during recovery's startup catch-up owns the replica row. No step
+// ran and nothing enqueued by hand, so the row proves the open itself is durable.
+func TestReplicaSurvivesAReplicaOutageAcrossRestart(t *testing.T) {
+	f := newFixture(t)
+	d := f.start(nil)
+	local := f.repository("local-restart")
+	ftp := f.ftpRepository("ftp-restart")
+	source := f.source("source-restart", testSocketPath(t))
+	policy := f.replicaPolicy("policy-restart", source.ID, local.ID, ftp.ID)
+	backupID, chainID := completeLocalBackup(t, f.database, source.ID)
+	run := insertTerminalRun(t, f.database, policy, backupID, chainID)
+
+	// The remote is unreachable for the whole first process.
+	restoreBroken := useBrokenRemote(t)
+	d.enqueueReplication(t.Context(), run, policy, backupID)
+	if d.replicatorForPair(local.ID, ftp.ID) != nil {
+		t.Fatal("a failed open must not install a replicator")
+	}
+	assertNoQueuedReplica(t, f, backupID, ftp.ID)
+	if err := d.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	restoreBroken()
+
+	// The restart: a new Store connection over the same metadata directory and a
+	// new dispatcher whose startup finds the FTP repository reachable.
+	useMemoryRemote(t)
+	f.reopen()
+	restarted := f.start(nil)
+	waitFor(t, "the restarted process to install the pair", func() bool {
+		return restarted.replicatorForPair(local.ID, ftp.ID) != nil
+	})
+	assertQueuedReplica(t, f, backupID, ftp.ID)
+}
+
 // assertQueuedReplica requires the enqueued backup to sit in the replicas
 // queue for the repository.
 func assertQueuedReplica(t *testing.T, f *fixture, backupID, repositoryID string) {
+	t.Helper()
+	if queued := queuedReplicas(t, f, backupID, repositoryID); queued != 1 {
+		t.Fatalf("queued replicas = %d, want the enqueued backup on the recovered pair", queued)
+	}
+}
+
+// assertNoQueuedReplica requires the backup to have no replica row yet, so a
+// later row proves the catch-up wrote it.
+func assertNoQueuedReplica(t *testing.T, f *fixture, backupID, repositoryID string) {
+	t.Helper()
+	if queued := queuedReplicas(t, f, backupID, repositoryID); queued != 0 {
+		t.Fatalf("queued replicas = %d, want none while the pair is uninstalled", queued)
+	}
+}
+
+func queuedReplicas(t *testing.T, f *fixture, backupID, repositoryID string) int {
 	t.Helper()
 	var queued int
 	if err := f.database.DB().QueryRowContext(f.t.Context(),
@@ -157,9 +207,7 @@ func assertQueuedReplica(t *testing.T, f *fixture, backupID, repositoryID string
 	).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
-	if queued != 1 {
-		t.Fatalf("queued replicas = %d, want the enqueued backup on the recovered pair", queued)
-	}
+	return queued
 }
 
 // useBrokenRemote makes the lazy open itself fail, which is the FTP-refused
@@ -297,6 +345,69 @@ func TestAdmissionCoalescesTwoRequiresFullFailuresToOneFull(t *testing.T) {
 		t.Fatalf("admission fulls = %d, want 1", n)
 	}
 	assertRequiresFull(t, q.run(inc.ID))
+}
+
+// TestAdmissionFullAfterAFailedAdmissionFull is N3: an admission full that fails
+// before a chain exists must not block the next one. The key is the contract's
+// per-attempt policy:<id>:full:admission:<scheduled_at>, so the second
+// RequiresFull queues a fresh full instead of colliding with the failed row.
+func TestAdmissionFullAfterAFailedAdmissionFull(t *testing.T) {
+	q := newQueueFixture(t)
+	d := q.newDispatcher(time.Now)
+	admission := &physicalstore.AdmissionError{Code: "requires_full", RequiresFull: true}
+
+	first := refusedIncremental(t, q, d, admission, "inc-first")
+	if len(first) != 1 {
+		t.Fatalf("admission fulls = %d, want 1", len(first))
+	}
+	// The admission full fails at preflight, exactly as a broken source does, and
+	// releases the source's single full slot.
+	claimRun(t, q, "the admission full")
+	if err := d.failRun(t.Context(), first[0], store.RunErrorPreflight, "source_unreachable", errors.New("preflight")); err != nil {
+		t.Fatal(err)
+	}
+
+	refusedIncremental(t, q, d, admission, "inc-second")
+	if n := len(admissionFulls(q)); n != 2 {
+		t.Fatalf("admission fulls = %d, want a new full after the failed one", n)
+	}
+	if active, err := q.database.HasActiveFull(t.Context(), q.source.ID); err != nil || !active {
+		t.Fatalf("active full = %v, %v; want the new admission full queued", active, err)
+	}
+}
+
+// refusedIncremental claims one queued incremental, refuses it the way the
+// physical admission does, and returns the admission fulls the refusal queued.
+func refusedIncremental(t *testing.T, q *queueFixture, d *Dispatcher,
+	admission *physicalstore.AdmissionError, name string,
+) []store.Run {
+	t.Helper()
+	inc := q.queued(name, store.RunKindIncremental, store.RunTriggerCron, time.Now().UTC())
+	claimRun(t, q, name)
+	if err := d.admissionFailure(t.Context(), inc, q.policy, admission); err != nil {
+		t.Fatal(err)
+	}
+	return admissionFulls(q)
+}
+
+// claimRun claims the next queued run and requires the claim to succeed.
+func claimRun(t *testing.T, q *queueFixture, what string) {
+	t.Helper()
+	if _, ok, err := q.database.ClaimRun(t.Context()); err != nil || !ok {
+		t.Fatalf("claim %s: %v ok=%v", what, err, ok)
+	}
+}
+
+// admissionFulls lists the admission-triggered fulls of the fixture policy,
+// newest first.
+func admissionFulls(q *queueFixture) []store.Run {
+	fulls := make([]store.Run, 0, 2)
+	for _, run := range q.runs(q.policy.ID) {
+		if run.Kind == store.RunKindFull && run.Trigger == store.RunTriggerAdmission {
+			fulls = append(fulls, run)
+		}
+	}
+	return fulls
 }
 
 // TestStructuredRunEventsHaveNoSecrets is D1: lifecycle events carry a fixed

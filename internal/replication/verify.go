@@ -178,5 +178,6 @@ func (r *Replicator) recordVerified(ctx context.Context, backupID string) error 
 		VerifiedAt: sql.NullString{String: now, Valid: true},
 		UploadedAt: sql.NullString{String: now, Valid: true},
 		UpdatedAt:  now, BackupID: backupID, RepositoryID: r.RepositoryID,
+		LocalRepositoryID: r.LocalRepositoryID,
 	})
 }

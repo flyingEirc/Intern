@@ -15,7 +15,13 @@ import (
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
-const finishAttempts = 5
+// finishAttempts bounds the retries of one terminal run write. finishWindow
+// bounds the detached window that write runs in: it is the same commit budget
+// chain.Complete uses, and shutdownWait is sized to outlast it.
+const (
+	finishAttempts = 5
+	finishWindow   = 15 * time.Second
+)
 
 // backupWorker claims and executes runs. Global backup concurrency is 1: the
 // claim refuses a new row while any run is still running. A FinishRun* failure
@@ -46,20 +52,25 @@ func (d *Dispatcher) hasRunningRun(ctx context.Context) bool {
 	return err == nil && len(runs) > 0
 }
 
-func (d *Dispatcher) finishWithRetry(ctx context.Context, runID string, op func() error) error {
+// finishWithRetry persists one terminal run outcome. The write is detached
+// from the caller's cancellation with a bounded window: shutdown cancels the
+// run context before the workers drain, so a write that inherited it would
+// fail every attempt and leave the row running for the next start's recovery
+// to reclaim. The window matches chain.Complete's own commit window, which
+// shutdownWait is sized to outlast.
+func (d *Dispatcher) finishWithRetry(parent context.Context, runID string, op func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), finishWindow)
+	defer cancel()
 	var err error
 	for attempt := 1; attempt <= finishAttempts; attempt++ {
-		err = op()
+		err = op(ctx)
 		if err == nil {
 			return nil
 		}
-		d.logger.ErrorContext(ctx, "cannot persist run outcome", "run_id", runID, "attempt", attempt, "error", err)
-		if ctx.Err() != nil {
-			return err
-		}
+		d.logger.ErrorContext(parent, "cannot persist run outcome", "run_id", runID, "attempt", attempt, "error", err)
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return err
 		case <-time.After(claimRetry):
 		}
 	}
@@ -140,8 +151,8 @@ func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy stor
 		"backup_id": result.BackupID, "chain_id": result.ChainID, "seq": result.Seq,
 		"payload_size": result.PayloadSize, "payload_sha256": result.PayloadSHA256,
 	})
-	if err := d.finishWithRetry(ctx, run.ID, func() error {
-		return d.config.Database.FinishRunCompleted(ctx, run.ID, result.BackupID, result.ChainID,
+	if err := d.finishWithRetry(ctx, run.ID, func(writeCtx context.Context) error {
+		return d.config.Database.FinishRunCompleted(writeCtx, run.ID, result.BackupID, result.ChainID,
 			result.PayloadSize, store.SystemAudit("runs.completed", store.AuditDetail{}), log)
 	}); err != nil {
 		return err
@@ -293,6 +304,11 @@ func (d *Dispatcher) admissionFailure(ctx context.Context, run store.Run, policy
 	return d.failRun(ctx, run, store.RunErrorBackupFailed, "admission_failed", admission)
 }
 
+// queueAdmissionFull queues the coalesced full one refused incremental asks for.
+// At most one full is queued or running per source (HasActiveFull); the key is
+// the contract's policy:<id>:full:admission:<scheduled_at>, so a previous
+// admission full that already failed does not block the next one. No replicator
+// is opened here: the completion path and the replication worker own that.
 func (d *Dispatcher) queueAdmissionFull(ctx context.Context, run store.Run, policy store.Policy) {
 	active, err := d.config.Database.HasActiveFull(ctx, policy.SourceID)
 	if err != nil {
@@ -302,11 +318,12 @@ func (d *Dispatcher) queueAdmissionFull(ctx context.Context, run store.Run, poli
 	if active {
 		return
 	}
+	scheduledAt := d.now()
 	created, err := d.config.Database.CreateRun(ctx, store.RunInput{
 		PolicyID: policy.ID, SourceID: policy.SourceID, Kind: store.RunKindFull, Trigger: store.RunTriggerAdmission,
-		IdempotencyKey: admissionKey(policy.ID, d.latestChainID(ctx, policy.SourceID)),
+		IdempotencyKey: admissionKey(policy.ID, scheduledAt),
 		RequestHash:    cronRequestHash(policy, store.RunKindFull),
-		ScheduledAt:    d.now(),
+		ScheduledAt:    scheduledAt,
 	})
 	if errors.Is(err, store.ErrConflict) {
 		return
@@ -315,16 +332,7 @@ func (d *Dispatcher) queueAdmissionFull(ctx context.Context, run store.Run, poli
 		d.logger.ErrorContext(ctx, "cannot queue admission full", "run_id", run.ID, "error", err)
 		return
 	}
-	d.ensurePolicyReplicator(ctx, policy, created.ID)
 	d.logEvent(ctx, created.ID, eventQueued, nil)
-}
-
-func (d *Dispatcher) latestChainID(ctx context.Context, sourceID string) string {
-	chains, err := physicalstore.New(d.config.Database.DB()).SourceChains(ctx, sourceID)
-	if err != nil || len(chains) == 0 {
-		return "none"
-	}
-	return chains[len(chains)-1].ID
 }
 
 // chainJob builds the physical chain Job for one run. validateJob rechecks
@@ -379,8 +387,8 @@ func (d *Dispatcher) failRun(ctx context.Context, run store.Run, class, code str
 		logger = logger.With(slog.String("cause", cause.Error()))
 	}
 	log := runLogWrite(eventFailed, map[string]any{"error_class": class, "code": code})
-	if err := d.finishWithRetry(ctx, run.ID, func() error {
-		return d.config.Database.FinishRunFailed(ctx, run.ID, class, code,
+	if err := d.finishWithRetry(ctx, run.ID, func(writeCtx context.Context) error {
+		return d.config.Database.FinishRunFailed(writeCtx, run.ID, class, code,
 			store.SystemAudit("runs.failed", store.AuditDetail{}), log)
 	}); err != nil {
 		logger.ErrorContext(ctx, "cannot record failed run", "run_id", run.ID, "record_error", err)
@@ -395,8 +403,8 @@ func (d *Dispatcher) failRun(ctx context.Context, run store.Run, class, code str
 // completed; a cancel never deletes a completed backup.
 func (d *Dispatcher) cancelRun(ctx context.Context, run store.Run) error {
 	log := runLogWrite(eventCanceled, nil)
-	if err := d.finishWithRetry(ctx, run.ID, func() error {
-		return d.config.Database.FinishRunCanceled(ctx, run.ID,
+	if err := d.finishWithRetry(ctx, run.ID, func(writeCtx context.Context) error {
+		return d.config.Database.FinishRunCanceled(writeCtx, run.ID,
 			store.SystemAudit("runs.canceled", store.AuditDetail{}), log)
 	}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
