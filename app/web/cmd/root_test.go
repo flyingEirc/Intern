@@ -30,7 +30,7 @@ func TestMigrateStatusBeforeInitialization(t *testing.T) {
 	cleanConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "metadata")
 	before := executeMigration(t, dir, "status")
-	if before.CurrentVersion != 0 || before.LatestVersion != 4 || before.PendingMigrations != 4 || before.InstanceID != "" {
+	if before.CurrentVersion != 0 || before.LatestVersion != 5 || before.PendingMigrations != 5 || before.InstanceID != "" {
 		t.Fatalf("initial status: %+v", before)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -42,7 +42,7 @@ func TestMigrateCommands(t *testing.T) {
 	cleanConfigEnv(t)
 	dir := filepath.Join(t.TempDir(), "metadata")
 	after := executeMigration(t, dir, "up")
-	if after.CurrentVersion != 4 || after.PendingMigrations != 0 || after.InstanceID == "" {
+	if after.CurrentVersion != 5 || after.PendingMigrations != 0 || after.InstanceID == "" {
 		t.Fatalf("migrated status: %+v", after)
 	}
 	repeated := executeMigration(t, dir, "up")

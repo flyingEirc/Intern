@@ -46,6 +46,10 @@ var auditActions = map[string]string{
 	"DELETE /api/v1/policies/:id":       "policies.delete",
 	"POST /api/v1/policies/:id/enable":  "policies.enable",
 	"POST /api/v1/policies/:id/disable": "policies.disable",
+
+	"POST /api/v1/policies/:id/runs":                         "runs.trigger",
+	"POST /api/v1/runs/:id/cancel":                           "runs.cancel",
+	"POST /api/v1/backups/:id/replicas/:repository_id/retry": "replicas.retry",
 }
 
 const auditContextKey = "intern.audit"

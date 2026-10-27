@@ -299,7 +299,7 @@ func startEngine(t *testing.T, f *fixture, jar http.CookieJar) *client {
 	}
 	logger := slog.New(slog.NewJSONHandler(f.logs, nil))
 	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth,
-		&resources.Service{Store: f.database, Settings: settings})
+		&resources.Service{Store: f.database, Settings: settings}, nil)
 	must(t, err)
 	srv := httptest.NewUnstartedServer(server.Handler(engine))
 	srv.StartTLS()

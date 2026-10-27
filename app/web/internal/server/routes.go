@@ -22,17 +22,23 @@ type StatusResponse struct {
 	Status string `json:"status"`
 }
 
+// DispatcherControl is the dispatch surface the HTTP layer may call. The
+// server package never touches the dispatcher's loops directly.
+
 // NewEngine serves every route with the deployment capabilities authentication
 // already carries. A deployment without a KEK or preflight settings still serves:
-// only the operations that need them answer 503.
+// only the operations that need them answer 503. The runs routes and the
+// authenticated SSE stream appear only when runs is non-nil.
 func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service) (*gin.Engine, error) {
 	return NewEngineWithResources(database, logger, trustedProxies, authentication,
-		&resources.Service{Store: authentication.Database})
+		&resources.Service{Store: authentication.Database}, nil)
 }
 
 // NewEngineWithResources is NewEngine with explicit preflight and credential
 // settings. Callers outside the server package supply them from configuration.
-func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service, service *resources.Service) (*gin.Engine, error) {
+// runs may be nil: the runs APIs are then absent (unit tests of the resource
+// surface rely on this; production serve always passes the dispatcher).
+func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service, service *resources.Service, runs DispatcherControl) (*gin.Engine, error) {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.HandleMethodNotAllowed = true
@@ -70,5 +76,9 @@ func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProx
 	})
 	registerAuth(engine, authentication, logger)
 	registerResources(engine, authentication.Database, service, middleware.Authorization{Service: authentication}, logger)
+	if runs != nil {
+		registerRuns(engine, authentication.Database, runs, authentication,
+			middleware.Authorization{Service: authentication}, logger)
+	}
 	return engine, nil
 }

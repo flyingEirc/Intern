@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/app/web/internal/dispatch"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/server"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
@@ -85,8 +86,24 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	// The dispatcher owns its own context so Stop can drain it even when the
+	// command context is already canceled: recovery runs before the workers
+	// start, and the bounded wait must exceed chain.Complete's 15s commit
+	// window so a finishing run commits before the database closes.
+	dispatcher, err := startDispatcher(command.Context(), database, settings, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if stopErr := dispatcher.Stop(); stopErr != nil {
+			// Workers outlived the bounded window: their state is reclaimed by
+			// the next start's recovery. This error never describes a
+			// completed backup, so it must not be swallowed.
+			retErr = errors.Join(retErr, stopErr)
+		}
+	}()
 	engine, err := server.NewEngineWithResources(database, logger, c.TrustedProxies, authentication,
-		&resources.Service{Store: database, Settings: settings})
+		&resources.Service{Store: database, Settings: settings}, dispatcher)
 	if err != nil {
 		return err
 	}
@@ -94,6 +111,15 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 		Listen: c.Listen, CertFile: c.TLS.CertFile, KeyFile: c.TLS.KeyFile,
 		ShutdownTimeout: c.ShutdownTimeout, TLSTerminatedByProxy: c.TLSTerminatedByProxy,
 	}
+	logStart(logger, &c, database)
+	srv := server.New(config, server.Handler(engine))
+	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
+	return server.Run(command.Context(), srv, config)
+}
+
+// logStart reports the listener shape, including the plaintext-proxy warning
+// that must not be silent: a direct client could otherwise bypass TLS.
+func logStart(logger *slog.Logger, c *configuration, database *store.Store) {
 	plainProxy := c.TLSTerminatedByProxy && c.TLS.CertFile == ""
 	logger.Info("starting server", "listen", c.Listen, "instance_id", database.InstanceID(),
 		"tls", c.TLS.CertFile != "", "tls_terminated_by_proxy", plainProxy)
@@ -101,9 +127,16 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 		logger.Warn("serving plain HTTP behind a TLS-terminating proxy; firewall this listener so clients cannot connect directly. This mode is not end-to-end TLS.",
 			"trusted_proxies", c.TrustedProxies)
 	}
-	srv := server.New(config, server.Handler(engine))
-	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
-	return server.Run(command.Context(), srv, config)
+}
+
+// startDispatcher launches the run queue with the process capabilities. It owns
+// its own context so Stop can drain the workers even when the command context is
+// already canceled.
+func startDispatcher(ctx context.Context, database *store.Store, settings resources.Settings, logger *slog.Logger) (*dispatch.Dispatcher, error) {
+	return dispatch.Start(ctx, dispatch.Config{
+		Database: database, Settings: settings, Logger: logger,
+		Preflight: &resources.Service{Store: database, Settings: settings},
+	})
 }
 
 func (a *application) migrateCommand() *cobra.Command {

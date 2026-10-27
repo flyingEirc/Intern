@@ -1,0 +1,374 @@
+package dispatch
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
+	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/physical"
+	"github.com/flyingEirc/Intern/internal/physical/chain"
+	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/storage/local"
+)
+
+// backupWorker claims and executes runs. Exactly one backup runs at a time:
+// this worker is the only claimer, and the claim UPDATE's status guard is the
+// concurrency control.
+func (d *Dispatcher) backupWorker(ctx context.Context) {
+	for {
+		if err := d.claimAndRun(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			d.logger.ErrorContext(ctx, "backup worker failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(workerPoll):
+		}
+	}
+}
+
+// claimAndRun claims one queued run and executes it to a terminal status.
+func (d *Dispatcher) claimAndRun(ctx context.Context) error {
+	run, claimed, err := d.config.Database.ClaimRun(ctx)
+	if err != nil || !claimed {
+		return err
+	}
+	d.logger.InfoContext(ctx, "run claimed", "run_id", run.ID, "kind", run.Kind,
+		"policy_id", run.PolicyID, "trigger", run.Trigger)
+	d.auditRun(ctx, "runs.claimed")
+	d.logRun(ctx, run.ID, "claimed")
+	return d.executeRun(ctx, run)
+}
+
+// auditRun writes one system audit row for a run lifecycle transition. The
+// audit does not depend on HTTP middleware.
+func (d *Dispatcher) auditRun(ctx context.Context, action string) {
+	entry := store.SystemAudit(action, store.AuditDetail{})
+	if err := d.config.Database.Audit(ctx, entry); err != nil {
+		d.logger.ErrorContext(ctx, "cannot write system audit", "action", action, "error", err)
+	}
+}
+
+// executeRun runs one claimed run through preflight, the physical chain and
+// the replication handoff. Every outcome is terminal: queued -> running ->
+// completed | failed | canceled.
+func (d *Dispatcher) executeRun(ctx context.Context, run store.Run) error {
+	policy, err := d.config.Database.Policy(ctx, run.PolicyID)
+	if err != nil {
+		return d.failRun(ctx, run, store.RunErrorBackupFailed, "policy_missing", err)
+	}
+	repo, cancelled, err := d.openRunRepository(ctx, run, policy)
+	if cancelled {
+		return err
+	}
+	if err != nil {
+		return d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
+	}
+	// The repository handle is read-only here; a close failure cannot change
+	// the run outcome that the rest of this function decides.
+	defer func() { _ = repo.Close() }() //nolint:errcheck // read-only handle, run outcome already decided
+
+	connection, identity, done, err := d.admit(ctx, run, policy)
+	if done {
+		return err
+	}
+	result, runErr := d.runChain(ctx, run, d.chainJob(run, policy, repo, identity, connection))
+
+	if admission := (*physicalstore.AdmissionError)(nil); errors.As(runErr, &admission) {
+		return d.admissionFailure(ctx, run, policy, admission)
+	}
+	if runErr != nil {
+		return d.failChain(ctx, run, runErr)
+	}
+	return d.completeRun(ctx, run, policy, result)
+}
+
+// failChain records a chain failure. A cancel request that arrived while the
+// chain was running wins only when the chain did not succeed.
+func (d *Dispatcher) failChain(ctx context.Context, run store.Run, runErr error) error {
+	if stored, err := d.config.Database.Run(ctx, run.ID); err == nil &&
+		stored.CancelRequested && ctx.Err() == nil {
+		return d.cancelRun(ctx, stored)
+	}
+	return d.failRun(ctx, run, store.RunErrorBackupFailed, "backup_failed", runErr)
+}
+
+// completeRun commits the durable success point, which wins over any cancel
+// request that arrived afterwards, then hands the backup to replication.
+func (d *Dispatcher) completeRun(ctx context.Context, run store.Run, policy store.Policy, result chain.Result) error {
+	if err := d.config.Database.FinishRunCompleted(ctx, run.ID, result.BackupID, result.ChainID,
+		result.PayloadSize, store.SystemAudit("runs.completed", store.AuditDetail{})); err != nil {
+		return err
+	}
+	d.logRun(ctx, run.ID, "completed")
+	d.logger.InfoContext(ctx, "run completed", "run_id", run.ID, "backup_id", result.BackupID,
+		"chain_id", result.ChainID, "payload_size", result.PayloadSize)
+	d.enqueueReplication(ctx, run, policy, result.BackupID)
+	return nil
+}
+
+// admit enforces the two frozen preconditions of a claimed run: the runtime is
+// configured (decision 9) and a fresh preflight passed (decision 10). done
+// reports that the run already reached a terminal failure and its write is the
+// returned error.
+func (d *Dispatcher) admit(ctx context.Context, run store.Run, policy store.Policy) (physical.Connection, physical.Identity, bool, error) {
+	// Decision 9: without the KEK, work root or XtraBackup executable the run
+	// was still created, and now fails visibly. Nothing is skipped silently.
+	if !d.config.Settings.Preflight() {
+		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorUnavailable, "unconfigured",
+			errors.New("backup runtime is not configured"))
+	}
+	if code, preflightErr := d.preflightRun(ctx, run, policy); code != "" {
+		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorPreflight, code, preflightErr)
+	}
+	connection, identity, err := d.preflightConnection(ctx, policy)
+	if err != nil {
+		return physical.Connection{}, physical.Identity{}, true, d.failRun(ctx, run, store.RunErrorPreflight, "identity_missing", err)
+	}
+	return connection, identity, false, nil
+}
+
+// openRunRepository resolves the policy's local repository for one run. A run
+// canceled before its claim is cancelled here rather than executed; report
+// cancelled=true with the terminal write already done.
+func (d *Dispatcher) openRunRepository(ctx context.Context, run store.Run, policy store.Policy) (*local.Repository, bool, error) {
+	// A queued run that received a cancel request before its claim is canceled
+	// without running. The claim skips such rows; this recheck closes the race
+	// where the request landed between the claim and this read.
+	stored, err := d.config.Database.Run(ctx, run.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if stored.CancelRequested {
+		return nil, true, d.cancelRun(ctx, stored)
+	}
+	repository, err := d.config.Database.Repository(ctx, policy.LocalRepositoryID)
+	if err != nil {
+		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_missing", err)
+	}
+	if repository.Kind != store.RepositoryLocal || repository.Local == nil {
+		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_kind",
+			errors.New("local repository required"))
+	}
+	repo, err := local.Open(repository.Local.Root)
+	if err != nil {
+		return nil, true, d.failRun(ctx, run, store.RunErrorBackupFailed, "repository_unavailable", err)
+	}
+	return repo, false, nil
+}
+
+// runChain runs one chain under the registered run context, so a cancel request
+// reaches the in-flight tool. The context is always unregistered afterwards.
+func (d *Dispatcher) runChain(ctx context.Context, run store.Run, job chain.Job) (chain.Result, error) {
+	runCtx, cancel := context.WithCancel(ctx)
+	d.mu.Lock()
+	d.runningCancel = cancel
+	d.runningRunID = run.ID
+	d.mu.Unlock()
+	result, err := chain.Run(runCtx, job)
+	cancel()
+	d.mu.Lock()
+	d.runningCancel = nil
+	d.runningRunID = ""
+	d.mu.Unlock()
+	return result, err
+}
+
+// preflightRun runs the fresh preflight and records it on the source. It
+// returns the stable failure code, empty when the run may proceed, and the
+// underlying error for the run record.
+func (d *Dispatcher) preflightRun(ctx context.Context, run store.Run, policy store.Policy) (string, error) {
+	service := d.config.Preflight
+	if service == nil {
+		service = &resources.Service{Store: d.config.Database, Settings: d.config.Settings}
+	}
+	outcome, err := service.PreflightSource(ctx, policy.SourceID, policy.LocalRepositoryID)
+	switch {
+	case errors.Is(err, resources.ErrUnavailable), errors.Is(err, store.ErrUnavailable):
+		return "unconfigured", err
+	case errors.Is(err, store.ErrNotFound):
+		return "source_missing", err
+	case err != nil:
+		return "preflight_failed", err
+	}
+	record := outcome.Record()
+	if _, err := d.config.Database.RecordSourcePreflight(ctx, policy.SourceID, record,
+		store.SystemAudit("sources.preflight", store.AuditDetail{})); err != nil {
+		d.logger.ErrorContext(ctx, "cannot record preflight", "run_id", run.ID, "error", err)
+	}
+	d.logRun(ctx, run.ID, "preflight")
+	if outcome.OK() {
+		return "", nil
+	}
+	code := "preflight_failed"
+	if outcome.Failure != nil && outcome.Failure.Code != "" {
+		code = outcome.Failure.Code
+	}
+	return code, fmt.Errorf("preflight failed")
+}
+
+// admissionFailure implements decision 10: an AdmissionError with RequiresFull
+// on an incremental queues one coalesced full with the admission idempotency
+// key, and the incremental run fails with error_class requires_full.
+func (d *Dispatcher) admissionFailure(ctx context.Context, run store.Run, policy store.Policy, admission *physicalstore.AdmissionError) error {
+	if admission.RequiresFull && run.Kind == store.RunKindIncremental {
+		scheduledAt := d.now()
+		if _, err := d.config.Database.CreateRun(ctx, store.RunInput{
+			PolicyID: policy.ID, SourceID: policy.SourceID, Kind: store.RunKindFull, Trigger: store.RunTriggerAdmission,
+			IdempotencyKey: admissionKey(policy.ID, scheduledAt), RequestHash: cronRequestHash(policy, store.RunKindFull),
+			ScheduledAt: scheduledAt,
+		}); err != nil && !errors.Is(err, store.ErrConflict) {
+			d.logger.ErrorContext(ctx, "cannot queue admission full", "run_id", run.ID, "error", err)
+		}
+		return d.failRun(ctx, run, store.RunErrorRequiresFull, admission.Code, admission)
+	}
+	return d.failRun(ctx, run, store.RunErrorBackupFailed, "admission_failed", admission)
+}
+
+// chainJob builds the physical chain Job for one run. validateJob rechecks
+// the KEK against the work root; the repository-root recheck happens through
+// the preflight and the local repository open.
+func (d *Dispatcher) chainJob(run store.Run, policy store.Policy, repo *local.Repository,
+	identity physical.Identity, connection physical.Connection,
+) chain.Job {
+	return chain.Job{
+		Store: physicalstore.New(d.config.Database.DB()), Repo: repo,
+		Binary: d.config.Settings.XtrabackupPath, WorkRoot: d.config.Settings.WorkRoot,
+		Connection: connection,
+		Identity:   identity, ToolVersion: identity.Version,
+		InstanceID: d.config.Database.InstanceID(), SourceID: policy.SourceID,
+		Kind: run.Kind, MaxChainLength: int(policy.MaxChainLength),
+		KeyFile: d.config.Settings.KeyFile, Parallel: int(policy.Parallel),
+		Throttle: int(policy.Throttle), PageTracking: policy.PageTracking, Now: d.now,
+	}
+}
+
+// preflightConnection rebuilds the live MySQL connection and the server
+// identity the fresh preflight just recorded. The sealed password is unsealed
+// only in memory for the duration of the run; the identity keeps the
+// admission request and the preflight on the same live server.
+func (d *Dispatcher) preflightConnection(ctx context.Context, policy store.Policy) (physical.Connection, physical.Identity, error) {
+	source, err := d.config.Database.Source(ctx, policy.SourceID)
+	if err != nil {
+		return physical.Connection{}, physical.Identity{}, err
+	}
+	if source.ServerUUID == nil || source.ServerVersion == nil {
+		return physical.Connection{}, physical.Identity{}, errors.New("preflight did not record a server identity")
+	}
+	settings := d.config.Settings
+	if !settings.Credentials() {
+		return physical.Connection{}, physical.Identity{}, resources.ErrUnavailable
+	}
+	password, err := d.config.Database.SourceSecret(ctx, source.ID, settings.Sealer)
+	if err != nil {
+		return physical.Connection{}, physical.Identity{}, err
+	}
+	connection := physical.Connection{
+		Socket: source.Socket, DataDir: source.Datadir, Username: source.Username, Password: string(password),
+	}
+	return connection, physical.Identity{UUID: *source.ServerUUID, Version: *source.ServerVersion}, nil
+}
+
+// failRun records a failed run with its class and code. It is the single
+// failure exit of executeRun.
+func (d *Dispatcher) failRun(ctx context.Context, run store.Run, class, code string, cause error) error {
+	logger := d.logger
+	if cause != nil {
+		logger = logger.With(slog.String("cause", cause.Error()))
+	}
+	if err := d.config.Database.FinishRunFailed(ctx, run.ID, class, code,
+		store.SystemAudit("runs.failed", store.AuditDetail{})); err != nil {
+		logger.ErrorContext(ctx, "cannot record failed run", "run_id", run.ID, "record_error", err)
+		return err
+	}
+	logger.ErrorContext(ctx, "run failed", "run_id", run.ID, "class", class, "code", code)
+	d.logRun(ctx, run.ID, "failed")
+	return nil
+}
+
+// cancelRun implements the frozen cancel semantics: the cancel request wins
+// only when the physical chain did not succeed. A nil chain.Run keeps the run
+// completed; a cancel never deletes a completed backup.
+func (d *Dispatcher) cancelRun(ctx context.Context, run store.Run) error {
+	if err := d.config.Database.FinishRunCanceled(ctx, run.ID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{})); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return nil
+		}
+		return err
+	}
+	d.logger.InfoContext(ctx, "run canceled", "run_id", run.ID)
+	d.logRun(ctx, run.ID, "canceled")
+	return nil
+}
+
+// enqueueReplication is the handoff: after a local run completes, the
+// dispatcher enqueues that backup on the policy's replica repository. The
+// replicas table stays the only replication queue.
+func (d *Dispatcher) enqueueReplication(ctx context.Context, run store.Run, policy store.Policy, backupID string) {
+	if policy.ReplicaRepositoryID == nil {
+		return
+	}
+	replicator := d.replicatorFor(*policy.ReplicaRepositoryID)
+	if replicator == nil {
+		return
+	}
+	if err := replicator.Enqueue(ctx, backupID); err != nil {
+		d.logger.ErrorContext(ctx, "cannot enqueue replication", "run_id", run.ID,
+			"backup_id", backupID, "repository_id", *policy.ReplicaRepositoryID, "error", err)
+		return
+	}
+	d.logRun(ctx, run.ID, "replication_enqueued")
+}
+
+// RequestCancel asks a run to stop. A queued run becomes canceled without
+// running; a running run's context is canceled, and the cancel only wins when
+// the physical chain did not succeed.
+func (d *Dispatcher) RequestCancel(ctx context.Context, runID string) error {
+	run, err := d.config.Database.Run(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status == store.RunStatusQueued {
+		changed, err := d.config.Database.CancelQueuedRun(ctx, run.ID,
+			store.SystemAudit("runs.canceled", store.AuditDetail{}))
+		if err != nil {
+			return err
+		}
+		if changed {
+			d.logRun(ctx, run.ID, "canceled")
+			return nil
+		}
+		// A claim won the race; fall through to the running-run path.
+	}
+	if err := d.config.Database.RequestCancel(ctx, run.ID,
+		store.SystemAudit("runs.cancel_requested", store.AuditDetail{})); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	cancel, active := d.runningCancel, d.runningRunID == runID
+	d.mu.Unlock()
+	if active && cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+// logRun writes one fixed-format, secret-safe event into the bounded run log.
+// A full log drops events after its final truncated marker and never blocks
+// the worker beyond its short deadline.
+func (d *Dispatcher) logRun(ctx context.Context, runID, event string) {
+	logger := d.config.Database.RunLoggerFor(runID)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runLogCapDeadline)
+	defer cancel()
+	if err := writeRunEvent(writeCtx, logger, event); err != nil {
+		d.logger.ErrorContext(ctx, "cannot append run log", "run_id", runID, "error", err)
+	}
+}

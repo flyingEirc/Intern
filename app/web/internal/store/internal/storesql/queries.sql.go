@@ -10,6 +10,42 @@ import (
 	"database/sql"
 )
 
+const cancelQueuedRun = `-- name: CancelQueuedRun :execrows
+UPDATE runs SET status = 'canceled', finished_at = ?1
+WHERE id = ?2 AND status = 'queued' AND cancel_requested = 0
+`
+
+type CancelQueuedRunParams struct {
+	FinishedAt sql.NullString
+	ID         string
+}
+
+func (q *Queries) CancelQueuedRun(ctx context.Context, arg CancelQueuedRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cancelQueuedRun, arg.FinishedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const cancelRunningRun = `-- name: CancelRunningRun :execrows
+UPDATE runs SET status = 'canceled', finished_at = ?1
+WHERE id = ?2 AND status = 'running'
+`
+
+type CancelRunningRunParams struct {
+	FinishedAt sql.NullString
+	ID         string
+}
+
+func (q *Queries) CancelRunningRun(ctx context.Context, arg CancelRunningRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cancelRunningRun, arg.FinishedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const changePassword = `-- name: ChangePassword :one
 UPDATE users SET password_hash = ?, session_epoch = session_epoch + 1, updated_at = ?
 WHERE id = ? AND session_epoch = ? AND disabled = 0 RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
@@ -43,6 +79,46 @@ func (q *Queries) ChangePassword(ctx context.Context, arg ChangePasswordParams) 
 	return i, err
 }
 
+const claimNextRun = `-- name: ClaimNextRun :one
+UPDATE runs SET status = 'running', started_at = ?1
+WHERE id = (
+    SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
+    ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
+) AND status = 'queued'
+RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id
+`
+
+// One claimant at a time holds the database write lock, so the UPDATE ... WHERE
+// status = 'queued' clause is the concurrency control: the loser's statement
+// runs after the winner's commit and no longer matches. No result means no
+// claimable run.
+func (q *Queries) ClaimNextRun(ctx context.Context, startedAt sql.NullString) (Run, error) {
+	row := q.db.QueryRowContext(ctx, claimNextRun, startedAt)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PolicyID,
+		&i.SourceID,
+		&i.Kind,
+		&i.Trigger,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Status,
+		&i.ScheduledAt,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.BackupID,
+		&i.ChainID,
+		&i.PayloadSize,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.CancelRequested,
+		&i.ActorID,
+	)
+	return i, err
+}
+
 const commitSession = `-- name: CommitSession :exec
 INSERT INTO sessions (token, data, expiry) VALUES (?, ?, ?)
 ON CONFLICT (token) DO UPDATE SET data = excluded.data, expiry = excluded.expiry
@@ -57,6 +133,35 @@ type CommitSessionParams struct {
 func (q *Queries) CommitSession(ctx context.Context, arg CommitSessionParams) error {
 	_, err := q.db.ExecContext(ctx, commitSession, arg.Token, arg.Data, arg.Expiry)
 	return err
+}
+
+const completeRun = `-- name: CompleteRun :execrows
+UPDATE runs SET
+    status = 'completed', finished_at = ?1, backup_id = ?2,
+    chain_id = ?3, payload_size = ?4
+WHERE id = ?5 AND status = 'running'
+`
+
+type CompleteRunParams struct {
+	FinishedAt  sql.NullString
+	BackupID    sql.NullString
+	ChainID     sql.NullString
+	PayloadSize sql.NullInt64
+	ID          string
+}
+
+func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeRun,
+		arg.FinishedAt,
+		arg.BackupID,
+		arg.ChainID,
+		arg.PayloadSize,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const countPoliciesByRepository = `-- name: CountPoliciesByRepository :one
@@ -81,12 +186,23 @@ func (q *Queries) CountPoliciesBySource(ctx context.Context, sourceID string) (i
 	return count, err
 }
 
+const countRunLogs = `-- name: CountRunLogs :one
+SELECT COUNT(*) FROM run_logs WHERE run_id = ?
+`
+
+func (q *Queries) CountRunLogs(ctx context.Context, runID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunLogs, runID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createPolicy = `-- name: CreatePolicy :one
 INSERT INTO policies (
     id, name, source_id, local_repository_id, replica_repository_id, full_cron,
     incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level,
     page_tracking, enabled, last_preflight_json, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type CreatePolicyParams struct {
@@ -148,6 +264,8 @@ func (q *Queries) CreatePolicy(ctx context.Context, arg CreatePolicyParams) (Pol
 		&i.LastPreflightJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NextFullAt,
+		&i.NextIncrementalAt,
 	)
 	return i, err
 }
@@ -328,6 +446,131 @@ func (q *Queries) DeleteSource(ctx context.Context, id string) error {
 	return err
 }
 
+const duePolicies = `-- name: DuePolicies :many
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies
+WHERE enabled = 1 AND (next_full_at IS NOT NULL AND next_full_at <= ?1
+    OR next_incremental_at IS NOT NULL AND next_incremental_at <= ?1)
+`
+
+// The scheduler looks at one column at a time; a NULL value means the schedule
+// was never initialized (for example a row created before migration 00005).
+func (q *Queries) DuePolicies(ctx context.Context, due sql.NullString) ([]Policy, error) {
+	rows, err := q.db.QueryContext(ctx, duePolicies, due)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Policy{}
+	for rows.Next() {
+		var i Policy
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.SourceID,
+			&i.LocalRepositoryID,
+			&i.ReplicaRepositoryID,
+			&i.FullCron,
+			&i.IncrementalCron,
+			&i.Timezone,
+			&i.MaxChainLength,
+			&i.Parallel,
+			&i.Throttle,
+			&i.ZstdLevel,
+			&i.PageTracking,
+			&i.Enabled,
+			&i.LastPreflightJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.NextFullAt,
+			&i.NextIncrementalAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const enabledPolicies = `-- name: EnabledPolicies :many
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE enabled = 1 ORDER BY id
+`
+
+func (q *Queries) EnabledPolicies(ctx context.Context) ([]Policy, error) {
+	rows, err := q.db.QueryContext(ctx, enabledPolicies)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Policy{}
+	for rows.Next() {
+		var i Policy
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.SourceID,
+			&i.LocalRepositoryID,
+			&i.ReplicaRepositoryID,
+			&i.FullCron,
+			&i.IncrementalCron,
+			&i.Timezone,
+			&i.MaxChainLength,
+			&i.Parallel,
+			&i.Throttle,
+			&i.ZstdLevel,
+			&i.PageTracking,
+			&i.Enabled,
+			&i.LastPreflightJson,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.NextFullAt,
+			&i.NextIncrementalAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const failRun = `-- name: FailRun :execrows
+UPDATE runs SET
+    status = 'failed', finished_at = ?1,
+    error_class = ?2, error_code = ?3
+WHERE id = ?4 AND status = 'running'
+`
+
+type FailRunParams struct {
+	FinishedAt sql.NullString
+	ErrorClass sql.NullString
+	ErrorCode  sql.NullString
+	ID         string
+}
+
+func (q *Queries) FailRun(ctx context.Context, arg FailRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failRun,
+		arg.FinishedAt,
+		arg.ErrorClass,
+		arg.ErrorCode,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const findSession = `-- name: FindSession :one
 SELECT data FROM sessions WHERE token = ? AND expiry > ?
 `
@@ -361,7 +604,7 @@ func (q *Queries) GetInstance(ctx context.Context) (GetInstanceRow, error) {
 }
 
 const getPolicy = `-- name: GetPolicy :one
-SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at FROM policies WHERE id = ?
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE id = ?
 `
 
 func (q *Queries) GetPolicy(ctx context.Context, id string) (Policy, error) {
@@ -385,7 +628,25 @@ func (q *Queries) GetPolicy(ctx context.Context, id string) (Policy, error) {
 		&i.LastPreflightJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NextFullAt,
+		&i.NextIncrementalAt,
 	)
+	return i, err
+}
+
+const getPolicySchedule = `-- name: GetPolicySchedule :one
+SELECT next_full_at, next_incremental_at FROM policies WHERE id = ?
+`
+
+type GetPolicyScheduleRow struct {
+	NextFullAt        sql.NullString
+	NextIncrementalAt sql.NullString
+}
+
+func (q *Queries) GetPolicySchedule(ctx context.Context, id string) (GetPolicyScheduleRow, error) {
+	row := q.db.QueryRowContext(ctx, getPolicySchedule, id)
+	var i GetPolicyScheduleRow
+	err := row.Scan(&i.NextFullAt, &i.NextIncrementalAt)
 	return i, err
 }
 
@@ -405,6 +666,91 @@ func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, err
 		&i.TlsMode,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRun = `-- name: GetRun :one
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE id = ?
+`
+
+func (q *Queries) GetRun(ctx context.Context, id string) (Run, error) {
+	row := q.db.QueryRowContext(ctx, getRun, id)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PolicyID,
+		&i.SourceID,
+		&i.Kind,
+		&i.Trigger,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Status,
+		&i.ScheduledAt,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.BackupID,
+		&i.ChainID,
+		&i.PayloadSize,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.CancelRequested,
+		&i.ActorID,
+	)
+	return i, err
+}
+
+const getRunByIdempotencyKey = `-- name: GetRunByIdempotencyKey :one
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE idempotency_key = ?
+`
+
+func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey string) (Run, error) {
+	row := q.db.QueryRowContext(ctx, getRunByIdempotencyKey, idempotencyKey)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PolicyID,
+		&i.SourceID,
+		&i.Kind,
+		&i.Trigger,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Status,
+		&i.ScheduledAt,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.BackupID,
+		&i.ChainID,
+		&i.PayloadSize,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.CancelRequested,
+		&i.ActorID,
+	)
+	return i, err
+}
+
+const getRunLog = `-- name: GetRunLog :one
+SELECT run_id, seq, ts, level, event, message FROM run_logs WHERE run_id = ? AND seq = ?
+`
+
+type GetRunLogParams struct {
+	RunID string
+	Seq   int64
+}
+
+func (q *Queries) GetRunLog(ctx context.Context, arg GetRunLogParams) (RunLog, error) {
+	row := q.db.QueryRowContext(ctx, getRunLog, arg.RunID, arg.Seq)
+	var i RunLog
+	err := row.Scan(
+		&i.RunID,
+		&i.Seq,
+		&i.Ts,
+		&i.Level,
+		&i.Event,
+		&i.Message,
 	)
 	return i, err
 }
@@ -537,6 +883,136 @@ func (q *Queries) InsertInstance(ctx context.Context, arg InsertInstanceParams) 
 	return err
 }
 
+const insertRun = `-- name: InsertRun :one
+INSERT INTO runs (
+    id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash,
+    status, scheduled_at, created_at, actor_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?) RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id
+`
+
+type InsertRunParams struct {
+	ID             string
+	PolicyID       string
+	SourceID       string
+	Kind           string
+	Trigger        string
+	IdempotencyKey string
+	RequestHash    string
+	ScheduledAt    string
+	CreatedAt      string
+	ActorID        sql.NullString
+}
+
+func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (Run, error) {
+	row := q.db.QueryRowContext(ctx, insertRun,
+		arg.ID,
+		arg.PolicyID,
+		arg.SourceID,
+		arg.Kind,
+		arg.Trigger,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+		arg.ScheduledAt,
+		arg.CreatedAt,
+		arg.ActorID,
+	)
+	var i Run
+	err := row.Scan(
+		&i.ID,
+		&i.PolicyID,
+		&i.SourceID,
+		&i.Kind,
+		&i.Trigger,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.Status,
+		&i.ScheduledAt,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.BackupID,
+		&i.ChainID,
+		&i.PayloadSize,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.CancelRequested,
+		&i.ActorID,
+	)
+	return i, err
+}
+
+const insertRunLog = `-- name: InsertRunLog :exec
+INSERT INTO run_logs (run_id, seq, ts, level, event, message) VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type InsertRunLogParams struct {
+	RunID   string
+	Seq     int64
+	Ts      string
+	Level   string
+	Event   string
+	Message string
+}
+
+func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) error {
+	_, err := q.db.ExecContext(ctx, insertRunLog,
+		arg.RunID,
+		arg.Seq,
+		arg.Ts,
+		arg.Level,
+		arg.Event,
+		arg.Message,
+	)
+	return err
+}
+
+const interruptedRuns = `-- name: InterruptedRuns :many
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs WHERE status = 'running'
+`
+
+func (q *Queries) InterruptedRuns(ctx context.Context) ([]Run, error) {
+	rows, err := q.db.QueryContext(ctx, interruptedRuns)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Run{}
+	for rows.Next() {
+		var i Run
+		if err := rows.Scan(
+			&i.ID,
+			&i.PolicyID,
+			&i.SourceID,
+			&i.Kind,
+			&i.Trigger,
+			&i.IdempotencyKey,
+			&i.RequestHash,
+			&i.Status,
+			&i.ScheduledAt,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.BackupID,
+			&i.ChainID,
+			&i.PayloadSize,
+			&i.ErrorClass,
+			&i.ErrorCode,
+			&i.CancelRequested,
+			&i.ActorID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAuditLogs = `-- name: ListAuditLogs :many
 SELECT id, ts, actor_type, actor_id, actor_name, "action", resource_type, resource_id, ip, result, status, request_id, detail_json FROM audit_logs WHERE id < ? ORDER BY id DESC LIMIT ?
 `
@@ -584,7 +1060,7 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 }
 
 const listPolicies = `-- name: ListPolicies :many
-SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at FROM policies WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
 ORDER BY id DESC LIMIT ?2
 `
 
@@ -620,6 +1096,8 @@ func (q *Queries) ListPolicies(ctx context.Context, arg ListPoliciesParams) ([]P
 			&i.LastPreflightJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.NextFullAt,
+			&i.NextIncrementalAt,
 		); err != nil {
 			return nil, err
 		}
@@ -662,6 +1140,72 @@ func (q *Queries) ListRepositories(ctx context.Context, arg ListRepositoriesPara
 			&i.TlsMode,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRuns = `-- name: ListRuns :many
+SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id FROM runs
+WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+    AND (CAST(?2 AS TEXT) = '' OR policy_id = CAST(?2 AS TEXT))
+    AND (CAST(?3 AS TEXT) = '' OR source_id = CAST(?3 AS TEXT))
+    AND (CAST(?4 AS TEXT) = '' OR status = CAST(?4 AS TEXT))
+ORDER BY id DESC LIMIT ?5
+`
+
+type ListRunsParams struct {
+	Before   string
+	PolicyID string
+	SourceID string
+	Status   string
+	RowLimit int64
+}
+
+func (q *Queries) ListRuns(ctx context.Context, arg ListRunsParams) ([]Run, error) {
+	rows, err := q.db.QueryContext(ctx, listRuns,
+		arg.Before,
+		arg.PolicyID,
+		arg.SourceID,
+		arg.Status,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Run{}
+	for rows.Next() {
+		var i Run
+		if err := rows.Scan(
+			&i.ID,
+			&i.PolicyID,
+			&i.SourceID,
+			&i.Kind,
+			&i.Trigger,
+			&i.IdempotencyKey,
+			&i.RequestHash,
+			&i.Status,
+			&i.ScheduledAt,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.BackupID,
+			&i.ChainID,
+			&i.PayloadSize,
+			&i.ErrorClass,
+			&i.ErrorCode,
+			&i.CancelRequested,
+			&i.ActorID,
 		); err != nil {
 			return nil, err
 		}
@@ -757,6 +1301,17 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const maxRunLogSeq = `-- name: MaxRunLogSeq :one
+SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM run_logs WHERE run_id = ?
+`
+
+func (q *Queries) MaxRunLogSeq(ctx context.Context, runID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, maxRunLogSeq, runID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const recordSourcePreflight = `-- name: RecordSourcePreflight :one
 UPDATE sources SET
     server_uuid = COALESCE(?1, server_uuid),
@@ -799,6 +1354,48 @@ func (q *Queries) RecordSourcePreflight(ctx context.Context, arg RecordSourcePre
 	return i, err
 }
 
+const replaceRunLog = `-- name: ReplaceRunLog :execrows
+UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?
+WHERE run_id = ? AND seq = ?
+`
+
+type ReplaceRunLogParams struct {
+	Ts      string
+	Level   string
+	Event   string
+	Message string
+	RunID   string
+	Seq     int64
+}
+
+func (q *Queries) ReplaceRunLog(ctx context.Context, arg ReplaceRunLogParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, replaceRunLog,
+		arg.Ts,
+		arg.Level,
+		arg.Event,
+		arg.Message,
+		arg.RunID,
+		arg.Seq,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const requestCancel = `-- name: RequestCancel :execrows
+UPDATE runs SET cancel_requested = 1
+WHERE id = ?1 AND status IN ('queued', 'running')
+`
+
+func (q *Queries) RequestCancel(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requestCancel, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeUserSessions = `-- name: RevokeUserSessions :one
 UPDATE users SET session_epoch = session_epoch + 1, updated_at = ? WHERE id = ? RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
 `
@@ -824,12 +1421,52 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 	return i, err
 }
 
+const runLogsAfter = `-- name: RunLogsAfter :many
+SELECT run_id, seq, ts, level, event, message FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?
+`
+
+type RunLogsAfterParams struct {
+	RunID string
+	Seq   int64
+	Limit int64
+}
+
+func (q *Queries) RunLogsAfter(ctx context.Context, arg RunLogsAfterParams) ([]RunLog, error) {
+	rows, err := q.db.QueryContext(ctx, runLogsAfter, arg.RunID, arg.Seq, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RunLog{}
+	for rows.Next() {
+		var i RunLog
+		if err := rows.Scan(
+			&i.RunID,
+			&i.Seq,
+			&i.Ts,
+			&i.Level,
+			&i.Event,
+			&i.Message,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setPolicyEnabled = `-- name: SetPolicyEnabled :one
 UPDATE policies SET
     enabled = ?1,
     last_preflight_json = COALESCE(?2, last_preflight_json),
     updated_at = ?3
-WHERE id = ?4 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+WHERE id = ?4 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type SetPolicyEnabledParams struct {
@@ -866,7 +1503,41 @@ func (q *Queries) SetPolicyEnabled(ctx context.Context, arg SetPolicyEnabledPara
 		&i.LastPreflightJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NextFullAt,
+		&i.NextIncrementalAt,
 	)
+	return i, err
+}
+
+const setPolicySchedule = `-- name: SetPolicySchedule :one
+UPDATE policies SET
+    next_full_at = ?1,
+    next_incremental_at = ?2,
+    updated_at = ?3
+WHERE id = ?4 RETURNING next_full_at, next_incremental_at
+`
+
+type SetPolicyScheduleParams struct {
+	NextFullAt        sql.NullString
+	NextIncrementalAt sql.NullString
+	UpdatedAt         string
+	ID                string
+}
+
+type SetPolicyScheduleRow struct {
+	NextFullAt        sql.NullString
+	NextIncrementalAt sql.NullString
+}
+
+func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicyScheduleParams) (SetPolicyScheduleRow, error) {
+	row := q.db.QueryRowContext(ctx, setPolicySchedule,
+		arg.NextFullAt,
+		arg.NextIncrementalAt,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i SetPolicyScheduleRow
+	err := row.Scan(&i.NextFullAt, &i.NextIncrementalAt)
 	return i, err
 }
 
@@ -903,7 +1574,7 @@ UPDATE policies SET
     enabled = ?13,
     last_preflight_json = ?14,
     updated_at = ?15
-WHERE id = ?16 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at
+WHERE id = ?16 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type UpdatePolicyParams struct {
@@ -964,6 +1635,8 @@ func (q *Queries) UpdatePolicy(ctx context.Context, arg UpdatePolicyParams) (Pol
 		&i.LastPreflightJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.NextFullAt,
+		&i.NextIncrementalAt,
 	)
 	return i, err
 }

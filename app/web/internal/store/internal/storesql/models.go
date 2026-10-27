@@ -48,6 +48,8 @@ type Policy struct {
 	LastPreflightJson   sql.NullString
 	CreatedAt           string
 	UpdatedAt           string
+	NextFullAt          sql.NullString
+	NextIncrementalAt   sql.NullString
 }
 
 type Repository struct {
@@ -59,6 +61,37 @@ type Repository struct {
 	TlsMode          string
 	CreatedAt        string
 	UpdatedAt        string
+}
+
+type Run struct {
+	ID              string
+	PolicyID        string
+	SourceID        string
+	Kind            string
+	Trigger         string
+	IdempotencyKey  string
+	RequestHash     string
+	Status          string
+	ScheduledAt     string
+	CreatedAt       string
+	StartedAt       sql.NullString
+	FinishedAt      sql.NullString
+	BackupID        sql.NullString
+	ChainID         sql.NullString
+	PayloadSize     sql.NullInt64
+	ErrorClass      sql.NullString
+	ErrorCode       sql.NullString
+	CancelRequested int64
+	ActorID         sql.NullString
+}
+
+type RunLog struct {
+	RunID   string
+	Seq     int64
+	Ts      string
+	Level   string
+	Event   string
+	Message string
 }
 
 type Session struct {

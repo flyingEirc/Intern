@@ -782,11 +782,20 @@ func (s *Store) Policies(ctx context.Context, before string, limit int) ([]Polic
 
 // DeletePolicy removes a policy. No other table references it.
 func (s *Store) DeletePolicy(ctx context.Context, id string, entry AuditLog) error {
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTxDB(ctx, func(q *storesql.Queries, tx *sql.Tx) error {
 		if _, err := q.GetPolicy(ctx, id); err != nil {
 			return resourceError(err)
 		}
-		if err := q.DeletePolicy(ctx, id); err != nil {
+		// runs.policy_id references policies, so a policy with run history is
+		// refused rather than turning the foreign-key violation into a 500.
+		runs, err := countRows(ctx, tx, `SELECT COUNT(*) FROM runs WHERE policy_id = ?`, id)
+		if err != nil {
+			return err
+		}
+		if runs != 0 {
+			return ErrReferenced
+		}
+		if err = q.DeletePolicy(ctx, id); err != nil {
 			return resourceError(err)
 		}
 		return insertSuccessAudit(ctx, q, entry, "policy", id)

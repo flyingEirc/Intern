@@ -27,9 +27,48 @@ func CurrentUser(c *gin.Context) store.User {
 
 func SetCurrentUser(c *gin.Context, user store.User) { c.Set(currentUserKey, user) }
 
+// Authenticate is the exported form of the shared authenticated load for the
+// SSE stream group, which cannot sit behind RequirePermission's buffered
+// writer assumptions. It returns the loaded user, or false after writing the
+// JSON response.
+func (a Authorization) Authenticate(c *gin.Context) (store.User, bool) {
+	return a.authenticate(c)
+}
+
+// authenticate is the shared authenticated-load path: it performs the same scs
+// load, user, disabled and epoch checks for both the buffered JSON routes and
+// the unbuffered SSE stream group, so the two cannot drift. It returns the
+// loaded user, or false after writing the JSON response (401 on missing,
+// destroyed or revoked sessions, 500 on store failures).
+func (a Authorization) authenticate(c *gin.Context) (store.User, bool) {
+	ctx := c.Request.Context()
+	id := a.Service.Sessions.GetString(ctx, "user_id")
+	if id == "" {
+		render.Error(c, http.StatusUnauthorized, render.Unauthorized, "Authentication required")
+		return store.User{}, false
+	}
+	user, err := a.Service.Database.User(ctx, id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot load session user")
+		return store.User{}, false
+	}
+	if errors.Is(err, store.ErrNotFound) || user.Disabled || user.SessionEpoch != a.Service.Sessions.GetInt64(ctx, "epoch") {
+		if err = a.Service.Sessions.Destroy(ctx); err != nil {
+			render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot destroy session")
+			return store.User{}, false
+		}
+		render.Error(c, http.StatusUnauthorized, render.Unauthorized, "Authentication required")
+		return store.User{}, false
+	}
+	SetCurrentUser(c, user)
+	return user, true
+}
+
+// RequirePermission authenticates with the shared load path and then checks one
+// permission from the frozen Stage C matrix.
 func (a Authorization) RequirePermission(permission string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !a.authenticate(c) {
+		if _, ok := a.authenticate(c); !ok {
 			return
 		}
 		if !auth.HasPermission(CurrentUser(c).Role, permission) {
@@ -38,28 +77,4 @@ func (a Authorization) RequirePermission(permission string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
-}
-
-func (a Authorization) authenticate(c *gin.Context) bool {
-	ctx := c.Request.Context()
-	id := a.Service.Sessions.GetString(ctx, "user_id")
-	if id == "" {
-		render.Error(c, http.StatusUnauthorized, render.Unauthorized, "Authentication required")
-		return false
-	}
-	user, err := a.Service.Database.User(ctx, id)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot load session user")
-		return false
-	}
-	if errors.Is(err, store.ErrNotFound) || user.Disabled || user.SessionEpoch != a.Service.Sessions.GetInt64(ctx, "epoch") {
-		if err = a.Service.Sessions.Destroy(ctx); err != nil {
-			render.Error(c, http.StatusInternalServerError, render.Internal, "Cannot destroy session")
-			return false
-		}
-		render.Error(c, http.StatusUnauthorized, render.Unauthorized, "Authentication required")
-		return false
-	}
-	SetCurrentUser(c, user)
-	return true
 }

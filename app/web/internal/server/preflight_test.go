@@ -52,7 +52,7 @@ func newPreflightFixture(t *testing.T) *preflightFixture {
 	f.keyFile = keyFile
 	f.sealer = sealer
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: settings})
+		&resources.Service{Store: f.database, Settings: settings}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -250,7 +250,7 @@ func TestLocalRepositoryRootMustNotContainKEK(t *testing.T) {
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
 		&resources.Service{Store: f.database, Settings: resources.Settings{
 			Sealer: sealer, KeyFile: keyFile, MetadataDir: f.dir,
-		}})
+		}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

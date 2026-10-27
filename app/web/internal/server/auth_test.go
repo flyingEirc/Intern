@@ -49,7 +49,7 @@ func newAuthFixture(t *testing.T) *authFixture {
 	settings := fixture.resourceSettings(t)
 	fixture.sealer = settings.Sealer
 	engine, err := NewEngineWithResources(fixture.database, slog.New(slog.NewJSONHandler(&fixture.logs, nil)), nil, fixture.service,
-		&resources.Service{Store: fixture.database, Settings: settings})
+		&resources.Service{Store: fixture.database, Settings: settings}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

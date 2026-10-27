@@ -101,7 +101,7 @@ func TestExclusiveOwnershipAndReadOnlyStatus(t *testing.T) {
 		t.Fatalf("second writer: %v", err)
 	}
 	status, err := ReadStatus(t.Context(), dir)
-	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != 4 || status.LatestVersion != 4 || status.PendingMigrations != 0 {
+	if err != nil || status.InstanceID != s.InstanceID() || status.CurrentVersion != 5 || status.LatestVersion != 5 || status.PendingMigrations != 0 {
 		t.Fatalf("status under writer lock: %+v, %v", status, err)
 	}
 	if err = s.Close(); err != nil {
@@ -190,7 +190,7 @@ func TestReadyRequiresLiveExactVersion(t *testing.T) {
 	if err := s.Ready(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 4"); err != nil {
+	if _, err := s.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 5"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Ready(t.Context()); err == nil {

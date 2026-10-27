@@ -1,0 +1,605 @@
+package server
+
+import (
+	"bufio"
+	"encoding/json/v2"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/app/web/internal/middleware"
+	"github.com/flyingEirc/Intern/app/web/internal/store"
+)
+
+// TestEventStreamDeliversPromptlyThenEnds proves the stream is a real
+// unbuffered channel over TLS: an event appended after the subscription starts
+// reaches the client promptly, the terminal run ends the stream with exactly one
+// end event, and the stream closes itself.
+func TestEventStreamDeliversPromptlyThenEnds(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "streamer", "operator")
+	_, run := h.seedPolicyWithRun(t, "prompt-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	assertStreamHeaders(t, response)
+	// The replay of the seeded queued event arrives before any new event.
+	first := readFrame(t, reader)
+	if !strings.Contains(first, "event: message") || !strings.Contains(first, "id: 1") {
+		t.Fatalf("first frame = %q", first)
+	}
+
+	start := time.Now()
+	h.appendLog(t, run.ID, "preflight")
+	live := readFrame(t, reader)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("live event took %s to arrive; the stream is buffered", elapsed)
+	}
+	if !strings.Contains(live, "id: 2") || !strings.Contains(live, "preflight") {
+		t.Fatalf("live frame = %q", live)
+	}
+
+	// A terminal run ends the stream. FinishRunFailed needs a running row, so
+	// claim it first, exactly as the worker would.
+	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	if err := h.fixture.database.FinishRunFailed(t.Context(), run.ID, store.RunErrorPreflight, "preflight_failed",
+		store.SystemAudit("runs.failed", store.AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	if end := readFrame(t, reader); end != "event: end\ndata: failed\n\n" {
+		t.Fatalf("end frame = %q", end)
+	}
+	assertStreamClosed(t, reader)
+}
+
+// assertStreamHeaders checks the frozen response headers of the event stream.
+func assertStreamHeaders(t *testing.T, response *http.Response) {
+	t.Helper()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if got := response.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q", got)
+	}
+	if got := response.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("cache-control = %q", got)
+	}
+}
+
+// TestEventStreamReplaysFromTheStoredLog covers replay and both resume shapes:
+// a fresh subscription replays every stored event, Last-Event-ID resumes past the
+// seen sequence, and the after_seq query does the same.
+func TestEventStreamReplaysFromTheStoredLog(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "resumer", "viewer")
+	_, run := h.seedPolicyWithRun(t, "replay-stream")
+	h.stopRuns()
+	for _, event := range []string{"claimed", "preflight"} {
+		h.appendLog(t, run.ID, event)
+	}
+
+	full := readStreamFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events", nil, 3)
+	for _, want := range []string{"id: 1", "id: 2", "id: 3", "claimed", "preflight"} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("replay missing %q: %s", want, full)
+		}
+	}
+
+	lastID := readStreamFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events",
+		map[string]string{"Last-Event-ID": "1"}, 2)
+	if strings.Contains(lastID, "id: 1") {
+		t.Fatalf("Last-Event-ID replayed a seen event: %s", lastID)
+	}
+	for _, want := range []string{"id: 2", "id: 3"} {
+		if !strings.Contains(lastID, want) {
+			t.Fatalf("Last-Event-ID resume missing %q: %s", want, lastID)
+		}
+	}
+
+	afterSeq := readStreamFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events?after_seq=2", nil, 1)
+	if strings.Contains(afterSeq, "id: 2\n") || !strings.Contains(afterSeq, "id: 3") {
+		t.Fatalf("after_seq replay = %s", afterSeq)
+	}
+}
+
+// TestEventStreamHeartbeat proves the periodic comment frame arrives without any
+// run activity, which is what keeps a quiet stream alive through proxies.
+func TestEventStreamHeartbeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the heartbeat interval is 15s")
+	}
+	h := newRunHarness(t)
+	cookie := h.login(t, "heartbeat", "operator")
+	_, run := h.seedPolicyWithRun(t, "heartbeat-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
+		t.Fatalf("first frame = %q", first)
+	}
+	// The next frame must be the heartbeat comment: no event was written.
+	sawHeartbeat := false
+	for range 3 {
+		frame := readFrame(t, reader)
+		if strings.HasPrefix(frame, ":") {
+			if !strings.Contains(frame, "ping") {
+				t.Fatalf("heartbeat = %q", frame)
+			}
+			sawHeartbeat = true
+			break
+		}
+		if !strings.Contains(frame, "event: message") {
+			t.Fatalf("unexpected frame while idle: %q", frame)
+		}
+	}
+	if !sawHeartbeat {
+		t.Fatal("no heartbeat comment arrived")
+	}
+}
+
+// TestEventStreamDropsSlowConsumerWithoutBlockingTheRun fills the 256-event
+// subscriber buffer faster than the client reads and proves the run keeps
+// committing events: the producer is never blocked by the stream.
+func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "slow", "operator")
+	_, run := h.seedPolicyWithRun(t, "slow-consumer")
+	h.stopRuns()
+
+	// A stalled TLS client is attached while the log grows: the run must keep
+	// committing events regardless of what the socket accepts.
+	response, reader, cleanup := h.slowStreamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events")
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	readFrame(t, reader)
+
+	const burst = 900
+	start := time.Now()
+	for i := range burst {
+		h.appendLog(t, run.ID, fmt.Sprintf("burst-%03d", i))
+	}
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("appending %d events took %s: the producer is blocked by the consumer", burst, elapsed)
+	}
+	logs, err := h.fixture.database.RunLogsAfter(t.Context(), run.ID, 0, store.MaxRunLogRows+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != burst+1 {
+		t.Fatalf("committed events = %d, want %d", len(logs), burst+1)
+	}
+	// An event appended after the burst still lands, so the run is not throttled
+	// by any subscriber.
+	h.appendLog(t, run.ID, "after-burst")
+	if last := h.logRowsFor(t, run.ID); last.Event != "after-burst" {
+		t.Fatalf("last stored event = %q", last.Event)
+	}
+}
+
+// TestEventStreamDropsFullSubscriberWithoutBlockingIt exercises the overflow
+// rule at the boundary the server owns: the real tail goroutine feeding a
+// subscriber buffer that is already full. It must signal the drop and return
+// instead of waiting for a consumer that is not reading.
+func TestEventStreamDropsFullSubscriberWithoutBlockingIt(t *testing.T) {
+	h := newRunHarness(t)
+	_, run := h.seedPolicyWithRun(t, "overflow")
+	h.stopRuns()
+	// More stored events than the frozen subscriber capacity.
+	for i := range sseBufferCapacity + 20 {
+		h.appendLog(t, run.ID, fmt.Sprintf("stored-%03d", i))
+	}
+	stored, err := h.fixture.database.Run(t.Context(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The subscriber buffer is full from the start and nothing reads it.
+	events := make(chan store.RunLog, sseBufferCapacity)
+	for range sseBufferCapacity {
+		events <- store.RunLog{Event: "filler"}
+	}
+	dropped := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runHandlers{database: h.fixture.database}.streamRun(t.Context(), stored, 0, events, dropped)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the tail goroutine blocked on a full subscriber buffer")
+	}
+	select {
+	case <-dropped:
+	default:
+		t.Fatal("overflowing the subscriber buffer did not mark the subscriber dropped")
+	}
+	// The stored log is intact: a dropped subscriber never affects the run.
+	if logs, err := h.fixture.database.RunLogsAfter(t.Context(), run.ID, 0, store.MaxRunLogRows+1); err != nil ||
+		len(logs) != sseBufferCapacity+21 {
+		t.Fatalf("stored log = %d rows, %v", len(logs), err)
+	}
+}
+
+// logRowsFor returns the newest stored event of one run.
+func (h *runHarness) logRowsFor(t *testing.T, runID string) store.RunLog {
+	t.Helper()
+	rows, err := h.fixture.database.RunLogsAfter(t.Context(), runID, 0, store.MaxRunLogRows+1)
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("run log empty: %v", err)
+	}
+	return rows[len(rows)-1]
+}
+
+// TestEventStreamRevokedSessionIsToldAndClosed revokes the session while the
+// stream is open and proves the server sends `event: revoked` and closes. This
+// is the reachable revocation variant: a demoted, disabled or logged-out session
+// is rechecked at every heartbeat.
+func TestEventStreamRevokedSessionIsToldAndClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the revocation recheck runs on the 15s heartbeat")
+	}
+	h := newRunHarness(t)
+	user := h.fixture.seed(t, "revoked", "operator")
+	cookie := h.fixture.login(t, "revoked", testPassword)
+	_, run := h.seedPolicyWithRun(t, "revoked-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
+		t.Fatalf("first frame = %q", first)
+	}
+	// The epoch bump is what logout, password change, disable and role change all
+	// produce; the running stream must observe it without a new request.
+	if err := h.fixture.database.RevokeSessions(t.Context(), user.ID,
+		store.SystemAudit("users.revoke_sessions", store.AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	revoked := readFrame(t, reader)
+	if !strings.Contains(revoked, "event: revoked") {
+		t.Fatalf("frame after revocation = %q", revoked)
+	}
+	assertStreamClosed(t, reader)
+}
+
+// TestEventStreamRejectsBeforeHeaders covers the pre-stream JSON failures: an
+// unauthenticated request, an unknown run, and an invalid resume sequence all
+// answer JSON with no event-stream headers.
+func TestEventStreamRejectsBeforeHeaders(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "preflight-json", "operator")
+	_, run := h.seedPolicyWithRun(t, "json-errors")
+	h.stopRuns()
+
+	cases := []struct {
+		name    string
+		path    string
+		cookie  *http.Cookie
+		headers map[string]string
+		status  int
+		code    string
+	}{
+		{"anonymous", "/api/v1/runs/" + run.ID + "/events", anonymousCookie, nil, http.StatusUnauthorized, "unauthorized"},
+		{"missing run", "/api/v1/runs/0191c9c4-0000-7000-8000-000000000000/events", cookie, nil, http.StatusNotFound, "not_found"},
+		{"bad after_seq", "/api/v1/runs/" + run.ID + "/events?after_seq=-1", cookie, nil, http.StatusBadRequest, "validation_failed"},
+		{"bad last event id", "/api/v1/runs/" + run.ID + "/events", cookie, map[string]string{"Last-Event-ID": "not-a-sequence"}, http.StatusBadRequest, "validation_failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response, _, cleanup := h.streamClient(t, pickCookie(tc.cookie, cookie), tc.path, tc.headers)
+			defer cleanup()
+			if got := response.Header.Get("Content-Type"); got == "text/event-stream" {
+				t.Fatalf("%s answered an event stream", tc.name)
+			}
+			status, body := readJSONStatus(t, response)
+			if status != tc.status {
+				t.Fatalf("status = %d, body = %s; want %d", status, body, tc.status)
+			}
+			if !strings.Contains(body, `"code":"`+tc.code+`"`) {
+				t.Fatalf("body = %s", body)
+			}
+		})
+	}
+}
+
+// TestEventStreamNeverWritesJSONAfterTheFirstByte proves the after-first-byte
+// policy: once the stream opens, an event with no writer left (a terminal run
+// whose subscription is still open) closes the stream instead of appending a JSON
+// error body.
+func TestEventStreamNeverWritesJSONAfterTheFirstByte(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "no-json", "viewer")
+	_, run := h.seedPolicyWithRun(t, "no-json-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	// Delete the run under the open stream: every later read fails. The server
+	// must close the stream, not write an error body into the event stream.
+	if err := h.fixture.database.DB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := drainStream(t, reader)
+	if strings.Contains(body, `{"error"`) {
+		t.Fatalf("JSON error written after the first byte: %s", body)
+	}
+}
+
+// TestEventStreamOutlivesServerWriteTimeout is the per-write deadline case: the
+// server's own WriteTimeout is a fraction of a second, yet the stream keeps
+// answering long past it because every write extends the deadline through
+// ResponseController.
+func TestEventStreamOutlivesServerWriteTimeout(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "deadline", "operator")
+	_, run := h.seedPolicyWithRun(t, "deadline-stream")
+	h.restart(t, 200*time.Millisecond)
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
+		t.Fatalf("first frame = %q", first)
+	}
+	// Well past the configured WriteTimeout: an event must still cross the wire.
+	time.Sleep(700 * time.Millisecond)
+	h.appendLog(t, run.ID, "after-write-timeout")
+	live := readFrame(t, reader)
+	if !strings.Contains(live, "after-write-timeout") {
+		t.Fatalf("frame after the server WriteTimeout = %q", live)
+	}
+}
+
+// TestEventStreamNeverLeaksSecrets scans every frame and every server log line
+// for the generated source password, the sealed ciphertext and the KEK.
+func TestEventStreamNeverLeaksSecrets(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "scan", "operator")
+	_, run := h.seedPolicyWithRun(t, "secret-stream")
+	h.stopRuns()
+	h.appendLog(t, run.ID, "preflight")
+	body := readStreamFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events", nil, 2)
+	for _, secret := range []string{"{{SECRET_sse_source}}", testPassword} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("stream leaked %q: %s", secret, body)
+		}
+	}
+	for _, secret := range []string{"{{SECRET_sse_source}}", testPassword, h.fixture.keyFile} {
+		if strings.Contains(h.fixture.logs.String(), secret) {
+			t.Fatalf("server log leaked %q", secret)
+		}
+	}
+	// The stored ciphertext must not be echoed either.
+	var ciphertext string
+	if err := h.fixture.database.DB().QueryRowContext(t.Context(),
+		`SELECT COALESCE(group_concat(hex(secret_ciphertext), ''), '') FROM sources`).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if ciphertext != "" && strings.Contains(body, ciphertext) {
+		t.Fatal("stream leaked the sealed ciphertext")
+	}
+}
+
+// TestEventStreamIsNotBufferedBySession proves the stream route bypasses the
+// 8 MiB buffered session writer: a stream that stays open longer than a request
+// would need must still deliver each byte as it is written, and the response
+// must not be turned into a buffered 500 by the flush rejection path.
+func TestEventStreamIsNotBufferedBySession(t *testing.T) {
+	if !middleware.IsSSEPath("/api/v1/runs/x/events") {
+		t.Fatal("the session middleware would buffer the event stream")
+	}
+	h := newRunHarness(t)
+	cookie := h.login(t, "bypass", "viewer")
+	_, run := h.seedPolicyWithRun(t, "bypass-stream")
+	h.stopRuns()
+
+	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	defer cleanup()
+	// The status and headers arrive before any event is appended, which is only
+	// possible with an unbuffered writer.
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d type=%q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	// The seeded run's own queued event is the first frame.
+	if first := readFrame(t, reader); !strings.Contains(first, "queued") {
+		t.Fatalf("first frame = %q", first)
+	}
+	for i := range 3 {
+		h.appendLog(t, run.ID, fmt.Sprintf("incremental-%d", i))
+		frame := readFrame(t, reader)
+		if !strings.Contains(frame, fmt.Sprintf("incremental-%d", i)) {
+			t.Fatalf("frame %d = %q", i, frame)
+		}
+	}
+	if strings.Contains(h.fixture.logs.String(), "streaming responses are not supported") {
+		t.Fatal("the stream hit the buffered flush rejection path")
+	}
+}
+
+// TestEventStreamEndIsSentExactlyOnce shows a terminal run at connect answers
+// replay plus one end frame, and the client sees the connection close.
+func TestEventStreamEndIsSentExactlyOnce(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "once", "viewer")
+	_, run := h.seedPolicyWithRun(t, "once-stream")
+	h.stopRuns()
+	h.appendLog(t, run.ID, "queued")
+	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
+		t.Fatalf("claim: %v ok=%v", err, ok)
+	}
+	if err := h.fixture.database.FinishRunCanceled(t.Context(), run.ID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{})); err != nil {
+		t.Fatal(err)
+	}
+	h.appendLog(t, run.ID, "canceled")
+	body := readAllFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
+	if count := strings.Count(body, "event: end"); count != 1 {
+		t.Fatalf("end frames = %d in %s", count, body)
+	}
+	if !strings.HasSuffix(body, "event: end\ndata: canceled\n\n") {
+		t.Fatalf("stream did not end with the terminal status: %s", body)
+	}
+	// The replayed event is the stored one, and the terminal status is only
+	// reported by the end event.
+	if !strings.Contains(body, `"event":"queued"`) || !strings.Contains(body, `"event":"canceled"`) {
+		t.Fatalf("replay missing stored events: %s", body)
+	}
+}
+
+// pickCookie substitutes the default cookie when a case did not override it.
+// A case marked anonymous passes anonymousCookie so it stays unauthenticated.
+func pickCookie(override, fallback *http.Cookie) *http.Cookie {
+	if override == anonymousCookie {
+		return nil
+	}
+	if override != nil {
+		return override
+	}
+	return fallback
+}
+
+// anonymousCookie marks a case that must not send a session cookie at all.
+var anonymousCookie = &http.Cookie{Name: "__anonymous__"}
+
+// readAllFrames collects a whole stream until the server closes it.
+func readAllFrames(t *testing.T, h *runHarness, cookie *http.Cookie, path string, headers map[string]string) string {
+	t.Helper()
+	response, reader, cleanup := h.streamClient(t, cookie, path, headers)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		status, body := readJSONStatus(t, response)
+		t.Fatalf("status = %d (%s), want 200", status, body)
+	}
+	return drainStream(t, reader)
+}
+
+// readStreamFrames opens a stream and reads exactly n frames, for runs that are
+// still live and therefore will not close on their own.
+func readStreamFrames(t *testing.T, h *runHarness, cookie *http.Cookie, path string, headers map[string]string, n int) string {
+	t.Helper()
+	response, reader, cleanup := h.streamClient(t, cookie, path, headers)
+	defer cleanup()
+	if response.StatusCode != http.StatusOK {
+		status, body := readJSONStatus(t, response)
+		t.Fatalf("status = %d (%s), want 200", status, body)
+	}
+	return readFrames(t, reader, n)
+}
+
+// drainStream reads until the server closes the stream and returns every byte.
+func drainStream(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	type result struct {
+		body string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		var builder strings.Builder
+		_, err := io.Copy(&builder, reader)
+		done <- result{body: builder.String(), err: err}
+	}()
+	select {
+	case got := <-done:
+		return got.body
+	case <-time.After(30 * time.Second):
+		t.Fatal("stream did not close within 30s")
+		return ""
+	}
+}
+
+// assertStreamClosed requires the server to close the stream eventually, which
+// is what replaces a JSON error after the first byte.
+func assertStreamClosed(t *testing.T, reader *bufio.Reader) {
+	t.Helper()
+	drainStream(t, reader)
+}
+
+// TestRunEventsRequireRunsReadPermission documents the frozen matrix boundary
+// that makes a 403 unreachable on this route: every role allowed to authenticate
+// holds runs:read, so only 401 and 404 are reachable before the headers. The
+// permission helper itself is proven by the routes that do gate other
+// permissions, such as audit:read.
+func TestRunEventsRequireRunsReadPermission(t *testing.T) {
+	for _, role := range []string{"admin", "operator", "viewer"} {
+		if !hasRunsRead(role) {
+			t.Fatalf("%s lacks runs:read but is an authenticatable role", role)
+		}
+	}
+}
+
+// hasRunsRead reports whether a role holds runs:read, using the real matrix.
+func hasRunsRead(role string) bool {
+	for _, permission := range auth.Permissions(role) {
+		if permission == "runs:read" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRunLogsCapMarkerSurvivesTheAPI proves the capped log is visible through the
+// read API with exactly one truncated marker and the truncated flag set.
+func TestRunLogsCapMarkerSurvivesTheAPI(t *testing.T) {
+	h := newRunHarness(t)
+	cookie := h.login(t, "capped", "viewer")
+	_, run := h.seedPolicyWithRun(t, "capped-stream")
+	h.stopRuns()
+	// Fill the log exactly, then overflow it: the last row must be the one
+	// truncated marker and later events are dropped.
+	for i := range store.MaxRunLogRows {
+		h.appendLog(t, run.ID, fmt.Sprintf("event-%04d", i))
+	}
+	for range 3 {
+		h.appendLog(t, run.ID, "late")
+	}
+
+	client := h.jsonClient(t)
+	response := h.do(t, client, http.MethodGet, "/api/v1/runs/"+run.ID+"/logs?limit=1000", "", cookie)
+	status, body := readJSONStatus(t, response)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+	var page struct {
+		Items     []store.RunLog `json:"items"`
+		NextAfter *int64         `json:"next_after"`
+		Truncated bool           `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(body), &page); err != nil {
+		t.Fatal(err)
+	}
+	if !page.Truncated {
+		t.Fatalf("truncated flag = false: %s", body)
+	}
+	markers := 0
+	for _, item := range page.Items {
+		if item.Event == store.TruncatedEvent {
+			markers++
+		}
+	}
+	if markers != 1 {
+		t.Fatalf("truncated markers = %d", markers)
+	}
+}

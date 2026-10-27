@@ -180,3 +180,101 @@ WHERE id = sqlc.arg(id) RETURNING *;
 
 -- name: DeletePolicy :exec
 DELETE FROM policies WHERE id = ?;
+
+-- name: GetPolicySchedule :one
+SELECT next_full_at, next_incremental_at FROM policies WHERE id = ?;
+
+-- name: SetPolicySchedule :one
+UPDATE policies SET
+    next_full_at = sqlc.narg(next_full_at),
+    next_incremental_at = sqlc.narg(next_incremental_at),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) RETURNING next_full_at, next_incremental_at;
+
+-- name: DuePolicies :many
+-- The scheduler looks at one column at a time; a NULL value means the schedule
+-- was never initialized (for example a row created before migration 00005).
+SELECT * FROM policies
+WHERE enabled = 1 AND (next_full_at IS NOT NULL AND next_full_at <= sqlc.arg(due)
+    OR next_incremental_at IS NOT NULL AND next_incremental_at <= sqlc.arg(due));
+
+-- name: InsertRun :one
+INSERT INTO runs (
+    id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash,
+    status, scheduled_at, created_at, actor_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?) RETURNING *;
+
+-- name: GetRun :one
+SELECT * FROM runs WHERE id = ?;
+
+-- name: GetRunByIdempotencyKey :one
+SELECT * FROM runs WHERE idempotency_key = ?;
+
+-- name: ListRuns :many
+SELECT * FROM runs
+WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT))
+    AND (CAST(sqlc.arg(policy_id) AS TEXT) = '' OR policy_id = CAST(sqlc.arg(policy_id) AS TEXT))
+    AND (CAST(sqlc.arg(source_id) AS TEXT) = '' OR source_id = CAST(sqlc.arg(source_id) AS TEXT))
+    AND (CAST(sqlc.arg(status) AS TEXT) = '' OR status = CAST(sqlc.arg(status) AS TEXT))
+ORDER BY id DESC LIMIT sqlc.arg(row_limit);
+
+-- name: ClaimNextRun :one
+-- One claimant at a time holds the database write lock, so the UPDATE ... WHERE
+-- status = 'queued' clause is the concurrency control: the loser's statement
+-- runs after the winner's commit and no longer matches. No result means no
+-- claimable run.
+UPDATE runs SET status = 'running', started_at = sqlc.arg(started_at)
+WHERE id = (
+    SELECT id FROM runs WHERE status = 'queued' AND cancel_requested = 0
+    ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
+) AND status = 'queued'
+RETURNING *;
+
+-- name: CancelQueuedRun :execrows
+UPDATE runs SET status = 'canceled', finished_at = sqlc.arg(finished_at)
+WHERE id = sqlc.arg(id) AND status = 'queued' AND cancel_requested = 0;
+
+-- name: RequestCancel :execrows
+UPDATE runs SET cancel_requested = 1
+WHERE id = sqlc.arg(id) AND status IN ('queued', 'running');
+
+-- name: CompleteRun :execrows
+UPDATE runs SET
+    status = 'completed', finished_at = sqlc.arg(finished_at), backup_id = sqlc.arg(backup_id),
+    chain_id = sqlc.arg(chain_id), payload_size = sqlc.arg(payload_size)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: FailRun :execrows
+UPDATE runs SET
+    status = 'failed', finished_at = sqlc.arg(finished_at),
+    error_class = sqlc.arg(error_class), error_code = sqlc.narg(error_code)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: CancelRunningRun :execrows
+UPDATE runs SET status = 'canceled', finished_at = sqlc.arg(finished_at)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: InterruptedRuns :many
+SELECT * FROM runs WHERE status = 'running';
+
+-- name: InsertRunLog :exec
+INSERT INTO run_logs (run_id, seq, ts, level, event, message) VALUES (?, ?, ?, ?, ?, ?);
+
+-- name: CountRunLogs :one
+SELECT COUNT(*) FROM run_logs WHERE run_id = ?;
+
+-- name: GetRunLog :one
+SELECT * FROM run_logs WHERE run_id = ? AND seq = ?;
+
+-- name: ReplaceRunLog :execrows
+UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?
+WHERE run_id = ? AND seq = ?;
+
+-- name: RunLogsAfter :many
+SELECT * FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?;
+
+-- name: EnabledPolicies :many
+SELECT * FROM policies WHERE enabled = 1 ORDER BY id;
+
+-- name: MaxRunLogSeq :one
+SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM run_logs WHERE run_id = ?;

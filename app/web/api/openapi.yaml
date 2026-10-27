@@ -20,6 +20,15 @@ info:
     the remaining capacity. A full cap returns 503 unavailable immediately with
     Retry-After and does not queue. API responses are buffered up to 8 MiB; a
     larger or streaming body becomes one 500 and does not commit a session.
+    Stage C adds the persistent run queue: manual triggers behind an
+    Idempotency-Key, run lists and bounded logs with cursor pagination, run
+    cancellation, chains, backups, the split local/remote protection view and
+    the replica queue. GET /api/v1/runs/{id}/events streams the run lifecycle
+    as text/event-stream over an unbuffered, authenticated channel: replay from
+    Last-Event-ID or after_seq, heartbeats every 15s, one final end event at the
+    terminal status, and a revoked event when the session stops being valid.
+    zstd_level is stored per policy but the encoder is fixed at concurrency 1
+    and the level is not applied.
 security:
   - cookieAuth: []
 paths:
@@ -824,6 +833,421 @@ paths:
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
+  /api/v1/policies/{id}/runs:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: triggerPolicyRun
+      summary: Create one manual run (runs:trigger, admin or operator)
+      description: >-
+        Body {kind: full|incremental}. The Idempotency-Key header of 1 to 128
+        characters is required. The same key with the same canonical body
+        replays 202 with the same run_id; the same key with a different body or
+        a disabled policy answers 409 conflict. A deployment without the KEK,
+        work root or XtraBackup executable answers 503 unavailable immediately
+        and records nothing. A created run stays queued until the single backup
+        worker claims it; the status then follows
+        queued -> running -> completed | failed | canceled with no finalizing
+        state, because the physical success commit is an interior step of the
+        chain run. The accepted body is {run_id}.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Unique manual trigger key of 1 to 128 characters.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunTrigger'
+      responses:
+        '202':
+          description: Run created or replayed with the same idempotency key
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/runs:
+    get:
+      operationId: listRuns
+      summary: List runs newest first (runs:read, viewer and above)
+      description: >-
+        Descending UUIDv7 id order with the shared cursor contract. Filters are
+        exact matches; status must be one of queued, running, completed, failed
+        or canceled.
+      parameters:
+        - name: policy_id
+          in: query
+          description: Exact policy id match; must be a resource id.
+          schema:
+            type: string
+        - name: source_id
+          in: query
+          description: Exact source id match; must be a resource id.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RunStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Before'
+      responses:
+        '200':
+          description: Descending UUIDv7 ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getRun
+      summary: Read one run (runs:read, viewer and above)
+      responses:
+        '200':
+          description: One run row; idempotency_key and request_hash are never exposed
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/runs/{id}/logs:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: listRunLogs
+      summary: Read one run's bounded event log (runs:read, viewer and above)
+      description: >-
+        Ascending seq order with at most 1000 rows per run. When the cap was
+        reached, the final row is the truncated marker and the response sets
+        truncated=true. after_seq returns rows with a greater sequence only.
+      parameters:
+        - name: after_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        '200':
+          description: Ascending seq order; next_after is the last returned seq
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunLogPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/runs/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: cancelRun
+      summary: Request run cancellation (runs:cancel, admin or operator)
+      description: >-
+        A queued run becomes canceled without running. A running run's context
+        is canceled; the success point wins, so a run whose physical chain
+        completed stays completed and a cancel never deletes a backup. A
+        terminal run answers 409 conflict. The accepted body is {run_id}.
+      responses:
+        '202':
+          description: Cancel request recorded
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/runs/{id}/events:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: streamRunEvents
+      summary: Stream one run's lifecycle as SSE (runs:read, viewer and above)
+      description: >-
+        text/event-stream over an unbuffered channel. Authentication, the
+        user/disabled/epoch checks and runs:read all run before the first byte;
+        failures are ordinary JSON 401/403/404/400. After the first byte errors
+        only close the stream and no JSON is mixed in. Replay is every run_logs
+        row with seq greater than Last-Event-ID (or the after_seq query
+        parameter), then live events, then one final end event whose data is
+        the terminal status. Each event's id is its run_logs.seq and heartbeats
+        are ": ping" comments every 15s; every heartbeat rechecks the session
+        and permission, and a mismatch emits one revoked event and closes. The
+        per-subscriber buffer holds 256 events; an overflow drops the
+        subscriber without touching the run.
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Replay only rows with a greater seq; takes precedence over after_seq.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: after_seq
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: The event stream itself; each event matches RunLogEvent
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Cache-Control:
+              description: Always no-cache.
+              schema:
+                type: string
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/RunLogEvent'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/sources/{id}/chains:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: listSourceChains
+      summary: List one source's chains with their members (resources:read)
+      responses:
+        '200':
+          description: Chains oldest first; members carry kind, seq, status, presence, LSNs and payload identity
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainPage'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/backups/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getBackup
+      summary: Read one backup with its per-repository replicas (resources:read)
+      responses:
+        '200':
+          description: One backup row with the replica rows of every repository
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Backup'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/sources/{id}/protection:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getSourceProtection
+      summary: Read the split local and remote protection points (resources:read)
+      description: >-
+        local is the latest locally completed backup whose chain prefix is all
+        completed. remote holds one verified-based point per replica repository:
+        only verified replicas advance it, uploaded is never treated as
+        verified. Either side is null when no such point exists.
+      responses:
+        '200':
+          description: The local point and the per-repository remote points
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Protection'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/replicas:
+    get:
+      operationId: listReplicas
+      summary: List replica queue rows (resources:read)
+      description: >-
+        Bounded FIFO view over the per-repository replication queues. Filters
+        are exact matches; status is one of pending, uploading, uploaded,
+        verified, failed or exhausted.
+      parameters:
+        - name: source_id
+          in: query
+          schema:
+            type: string
+        - name: repository_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ReplicaStatus'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        '200':
+          description: Replica rows in FIFO order per repository
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplicaPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/backups/{id}/replicas/{repository_id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+      - name: repository_id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: retryReplica
+      summary: Reset one replica for an immediate attempt (replicas:retry, admin or operator)
+      description: >-
+        Resets the replica row to pending with zeroed attempts and kicks the
+        replication worker so the copy starts without waiting for the next
+        poll. The accepted body is {run_id} carrying the backup id.
+      responses:
+        '202':
+          description: Retry scheduled; the body carries the backup id
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunAccepted'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
 components:
   securitySchemes:
     cookieAuth:
@@ -982,7 +1406,7 @@ components:
       enum: [admin, operator, viewer]
     Permission:
       type: string
-      enum: ['session:self', 'users:manage', 'audit:read', 'repositories:manage', 'sources:manage', 'policies:manage', 'resources:read']
+      enum: ['session:self', 'users:manage', 'audit:read', 'repositories:manage', 'sources:manage', 'policies:manage', 'resources:read', 'runs:read', 'runs:trigger', 'runs:cancel', 'replicas:retry']
     User:
       type: object
       additionalProperties: false
@@ -1462,6 +1886,312 @@ components:
         next_before:
           type: string
           nullable: true
+    RunTrigger:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          $ref: '#/components/schemas/RunKind'
+    RunKind:
+      type: string
+      enum: [full, incremental]
+    RunStatus:
+      type: string
+      enum: [queued, running, completed, failed, canceled]
+    RunTriggerKind:
+      type: string
+      enum: [cron, manual, admission]
+    RunErrorClass:
+      type: string
+      description: The closed failure-class set of a failed run.
+      enum: [unavailable, preflight, requires_full, canceled, interrupted, backup_failed, recovery_failed]
+    RunAccepted:
+      type: object
+      additionalProperties: false
+      required: [run_id]
+      properties:
+        run_id:
+          type: string
+    Run:
+      type: object
+      additionalProperties: false
+      required: [id, policy_id, source_id, kind, trigger, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id]
+      properties:
+        id:
+          type: string
+        policy_id:
+          type: string
+        source_id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        trigger:
+          $ref: '#/components/schemas/RunTriggerKind'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        scheduled_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        backup_id:
+          type: string
+          nullable: true
+        chain_id:
+          type: string
+          nullable: true
+        payload_size:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        error_class:
+          allOf:
+            - $ref: '#/components/schemas/RunErrorClass'
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        cancel_requested:
+          type: boolean
+        actor_id:
+          type: string
+          nullable: true
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Run'
+        next_before:
+          type: string
+          nullable: true
+    RunLog:
+      type: object
+      additionalProperties: false
+      required: [run_id, seq, ts, level, event, message]
+      properties:
+        run_id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        ts:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        event:
+          type: string
+          minLength: 1
+        message:
+          type: string
+    RunLogPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_after, truncated]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunLog'
+        next_after:
+          type: integer
+          format: int64
+          nullable: true
+        truncated:
+          type: boolean
+          description: True when the log reached its cap and ends in the truncated marker.
+    RunLogEvent:
+      type: object
+      description: >-
+        The fixed wire shape of one streamed SSE event's data; it omits run_id
+        because the stream already names the run. Event names come from the
+        dispatcher lifecycle: queued, claimed, preflight, completed, failed,
+        canceled, replication_enqueued; the per-run log cap adds one final
+        truncated marker. Heartbeats are ": ping" comments and the stream ends
+        with an end event carrying the terminal status.
+      additionalProperties: false
+      required: [seq, ts, level, event, message]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        ts:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        event:
+          type: string
+          minLength: 1
+        message:
+          type: string
+    ReplicaStatus:
+      type: string
+      enum: [pending, uploading, uploaded, verified, failed, exhausted]
+    Replica:
+      type: object
+      additionalProperties: false
+      required: [backup_id, repository_id, status, attempts, next_attempt_at, uploaded_at, verified_at, alert_since, last_error_code, last_reply_code]
+      properties:
+        backup_id:
+          type: string
+        repository_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/ReplicaStatus'
+        attempts:
+          type: integer
+          minimum: 0
+        next_attempt_at:
+          type: string
+          format: date-time
+        uploaded_at:
+          type: string
+          format: date-time
+          nullable: true
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        alert_since:
+          type: string
+          format: date-time
+          nullable: true
+        last_error_code:
+          type: string
+        last_reply_code:
+          type: integer
+    ReplicaPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Replica'
+    Backup:
+      type: object
+      additionalProperties: false
+      required: [id, chain_id, parent_id, kind, status, seq, from_lsn, to_lsn, last_lsn, object_path, payload_size, payload_sha256, local_present, completed_at, replicas]
+      properties:
+        id:
+          type: string
+        chain_id:
+          type: string
+        parent_id:
+          type: string
+        kind:
+          type: string
+          enum: [physical-full, physical-incremental]
+        status:
+          type: string
+          enum: [running, completed, failed]
+        seq:
+          type: integer
+          minimum: 1
+        from_lsn:
+          type: string
+          description: Decimal text of the unsigned 64-bit LSN; empty when unset.
+        to_lsn:
+          type: string
+        last_lsn:
+          type: string
+        object_path:
+          type: string
+        payload_size:
+          type: integer
+          format: int64
+          minimum: 0
+        payload_sha256:
+          type: string
+        local_present:
+          type: boolean
+        completed_at:
+          type: string
+          format: date-time
+        replicas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Replica'
+    Chain:
+      type: object
+      additionalProperties: false
+      required: [id, source_id, server_uuid, started_at, sealed_at, pinned, members]
+      properties:
+        id:
+          type: string
+        source_id:
+          type: string
+        server_uuid:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        sealed_at:
+          type: string
+          format: date-time
+        pinned:
+          type: boolean
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/Backup'
+    ChainPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Chain'
+    Point:
+      type: object
+      additionalProperties: false
+      required: [backup_id, chain_id, at]
+      properties:
+        repository_id:
+          type: string
+        backup_id:
+          type: string
+        chain_id:
+          type: string
+        at:
+          type: string
+          format: date-time
+    Protection:
+      type: object
+      additionalProperties: false
+      required: [local, remote]
+      properties:
+        local:
+          allOf:
+            - $ref: '#/components/schemas/Point'
+          nullable: true
+        remote:
+          type: array
+          items:
+            $ref: '#/components/schemas/Point'
     ErrorResponse:
       type: object
       additionalProperties: false

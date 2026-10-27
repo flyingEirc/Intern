@@ -87,6 +87,12 @@ const (
 	SourcesManage      = "sources:manage"
 	PoliciesManage     = "policies:manage"
 	ResourcesRead      = "resources:read"
+	// W4 additions frozen in the contract: viewers read runs, operators and
+	// admins trigger, cancel and retry replicas.
+	RunsRead      = "runs:read"
+	RunsTrigger   = "runs:trigger"
+	RunsCancel    = "runs:cancel"
+	ReplicasRetry = "replicas:retry"
 )
 
 // Permissions is the frozen Stage C matrix. Administrator is a superset for the
@@ -97,11 +103,14 @@ const (
 func Permissions(role string) []string {
 	switch role {
 	case "admin":
-		return []string{SessionSelf, UsersManage, AuditRead, RepositoriesManage, SourcesManage, PoliciesManage, ResourcesRead}
+		return []string{
+			SessionSelf, UsersManage, AuditRead, RepositoriesManage, SourcesManage, PoliciesManage, ResourcesRead,
+			RunsRead, RunsTrigger, RunsCancel, ReplicasRetry,
+		}
 	case "operator":
-		return []string{SessionSelf, SourcesManage, PoliciesManage, ResourcesRead}
+		return []string{SessionSelf, SourcesManage, PoliciesManage, ResourcesRead, RunsRead, RunsTrigger, RunsCancel, ReplicasRetry}
 	case "viewer":
-		return []string{SessionSelf, ResourcesRead}
+		return []string{SessionSelf, ResourcesRead, RunsRead}
 	default:
 		return []string{}
 	}
