@@ -650,6 +650,7 @@ func (f *d1Fixture) caseImage(t *testing.T, ctx context.Context) {
 	f.webDigest = f.digestInImage(ctx, f.candidateID, d1WebBinary)
 	repeatWeb := f.digestInImage(ctx, repeat, d1WebBinary)
 	layers := f.imageLayers(ctx, f.candidateID)
+	f.layers = layers
 	repeatLayers := f.imageLayers(ctx, repeat)
 	if !d1Hex64.MatchString(f.webDigest) || f.webDigest != repeatWeb {
 		f.fatal("the two candidate builds produced different binaries: %q vs %q", f.webDigest, repeatWeb)

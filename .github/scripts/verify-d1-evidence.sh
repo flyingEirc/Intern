@@ -83,6 +83,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999")) and
   ($output | test("D1-A1 versions mysqld=8\\.4\\.11 xtrabackup=8\\.4\\.0-7 xbstream=8\\.4\\.0-7 matrix_server=8\\.4\\.11 matrix_tool=8\\.4\\.0-7 match=true")) and
   ($output | test("D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=[1-9][0-9]* pxb_gpl=[1-9][0-9]* source_sha_bound=true procps_lgpl=[1-9][0-9]* procps_named=[1-9][0-9]* go_modules=([1-9][0-9]*) go_license_texts=\\1 copied_objects=[1-9][0-9]* matrix=8\\.4\\.11,8\\.4\\.0-7")) and
+  ($output | test("D1-A1 compose_pins=true compose=app/web/deploy/compose\\.yaml env_example=app/web/deploy/\\.env\\.example dockerfile=app/web/deploy/Dockerfile matrix_images=2")) and
   # The stack: the repository Compose file, native amd64, the deployment health
   # entry point, the administrator bootstrap, verified TLS, the read-only datadir
   # and the file-secret KEK that is really read.
@@ -108,9 +109,9 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A3 export_mysql_started=1 expected_snapshot=([0-9a-f]{64}) container_snapshot=\\1 match=true")) and
   # Lifecycle: restart, recreate and image upgrade keep one metadata instance,
   # both backups, the restore record, the bound KEK and the Ready migration state.
-  ($output | test("D1-A4 restart instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] backups=2 restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
-  ($output | test("D1-A4 recreate instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] backups=2 restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
-  ($output | test("D1-A4 upgrade instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] backups=2 restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
+  ($output | test("D1-A4 restart instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] chain_members=[2-9][0-9]* a3_pair_readable=true restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
+  ($output | test("D1-A4 recreate instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] chain_members=[2-9][0-9]* a3_pair_readable=true restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
+  ($output | test("D1-A4 upgrade instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] chain_members=[2-9][0-9]* a3_pair_readable=true restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
   ($output | test("D1-A4 upgrade from=intern:[0-9a-f]{12}(?:-dirty)?-mysql8\\.4 to=intern:[0-9a-f]{12}(?:-dirty)?-upgrade-mysql8\\.4 source_label=([0-9a-f]{40})-upgrade previous_label=\\1 labels_differ=true")) and
   ($output | test("D1-A4 kek=preserved volumes=metadata,backups,work instance_id=[0-9a-zA-Z_-]{8,}")) and
   # Guardrails: one owner per metadata volume, a KEK that must exist and be

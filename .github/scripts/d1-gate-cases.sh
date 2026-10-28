@@ -78,9 +78,9 @@ payload() {
 		"D1-A3 restore=$restore backup=$inc_backup status=completed export=/var/lib/intern/export/$restore bytes=301989888 rehearsal=true verify=not_requested" \
 		"D1-A3 export=$restore mode_owner=750:999:999" \
 		"D1-A3 export_mysql_started=1 expected_snapshot=$snapshot container_snapshot=$snapshot match=true" \
-		"D1-A4 restart instance_id=$instance login=1.3 backups=2 restores=1 incremental=$inc_backup migration=ready kek_digest_bound=true volumes=5" \
-		"D1-A4 recreate instance_id=$instance login=1.3 backups=2 restores=1 incremental=$full_backup migration=ready kek_digest_bound=true volumes=5" \
-		"D1-A4 upgrade instance_id=$instance login=1.3 backups=2 restores=1 incremental=$inc_backup migration=ready kek_digest_bound=true volumes=5" \
+		"D1-A4 restart instance_id=$instance login=1.3 chain_members=3 a3_pair_readable=true restores=1 incremental=$inc_backup migration=ready kek_digest_bound=true volumes=5" \
+		"D1-A4 recreate instance_id=$instance login=1.3 chain_members=4 a3_pair_readable=true restores=1 incremental=$full_backup migration=ready kek_digest_bound=true volumes=5" \
+		"D1-A4 upgrade instance_id=$instance login=1.3 chain_members=5 a3_pair_readable=true restores=1 incremental=$inc_backup migration=ready kek_digest_bound=true volumes=5" \
 		"D1-A4 upgrade from=intern:$tag-mysql8.4 to=$upgrade_tag source_label=$source-upgrade previous_label=$source labels_differ=true container=$intern_container" \
 		"D1-A4 kek=preserved volumes=metadata,backups,work instance_id=$instance" \
 		"D1-A5 second_container=refused flock_text=true exit=1 primary_healthy=true primary_api=200" \
@@ -212,7 +212,7 @@ reject snapshot_false_match "if has(\"Output\") then .Output |= sub(\"container_
 reject export_not_started 'if has("Output") then .Output |= sub("export_mysql_started=1"; "export_mysql_started=0") else . end'
 reject restart_instance_drift "if has(\"Output\") then .Output |= sub(\"D1-A4 restart instance_id=${instance}\"; \"D1-A4 restart instance_id=9999888877776666\") else . end"
 reject migration_pending 'if has("Output") then .Output |= gsub("migration=ready"; "migration=pending") else . end'
-reject lost_restore_record 'if has("Output") then .Output |= sub("backups=2 restores=1"; "backups=2 restores=0") else . end'
+reject lost_restore_record 'if has("Output") then .Output |= sub("a3_pair_readable=true restores=1"; "a3_pair_readable=true restores=0") else . end'
 reject kek_not_preserved 'if has("Output") then .Output |= sub("kek_digest_bound=true"; "kek_digest_bound=false") else . end'
 reject no_kek_line 'if has("Output") then .Output |= select((. // "") | contains("D1-A4 kek=preserved") | not) else . end'
 reject upgrade_same_tag "if has(\"Output\") then .Output |= sub(\"to=${upgrade_tag}\"; \"to=intern:${tag}-mysql8.4\") else . end"

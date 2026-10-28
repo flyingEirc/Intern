@@ -78,7 +78,7 @@ chown 999:999 exports && chmod 0750 exports
 KEK 用同一仓库构建的 CLI 生成（`intern-web` 二进制与镜像都**没有** keygen 子命令，见第 5 节）：
 
 ```sh
-cd ../..                                  # 回仓库根（keygen 与构建都在根目录）
+cd ../../..                               # 从 app/web/deploy 回仓库根（keygen 与构建都在根目录）
 mise run build                            # 产出 bin/intern 与 bin/intern-web
 ./bin/intern keygen --key-file "$PWD/app/web/deploy/secrets/intern_kek"
 chown 999:999 app/web/deploy/secrets/intern_kek && chmod 0600 app/web/deploy/secrets/intern_kek

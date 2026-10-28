@@ -9,7 +9,7 @@ image:
 
   /usr/share/licenses/intern/mysql-community-server/LICENSE
   /usr/share/licenses/intern/percona-xtrabackup/COPYING
-  /usr/share/licenses/intern/NOTICE
+  /usr/share/licenses/intern/NOTICE-WEB.txt (third-party notice of this image)
 
 The exact component versions, the exact base-image digests and the Intern source
 revision this image was built from are recorded in:
@@ -25,8 +25,9 @@ upstream project:
                             Percona-XtraBackup/
                           https://github.com/percona/percona-xtrabackup
 
-Intern itself is not GPL; its own source is the public repository
-https://github.com/flyingEirc/Intern at the revision named in VERSIONS.txt.
+Intern itself is not GPL. Its source is the repository
+https://github.com/flyingEirc/Intern at the revision named in VERSIONS.txt;
+that repository is currently private, so it is not a public source offer.
 
 Scope of this notice: the repository's CI builds and exercises a private
 candidate image only. It does not publish this image and does not by itself
@@ -35,5 +36,5 @@ distribution of this image or of any binary extracted from it, the distributor
 must supply the corresponding source (or a written offer to do so) for the exact
 binaries distributed, together with these notices. A link alone is not claimed
 to satisfy every redistribution obligation. See
-docs/roadmap/数据库备份控制面与流式管道-2026-10-17.md sections 2.4 and 10, and
+docs/roadmap/Web备份控制面与流式管道-2026-10-17.md section 2.4, and
 docs/roadmap/数据库备份与恢复-2026-10-17.md sections 10 and 15.
