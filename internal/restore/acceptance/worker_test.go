@@ -471,7 +471,7 @@ func a2Local(t *testing.T, w *worker) {
 	}
 	w.logf("P4-A2 rehearsal passed system_tables=true schemas=%d check_table=%d verify_sql=2 verify_sql_match=true",
 		len(lastVerify.Schemas), len(lastVerify.CheckTable))
-	w.logf("P4-A2 export_perms dir=0750 file=0640 owner=exact")
+	w.logf("P4-A2 export_perms top=0750 dir=0750 file=0640 owner=exact")
 }
 
 // supervisorEvidence records that the engine's rehearsal used a separate group.
@@ -495,8 +495,17 @@ func (w *worker) assertRestored(t *testing.T, file producedFile, request restore
 	assertRestoreTargetsGone(t, w, request.RestoreID)
 }
 
+// assertExportModes requires the published tree to carry the documented modes,
+// including the top directory: the operator mounts <export>/<id>/data into a
+// server that has to traverse <export>/<id>, so a 0700 top directory is a
+// contract violation even though the data directory below it is 0750.
 func assertExportModes(t *testing.T, export string) {
 	t.Helper()
+	top, err := os.Lstat(export)
+	must(t, err)
+	if !top.IsDir() || top.Mode().Perm() != 0o750 {
+		t.Fatalf("export directory mode = %o, want 0750", top.Mode().Perm())
+	}
 	info, err := os.Lstat(filepath.Join(export, "data"))
 	must(t, err)
 	if !info.IsDir() || info.Mode().Perm() != 0o750 {
@@ -1002,7 +1011,7 @@ func a7Security(t *testing.T, w *worker) {
 	w.logf("P4-A7 secrets=clean census=%d scanned=log=%d,progress=%d,chain=%d,rehearsal=%d",
 		len(census()), watch.count("log"), watch.count("progress"), watch.count("chain"), watch.count("rehearsal"))
 	w.logf("P4-A7 supervisor mysqld_pgid_separate=true tool_group=supervisor no_leftover_tools=true")
-	w.logf("P4-A7 export_root symlink=refused export_perms=0750/0640 owner=exact")
+	w.logf("P4-A7 export_root symlink=refused export_perms=top:0750,dir:0750,file:0640 owner=exact")
 }
 
 // auditCensus is the P4-A7 verdict: no fixture secret — either password, the

@@ -60,7 +60,7 @@ payload() {
 		"P4-A2 restore=inc1 source=local export=${export1} expected_snapshot=${snap1} rows=10 max_id=10 prepare_checkpoints=full-prepared to_lsn=200" \
 		"P4-A2 restore=inc2 source=local export=${export2} expected_snapshot=${snap2} rows=20 max_id=20 prepare_checkpoints=full-prepared to_lsn=300" \
 		"P4-A2 rehearsal passed system_tables=true schemas=1 check_table=2 verify_sql=2 verify_sql_match=true" \
-		"P4-A2 export_perms dir=0750 file=0640 owner=exact" \
+		"P4-A2 export_perms top=0750 dir=0750 file=0640 owner=exact" \
 		"P4-A3 plan target=inc1 sources=ftp,ftp verified_only=true ftp_writes=0" \
 		"P4-A3 restore=inc1 source=ftp injection=disconnect rest_offset=65536 attempts=2 authenticated_eof=true export=${export3} expected_snapshot=${snap1}" \
 		"P4-A3 restore=inc2 source=ftp export=${export4} expected_snapshot=${snap2} rows=20 max_id=20" \
@@ -72,7 +72,7 @@ payload() {
 		"P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop" \
 		"P4-A7 secrets=clean census=9 scanned=log=64,progress=96,chain=28,rehearsal=512" \
 		"P4-A7 supervisor mysqld_pgid_separate=true tool_group=supervisor no_leftover_tools=true" \
-		"P4-A7 export_root symlink=refused export_perms=0750/0640 owner=exact" \
+		"P4-A7 export_root symlink=refused export_perms=top:0750,dir:0750,file:0640 owner=exact" \
 		"P4-A7 root_refusal mysqld=refused execute=rehearsal_unavailable" \
 		"P4-A2 restored=inc1-local container_snapshot=${snap1} expected_snapshot=${snap1} match=true" \
 		"P4-A2 restored=inc2-local container_snapshot=${snap2} expected_snapshot=${snap2} match=true" \
@@ -167,6 +167,8 @@ reject dirty_source 'if has("Output") then .Output |= sub("source_dirty=false"; 
 # cancellation, a kill child sharing the worker's process group, an audited surface
 # that was never scanned, and a census that lost the secrets it must cover.
 reject argv_not_exact 'if has("Output") then .Output |= sub("argv_exact=true"; "argv_exact=substring") else . end'
+reject export_perms_top_loose 'if has("Output") then .Output |= sub("export_perms top=0750 dir=0750"; "export_perms top=0700 dir=0750") else . end'
+reject export_perms_dir_loose 'if has("Output") then .Output |= sub("export_perms top=0750 dir=0750 file=0640"; "export_perms top=0750 dir=0700 file=0640") else . end'
 reject argv_target_unscoped 'if has("Output") then .Output |= sub("target_dir_under=restore-"; "target_dir_under=work-") else . end'
 reject argv_apply_log_only_position 'if has("Output") then .Output |= sub("apply_log_only=after_prepare"; "apply_log_only=after_target_dir") else . end'
 reject enospc_wrong_phase 'if has("Output") then .Output |= sub("filesystem=tmpfs phase=extracting tool=xbstream"; "filesystem=tmpfs phase=fetching tool=copy") else . end'

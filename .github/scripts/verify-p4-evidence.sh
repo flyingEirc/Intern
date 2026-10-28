@@ -93,6 +93,10 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("prepare_checkpoints=full-prepared to_lsn=[1-9][0-9]*")) and
   ($output | test("P4-A1 matrix server=8\\.4\\.11 tool=8\\.4\\.0-7 prepare_version=8\\.4\\.0-7 key_id=[0-9a-f]{8}")) and
   ($output | test("P4-A1 space required_work=[1-9][0-9]* required_export=[1-9][0-9]* available_work=[1-9][0-9]* available_export=[1-9][0-9]* matches_statfs=true")) and
+  # The published tree carries the documented modes on every level, including the
+  # top directory the operator has to traverse to reach <export>/<id>/data.
+  ($output | test("P4-A2 export_perms top=0750 dir=0750 file=0640 owner=exact")) and
+  ($output | test("P4-A7 export_root symlink=refused export_perms=top:0750,dir:0750,file:0640 owner=exact")) and
   # A5: the prepare argv is compared exactly, so the evidence must name the
   # restore-scoped target directory and the position of --apply-log-only.
   ($output | test("P4-A5 argv shapes=full-only,full\\+1,full\\+2 no_defaults_first=true argv_exact=true apply_log_only=after_prepare target_dir_under=restore-[0-9a-f]{32} checked=3")) and

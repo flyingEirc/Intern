@@ -19,8 +19,10 @@ const (
 )
 
 // publish copies the prepared data directory into a private pending directory,
-// syncs it, and then renames it to the final export path without replacing an
-// existing entry. The export is never a partially copied tree.
+// syncs it, gives it the published mode and then renames it to the final export
+// path without replacing an existing entry. The export is never a partially
+// copied tree, and a pending directory is never world-traversable while it is
+// being written: the 0750 contract mode is set only at the publication point.
 func (e *execution) publish(ctx context.Context) error {
 	// The frozen phase set names exporting, and this is the stage that writes the
 	// export volume, so the observer sees it begin even if the pending directory
@@ -32,6 +34,13 @@ func (e *execution) publish(ctx context.Context) error {
 	copied, err := copyTree(ctx, filepath.Join(e.work, "data"), filepath.Join(e.pending, "data"))
 	if err != nil {
 		return stage(CodeExportFailed, err)
+	}
+	// The operator mounts <export>/<id>/data, so the published top directory
+	// carries the same 0750 contract mode as the data directory below it. The mode
+	// is set before the rename and synced with it, so a crash can never publish a
+	// directory whose mode still says "pending".
+	if err = os.Chmod(e.pending, exportDirMode); err != nil {
+		return stage(CodeExportFailed, errors.New("restore: cannot set the export directory mode"))
 	}
 	if err = syncDirectory(e.pending); err != nil {
 		return stage(CodeExportFailed, err)

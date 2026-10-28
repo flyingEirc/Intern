@@ -57,6 +57,8 @@ var p4Facts = []string{
 	`P4-A6 cancel during=preparing tool=xtrabackup tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true`,
 	`P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop`,
 	`P4-A7 secrets=clean census=[1-9][0-9]* scanned=log=[1-9][0-9]*,progress=[1-9][0-9]*,chain=[1-9][0-9]*,rehearsal=[1-9][0-9]*`,
+	`P4-A2 export_perms top=0750 dir=0750 file=0640 owner=exact`,
+	`P4-A7 export_root symlink=refused export_perms=top:0750,dir:0750,file:0640 owner=exact`,
 }
 
 // p4Rejections are the locked P4-A4 cases. Every one must appear with its fixed
