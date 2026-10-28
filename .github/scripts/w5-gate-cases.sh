@@ -25,8 +25,8 @@ other_snapshot=9999999999999999999999999999999999999999999999999999999999999999
 export_inc1=0123456789abcdef0123456789abcd01
 export_inc2=0123456789abcdef0123456789abcd02
 export_full=0123456789abcdef0123456789abcd03
-backup_inc1=11111111-1111-7111-8111-111111111111
-backup_inc2=22222222-2222-7222-8222-222222222222
+backup_inc1=11111111111111111111111111111111
+backup_inc2=22222222222222222222222222222222
 digest=$(printf 'a%.0s' {1..64})
 snap1=$(printf 'b%.0s' {1..64})
 snap2=$(printf 'c%.0s' {1..64})
@@ -44,12 +44,12 @@ payload() {
 		"W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=0123456789abcdef ftp_writes=0 local_payloads=removed" \
 		"W5-A2 refused backup_not_found=404 unconfigured=503" \
 		"W5-A6 e2e chain=seq:1,2,3 inc1=${backup_inc1} inc2=${backup_inc2} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=14 phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing" \
-		"W5-A6 export=${export_inc1} bytes=268435512 data_digest=0011223344556677 phase=rehearsing links=ftp:2" \
-		"W5-A6 export=${export_inc2} bytes=268435612 data_digest=1122334455667788 phase=exporting links=ftp:3" \
+		"W5-A6 export=${export_inc1} bytes=268435512 data_digest=0011223344556677 phase=rehearsing links=ftp:2 mode=0750" \
+		"W5-A6 export=${export_inc2} bytes=268435612 data_digest=1122334455667788 phase=exporting links=ftp:3 mode=0750" \
 		"W5-A6 restore=inc1 source=ftp export=${export_inc1} expected_snapshot=${snap1} verify_status=passed" \
 		"W5-A6 restore=inc2 source=ftp export=${export_inc2} expected_snapshot=${snap2} verify_status=not_requested" \
 		"W5-A3 execute admin_only=true cross_origin=cross_origin_rejected confirm=403,confirmation_failed no_row=true audit_denied=7 limiter=429 retry_after=11 digest_changed=409,plan_changed replay_same_id=true conflict=409 audit_atomic=true" \
-		"W5-A6 export=${export_full} bytes=268435400 data_digest=2233445566778899 phase=exporting links=ftp:1" \
+		"W5-A6 export=${export_full} bytes=268435400 data_digest=2233445566778899 phase=exporting links=ftp:1 mode=0750" \
 		"W5-A3 restore=full source=ftp export=${export_full} expected_snapshot=${snapf} verify_status=not_requested" \
 		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 sqlite_intervals=disjoint" \
 		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite" \
@@ -133,9 +133,10 @@ reject no_rehearsal "if has(\"Output\") then .Output |= sub(\"restore=inc1 sourc
 reject fabricated_match "if has(\"Output\") then .Output |= sub(\"restored=inc1 container_snapshot=${snap1}\"; \"restored=inc1 container_snapshot=${other_snapshot}\") else . end"
 reject false_match 'if has("Output") then .Output |= gsub("expected_snapshot=[0-9a-f]{64} match=true"; "expected_snapshot=0000000000000000000000000000000000000000000000000000000000000000 match=false") else . end'
 reject exports_short 'if has("Output") then .Output |= sub("exports_started=3"; "exports_started=2") else . end'
-reject export_phase_wrong 'if has("Output") then .Output |= sub("data_digest=0011223344556677 phase=rehearsing links=ftp:2"; "data_digest=0011223344556677 phase=exporting links=ftp:2") else . end'
-reject export_phase_inc2 'if has("Output") then .Output |= sub("data_digest=1122334455667788 phase=exporting links=ftp:3"; "data_digest=1122334455667788 phase=rehearsing links=ftp:3") else . end'
-reject export_phase_full 'if has("Output") then .Output |= sub("data_digest=2233445566778899 phase=exporting links=ftp:1"; "data_digest=2233445566778899 phase=rehearsing links=ftp:1") else . end'
+reject export_phase_wrong 'if has("Output") then .Output |= sub("data_digest=0011223344556677 phase=rehearsing links=ftp:2 mode=0750"; "data_digest=0011223344556677 phase=exporting links=ftp:2 mode=0750") else . end'
+reject export_phase_inc2 'if has("Output") then .Output |= sub("data_digest=1122334455667788 phase=exporting links=ftp:3 mode=0750"; "data_digest=1122334455667788 phase=rehearsing links=ftp:3 mode=0750") else . end'
+reject export_phase_full 'if has("Output") then .Output |= sub("data_digest=2233445566778899 phase=exporting links=ftp:1 mode=0750"; "data_digest=2233445566778899 phase=rehearsing links=ftp:1 mode=0750") else . end'
+reject backup_id_dashed 'if has("Output") then .Output |= sub("inc1=11111111111111111111111111111111"; "inc1=11111111-1111-7111-8111-111111111111") else . end'
 reject mysql_unpinned "if has(\"Output\") then .Output |= sub(\"new_mysql=${mysql_image}\"; \"new_mysql=mysql:8.4\") else . end"
 reject no_confirm 'if has("Output") then .Output |= sub("confirm=403,confirmation_failed"; "confirm=200") else . end'
 reject row_created 'if has("Output") then .Output |= sub("confirm=403,confirmation_failed no_row=true"; "confirm=403,confirmation_failed no_row=false") else . end'

@@ -72,7 +72,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A2 plan target=inc2 links=ftp:3 digest=[0-9a-f]{64} lsn=[1-9][0-9]* required_export=[1-9][0-9]* available_export=[1-9][0-9]* export_path=[^ ]+/\\{restore_id\\} rehearsal=true risks=[a-z_,]+")) and
   ($output | test("W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=[0-9a-f]{16} ftp_writes=0 local_payloads=removed")) and
   ($output | test("W5-A2 refused backup_not_found=404 unconfigured=503")) and
-  ($output | test("W5-A6 e2e chain=seq:1,2,3 inc1=[0-9a-f-]{36} inc2=[0-9a-f-]{36} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=[1-9][0-9]* phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing")) and
+  ($output | test("W5-A6 e2e chain=seq:1,2,3 inc1=[0-9a-f]{32} inc2=[0-9a-f]{32} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=[1-9][0-9]* phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing")) and
   # The state line is matched whole, in the order the worker logged it: a marker
   # that merely appears somewhere in the output proves nothing about the case
   # that emitted it.
@@ -83,11 +83,12 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A6 restore=inc1 source=ftp export=[0-9a-f]{32} expected_snapshot=[0-9a-f]{64} verify_status=passed")) and
   ($output | test("W5-A6 restore=inc2 source=ftp export=[0-9a-f]{32} expected_snapshot=[0-9a-f]{64} verify_status=not_requested")) and
   ($output | test("W5-A3 restore=full source=ftp export=[0-9a-f]{32} expected_snapshot=[0-9a-f]{64} verify_status=not_requested")) and
-  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=rehearsing links=ftp:2")) and
+  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=rehearsing links=ftp:2 mode=0750")) and
   # The two restores that asked for no rehearsal end at exporting; only the
   # rehearsed one may claim rehearsing, so each marker is tied to its own phase.
-  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:3")) and
-  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:1")) and
+  # The mode is the published directory mode, which every marker prints.
+  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:3 mode=0750")) and
+  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:1 mode=0750")) and
   ($output | split("container_snapshot=") | length == 4) and
   ($output | test("W5-A6 restored=inc1 container_snapshot=[0-9a-f]{64} expected_snapshot=[0-9a-f]{64} match=true")) and
   ($output | test("W5-A6 restored=inc2 container_snapshot=[0-9a-f]{64} expected_snapshot=[0-9a-f]{64} match=true")) and

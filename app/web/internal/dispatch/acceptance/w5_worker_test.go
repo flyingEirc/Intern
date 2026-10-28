@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -426,6 +428,9 @@ type createdRestore struct {
 // body. key may be empty.
 func (f *fixture) w5Execute(t *testing.T, body, key string, want int) (string, []byte) {
 	t.Helper()
+	if key != "" {
+		w5RequireDeclaredHeader(t, http.MethodPost, "/api/v1/restores", "Idempotency-Key")
+	}
 	raw := f.admin.requestWithKey(t, http.MethodPost, "/api/v1/restores", body, key, want)
 	if want != http.StatusAccepted {
 		return "", raw
@@ -481,6 +486,9 @@ func (f *fixture) w5List(t *testing.T, query string) []store.Restore {
 	t.Helper()
 	path := "/api/v1/restores"
 	if query != "" {
+		values, err := url.ParseQuery(query)
+		must(t, err)
+		w5RequireDeclaredQuery(t, http.MethodGet, path, values)
 		path += "?" + query
 	}
 	var page w5RestoresPage
@@ -511,9 +519,13 @@ func (f *fixture) w5Logs(t *testing.T, id string) []store.RestoreLog {
 	var all []store.RestoreLog
 	after := int64(0)
 	for {
+		// The handler reads after_seq; any other name is silently ignored and the
+		// page would repeat itself forever.
+		query := url.Values{"after_seq": {strconv.FormatInt(after, 10)}, "limit": {"200"}}
+		path := "/api/v1/restores/" + id + "/logs"
+		w5RequireDeclaredQuery(t, http.MethodGet, path, query)
 		var page w5LogsPage
-		must(t, json.Unmarshal(f.operator.request(t, http.MethodGet,
-			fmt.Sprintf("/api/v1/restores/%s/logs?after=%d&limit=200", id, after), "", http.StatusOK), &page))
+		must(t, json.Unmarshal(f.operator.request(t, http.MethodGet, path+"?"+query.Encode(), "", http.StatusOK), &page))
 		all = append(all, page.Items...)
 		if page.NextAfter == nil || *page.NextAfter <= after {
 			return all
@@ -653,6 +665,7 @@ func (f *fixture) w5Headed(t *testing.T, body, key string, want int) (http.Heade
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", c.origin)
 	if key != "" {
+		w5RequireDeclaredHeader(t, http.MethodPost, "/api/v1/restores", "Idempotency-Key")
 		req.Header.Set("Idempotency-Key", key)
 	}
 	resp, err := c.http.Do(req)

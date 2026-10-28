@@ -482,6 +482,9 @@ func (f *fixture) decodeID(t *testing.T, raw []byte) string {
 func (f *fixture) trigger(t *testing.T, policyID, kind, key string, want int) []byte {
 	t.Helper()
 	body := fmt.Sprintf(`{"kind":%q}`, kind)
+	if key != "" {
+		w5RequireDeclaredHeader(t, http.MethodPost, "/api/v1/policies/{id}/runs", "Idempotency-Key")
+	}
 	return f.operator.requestWithKey(t, http.MethodPost, "/api/v1/policies/"+policyID+"/runs", body, key, want)
 }
 
@@ -512,6 +515,9 @@ func (f *fixture) listRuns(t *testing.T, query string) []store.Run {
 	t.Helper()
 	path := "/api/v1/runs"
 	if query != "" {
+		values, err := url.ParseQuery(query)
+		must(t, err)
+		w5RequireDeclaredQuery(t, http.MethodGet, path, values)
 		path += "?" + query
 	}
 	var page runsPage

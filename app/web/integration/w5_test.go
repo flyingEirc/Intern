@@ -52,8 +52,12 @@ var w5StateMarkers = []string{
 	"canceled_queued=true", "canceled_running=true", "side_effects=explicit",
 	"sigkill=failed/interrupted", "published_intact=true", "cleanup=exact", "refused=source_unavailable:409",
 	"recovery_repeated=true", "verify_status=passed", "verify_status=not_requested",
-	"container_snapshot=", "exports_started=3", "snapshots_match=true", "new_mysql=mysql:8.4.11@sha256:",
 }
+
+// The fresh-container markers (container_snapshot=, exports_started=,
+// snapshots_match=, new_mysql=) are printed by this harness after its own loop,
+// so they are checked from its own facts below and never against the worker
+// output. The CI gate still requires them on the whole stream.
 
 // w5RestorePattern binds every restore to its published export id and the source
 // snapshot taken at that restore point in the same run.
@@ -159,6 +163,7 @@ func TestW5NativeContainers(t *testing.T) {
 	if started != len(restores) {
 		t.Fatalf("exports started = %d, want %d", started, len(restores))
 	}
+	verifyW5HarnessEvidence(t, started, len(restores), mysqlImage)
 	t.Logf("W5-A6 exports_started=%d snapshots_match=true new_mysql=%s", started, mysqlImage)
 }
 
@@ -272,7 +277,19 @@ func requireW5RestoreCounts(t *testing.T, text string) {
 			t.Fatalf("restore=%s evidence count is not exactly one", label)
 		}
 	}
-	if strings.Count(text, "container_snapshot=") != 3 {
-		t.Fatal("the harness did not compare exactly three published exports")
+}
+
+// verifyW5HarnessEvidence requires the fresh-container facts this harness
+// produced itself: one comparison per published export, all matching (the loop
+// fails on a mismatch), and the pinned image the new servers were started from.
+// These are harness markers, so they are checked from the harness's own values
+// rather than against the worker output it prints later.
+func verifyW5HarnessEvidence(t *testing.T, started, published int, mysqlImage string) {
+	t.Helper()
+	if started != 3 || published != 3 {
+		t.Fatalf("exports started = %d of %d published, want three", started, published)
+	}
+	if !strings.HasPrefix(mysqlImage, "mysql:8.4.11@sha256:") {
+		t.Fatalf("the fresh servers were started from %s, want the pinned mysql:8.4.11 digest", mysqlImage)
 	}
 }
