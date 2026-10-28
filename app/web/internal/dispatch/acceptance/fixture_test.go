@@ -2192,8 +2192,12 @@ func (f *fixture) waitRestorePrepare(t *testing.T, restoreID string) restorePrep
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		if restore := f.w5Get(t, restoreID); restore.Status != store.RestoreStatusRunning {
-			t.Fatalf("restore %s is %s before a prepare process was observed", restoreID, restore.Status)
+		// The row is queued until the worker's one-second poll claims it, so only a
+		// terminal status means the prepare window can never open.
+		switch restore := f.w5Get(t, restoreID); restore.Status {
+		case store.RestoreStatusQueued, store.RestoreStatusRunning:
+		default:
+			t.Fatalf("restore %s ended as %s before a prepare process was observed", restoreID, restore.Status)
 		}
 		if prepare, ok := f.xtrabackupPrepare(restoreID); ok {
 			return prepare
