@@ -57,7 +57,7 @@ trap 'rm -rf "$work"' EXIT
 payload() {
 	printf '%s\n' \
 		"D1-A1 built tag=intern:$tag-mysql8.4 image_id=$image repeat_image_id=$repeat_image source_sha=$source source_dirty=false mysql_image=$mysql_image pxb_image=$pxb_image" \
-		"D1-A1 repeatable=true layers_equal=true layer_count=41 intern_web_sha256=$web" \
+		"D1-A1 repeatable=true no_cache=true content_equal=true content_files=402 layer_count=41 intern_web_sha256=$web" \
 		"D1-A1 bases_pinned=true go_image=$go_image licenses_label=/usr/share/licenses/intern revision=$source" \
 		"D1-A1 runtime_downloads=0 added_commands=11 network_none=true tools=xtrabackup,xbstream,mysqld,intern-web" \
 		"D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999 entrypoint=[\"/usr/local/bin/intern-web\"]" \
@@ -166,7 +166,7 @@ reject foreign_artifact_sha "if has(\"Output\") then .Output |= sub(\"D1-ARTIFAC
 reject artifact_image_mismatch "if has(\"Output\") then .Output |= sub(\"candidate-artifact.json source_sha=${source} image_id=${image}\"; \"candidate-artifact.json source_sha=${source} image_id=${repeat_image}\") else . end"
 reject artifact_web_mismatch "if has(\"Output\") then .Output |= sub(\"docker_save_bytes=1610612736 intern_web_sha256=${web}\"; \"docker_save_bytes=1610612736 intern_web_sha256=${snapshot}\") else . end"
 reject tiny_artifact 'if has("Output") then .Output |= sub("docker_save_bytes=1610612736"; "docker_save_bytes=1024") else . end'
-reject no_repeatable 'if has("Output") then .Output |= sub("repeatable=true layers_equal=true"; "repeatable=false layers_equal=false") else . end'
+reject no_repeatable 'if has("Output") then .Output |= sub("repeatable=true no_cache=true content_equal=true"; "repeatable=true no_cache=false content_equal=true") else . end'
 reject unpinned_base "if has(\"Output\") then .Output |= sub(\"mysql_image=${mysql_image}\"; \"mysql_image=mysql:8.4\") else . end"
 reject unpinned_go "if has(\"Output\") then .Output |= sub(\"go_image=${go_image}\"; \"go_image=golang:1.27\") else . end"
 reject runtime_downloads 'if has("Output") then .Output |= sub("runtime_downloads=0"; "runtime_downloads=3") else . end'

@@ -77,7 +77,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   # The image itself: pinned bases, a repeatable build, no run-time download, the
   # matrix versions, the non-root default, the GPL materials and the Compose pins.
   ($output | test("D1-A1 built tag=intern:[0-9a-f]{12}(-dirty)?-mysql8\\.4 image_id=sha256:[0-9a-f]{64} repeat_image_id=sha256:[0-9a-f]{64} source_sha=[0-9a-f]{40} source_dirty=false mysql_image=mysql:8\\.4\\.11@sha256:[0-9a-f]{64} pxb_image=percona/percona-xtrabackup:8\\.4\\.0-7@sha256:[0-9a-f]{64}")) and
-  ($output | test("D1-A1 repeatable=true layers_equal=true layer_count=[1-9][0-9]* intern_web_sha256=[0-9a-f]{64}")) and
+  ($output | test("D1-A1 repeatable=true no_cache=true content_equal=true content_files=[1-9][0-9]* layer_count=[1-9][0-9]* intern_web_sha256=[0-9a-f]{64}")) and
   ($output | test("D1-A1 bases_pinned=true go_image=golang:1\\.27\\.0@sha256:[0-9a-f]{64} licenses_label=/usr/share/licenses/intern revision=[0-9a-f]{40}")) and
   ($output | test("D1-A1 runtime_downloads=0 added_commands=[1-9][0-9]* network_none=true tools=xtrabackup,xbstream,mysqld,intern-web")) and
   ($output | test("D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999")) and

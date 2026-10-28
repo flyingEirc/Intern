@@ -597,7 +597,10 @@ func (f *d1Fixture) waitHealthy(ctx context.Context, service string, within time
 // publishedPort reads back one service's actual loopback host port.
 func (f *d1Fixture) publishedPort(ctx context.Context, service, private string) string {
 	f.t.Helper()
-	out := f.composeOK(ctx, "port", "-q", service, private)
+	// `docker compose port -q` is not supported by every Compose v2 release (the
+	// CI machine rejects the shorthand), and the plain form already prints only
+	// the host:port line.
+	out := f.composeOK(ctx, "port", service, private)
 	_, port, err := net.SplitHostPort(strings.TrimSpace(out))
 	if err != nil {
 		f.fatal("service %s published %q, want host:port", service, out)
@@ -645,22 +648,27 @@ func (f *d1Fixture) caseImage(t *testing.T, ctx context.Context) {
 	defer func() { f.report(d1KeyCase+"%s", d1Cases[0]) }()
 	entry := d1Compatibility(t)
 	mysqlImage, pxbImage := candidateImages(t)
-	f.candidateID = f.buildImage(ctx, f.candidate, f.source)
-	repeat := f.buildImage(ctx, f.candidate+"-r", f.source)
+	f.candidateID = f.buildImage(ctx, f.candidate, f.source, false)
+	// The second build bypasses the build cache entirely, so equal content is a
+	// real rebuild result rather than a cache hit. Layer IDs carry build-time
+	// metadata and are not expected to match; the shipped file content must.
+	repeat := f.buildImage(ctx, f.candidate+"-r", f.source, true)
 	f.webDigest = f.digestInImage(ctx, f.candidateID, d1WebBinary)
 	repeatWeb := f.digestInImage(ctx, repeat, d1WebBinary)
-	layers := f.imageLayers(ctx, f.candidateID)
-	f.layers = layers
-	repeatLayers := f.imageLayers(ctx, repeat)
+	f.layers = f.imageLayers(ctx, f.candidateID)
 	if !d1Hex64.MatchString(f.webDigest) || f.webDigest != repeatWeb {
 		f.fatal("the two candidate builds produced different binaries: %q vs %q", f.webDigest, repeatWeb)
 	}
-	if strings.Join(layers, " ") != strings.Join(repeatLayers, " ") {
-		f.fatal("the two candidate builds produced different image layers: %d vs %d", len(layers), len(repeatLayers))
+	content := f.contentManifest(ctx, f.candidateID)
+	repeatContent := f.contentManifest(ctx, repeat)
+	if content != repeatContent {
+		f.fatal("a no-cache rebuild shipped different file content (%d vs %d lines)",
+			strings.Count(content, "\n"), strings.Count(repeatContent, "\n"))
 	}
 	f.report(d1KeyBuilt+"tag=%s image_id=%s repeat_image_id=%s source_sha=%s source_dirty=%t mysql_image=%s pxb_image=%s",
 		f.candidate, f.candidateID, repeat, f.source, f.dirty, mysqlImage, pxbImage)
-	f.report(d1KeyRepeat+"true layers_equal=true layer_count=%d intern_web_sha256=%s", len(layers), f.webDigest)
+	f.report(d1KeyRepeat+"true no_cache=true content_equal=true content_files=%d layer_count=%d intern_web_sha256=%s",
+		strings.Count(content, "\n"), len(f.layers), f.webDigest)
 	f.checkPinnedBases(ctx, f.candidateID, mysqlImage, pxbImage)
 	f.checkRuntimeDownloads(ctx)
 	f.checkDefaultUser(ctx, f.candidateID)
@@ -673,14 +681,20 @@ func (f *d1Fixture) caseImage(t *testing.T, ctx context.Context) {
 
 // buildImage builds one candidate tag from the repository Dockerfile with the
 // pinned digests and the exact source revision as its provenance label.
-func (f *d1Fixture) buildImage(ctx context.Context, tag, sourceLabel string) string {
+func (f *d1Fixture) buildImage(ctx context.Context, tag, sourceLabel string, noCache bool) string {
 	f.t.Helper()
 	mysqlImage, pxbImage := candidateImages(f.t)
-	_, stderr, code := f.run(ctx, "docker", "build", "--platform", "linux/amd64",
+	args := []string{
+		"build", "--platform", "linux/amd64",
 		"--file", filepath.Join(f.root, d1DockerfilePath), "--tag", tag,
 		"--build-arg", d1Assign("SOURCE_SHA", sourceLabel),
 		"--build-arg", d1Assign("MYSQL_IMAGE", mysqlImage),
-		"--build-arg", d1Assign("PXB_IMAGE", pxbImage), f.root)
+		"--build-arg", d1Assign("PXB_IMAGE", pxbImage),
+	}
+	if noCache {
+		args = append(args, "--no-cache")
+	}
+	_, stderr, code := f.run(ctx, "docker", append(args, f.root)...)
 	if code != 0 {
 		f.fatal("building %s failed exit=%d: %s", tag, code, stderr)
 	}
@@ -689,6 +703,22 @@ func (f *d1Fixture) buildImage(ctx context.Context, tag, sourceLabel string) str
 		f.fatal("image %s reports id %q", tag, id)
 	}
 	return id
+}
+
+// contentManifest is the sorted SHA-256 list of every file the image adds on top
+// of its base: the Web binary, the copied tools and libraries, and the license
+// tree. Two builds of the same source must ship byte-identical content even when
+// their layer metadata differs.
+func (f *d1Fixture) contentManifest(ctx context.Context, image string) string {
+	f.t.Helper()
+	out, code := f.dockerAllow(ctx, "run", "--rm", "--platform", "linux/amd64", "--network", "none",
+		"--entrypoint", "/bin/sh", image, "-c",
+		"find /usr/local/bin/intern-web /usr/bin/xtrabackup /usr/bin/xbstream /usr/lib/private "+
+			"/usr/lib64/libprocps.so.8.0.3 "+d1LicenseDirectory+" -type f -exec sha256sum {} + | LC_ALL=C sort")
+	if code != 0 || strings.Count(out, "\n") < 10 {
+		f.fatal("image %s content manifest exit=%d lines=%d", image, code, strings.Count(out, "\n"))
+	}
+	return out
 }
 
 // runOffline starts one short-lived container of the candidate image with no
@@ -926,21 +956,24 @@ func (f *d1Fixture) checkGPLMaterials(ctx context.Context, entry physical.Compat
 		"grep -c '^copied /usr/lib' "+d1LicenseDirectory+"/VERSIONS.txt",
 	)
 	out := f.runOffline(ctx, strings.Join(checks, " && "))
+	// The `test -s` presence checks print nothing; every other check prints one
+	// count, in order. A missing file fails the whole && chain above.
 	counts := strings.Fields(out)
-	if len(counts) != len(checks) {
-		f.fatal("the GPL material probe reported %q, want %d values", out, len(checks))
+	if want := len(checks) - len(d1LicenseFiles); len(counts) != want {
+		f.fatal("the license material probe reported %q, want %d values", out, want)
 	}
-	for index, value := range counts[len(d1LicenseFiles):] {
+	for index, value := range counts {
 		count, err := strconv.Atoi(value)
 		require(f.t, err)
 		if count == 0 {
-			f.fatal("GPL material check %d found nothing", index)
+			f.fatal("license material check %d found nothing", index)
 		}
 	}
+	if counts[6] != counts[7] {
+		f.fatal("GO-MODULES.txt lists %s modules but %s license texts ship with them", counts[6], counts[7])
+	}
 	f.report(d1KeyGPL+"files=%d notice=true offer=true versions=true mysql_gpl=%s pxb_gpl=%s source_sha_bound=true procps_lgpl=%s procps_named=%s go_modules=%s go_license_texts=%s copied_objects=%s matrix=%s,%s",
-		len(d1LicenseFiles), counts[len(d1LicenseFiles)], counts[len(d1LicenseFiles)+1],
-		counts[len(d1LicenseFiles)+4], counts[len(d1LicenseFiles)+5],
-		counts[len(d1LicenseFiles)+6], counts[len(d1LicenseFiles)+7], counts[len(d1LicenseFiles)+8],
+		len(d1LicenseFiles), counts[0], counts[1], counts[4], counts[5], counts[6], counts[7], counts[8],
 		entry.ServerVersion, entry.ToolVersion)
 }
 
@@ -1907,7 +1940,7 @@ func (f *d1Fixture) upgradeImage(t *testing.T, ctx context.Context) {
 	t.Helper()
 	before := f.containerID(ctx, "intern")
 	label := f.source + "-upgrade"
-	f.upgradeID = f.buildImage(ctx, f.upgrade, label)
+	f.upgradeID = f.buildImage(ctx, f.upgrade, label, false)
 	if f.upgradeID == f.candidateID {
 		f.fatal("the upgrade candidate reused the same image id %s", f.upgradeID)
 	}
