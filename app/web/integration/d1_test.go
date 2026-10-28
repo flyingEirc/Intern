@@ -148,7 +148,10 @@ var d1ResultMarkers = []string{
 }
 
 var (
+	// Backups, chains and restores are 32 lowercase hex; resources (repositories,
+	// sources, policies) and runs are canonical UUIDv7 strings.
 	d1Hex32       = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	d1UUID        = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	d1Hex64       = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	d1VersionLine = regexp.MustCompile(`(Ver |version )([0-9][0-9.]*(?:-[0-9]+)?)`)
 	// d1InstallPattern names the commands that would fetch code or binaries at
@@ -244,11 +247,23 @@ func TestD1NativeContainers(t *testing.T) {
 		}
 		fixture.requireCaseSet(t)
 	}()
-	t.Run("a1-image", func(t *testing.T) { fixture.caseImage(t, ctx) })
-	t.Run("a2-compose", func(t *testing.T) { fixture.caseCompose(t, ctx) })
-	t.Run("a3-business", func(t *testing.T) { fixture.caseBusiness(t, ctx) })
-	t.Run("a4-lifecycle", func(t *testing.T) { fixture.caseLifecycle(t, ctx) })
-	t.Run("a5-guardrails", func(t *testing.T) { fixture.caseGuardrails(t, ctx) })
+	// Each case builds on the state the previous one produced (image → stack →
+	// chain → lifecycle → guardrails), so the first failure ends the run instead of
+	// letting later cases report consequences of a state that never existed.
+	for _, step := range []struct {
+		name string
+		run  func(*testing.T, context.Context)
+	}{
+		{d1Cases[0], fixture.caseImage},
+		{d1Cases[1], fixture.caseCompose},
+		{d1Cases[2], fixture.caseBusiness},
+		{d1Cases[3], fixture.caseLifecycle},
+		{d1Cases[4], fixture.caseGuardrails},
+	} {
+		if !t.Run(step.name, func(t *testing.T) { step.run(t, ctx) }) {
+			t.Fatalf("D1 case %s failed; the state it was to produce is unknown, so no later case runs", step.name)
+		}
+	}
 }
 
 // newD1Fixture creates the private fixture tree the deployment mounts: a real
@@ -352,6 +367,9 @@ func (f *d1Fixture) writeOverride() error {
 		`      - "` + f.probes + `:/d1-secrets:ro"`,
 		"",
 	}, "\n")
+	if os.Getenv("INTERN_LOCAL_SHAKEOUT") != "" { // TEMP-LOCAL-SHAKEOUT: remove before commit
+		body += "    blkio_config: !reset {}\n"
+	}
 	f.override = filepath.Join(f.hostDir, "override.yaml")
 	return os.WriteFile(f.override, []byte(body), 0o600)
 }
@@ -505,9 +523,11 @@ func (f *d1Fixture) withhold(text string) string {
 }
 
 // fatal fails the running case with a message that names the command context.
+// Every message passes through withhold first: command stderr and driver errors
+// can quote an interpolated credential, and evidence must never carry one.
 func (f *d1Fixture) fatal(format string, args ...any) {
 	f.t.Helper()
-	f.t.Fatalf(format, args...)
+	f.t.Fatal(f.withhold(fmt.Sprintf(format, args...)))
 }
 
 // report records one locked fact: it is logged for the CI gate and remembered
@@ -1114,8 +1134,8 @@ func (f *d1Fixture) createdID(raw string) string {
 		ID string `json:"id"`
 	}
 	f.decode(raw, &created)
-	if !d1Hex32.MatchString(created.ID) {
-		f.fatal("created resource id %q is not 32 lowercase hex", created.ID)
+	if !d1UUID.MatchString(created.ID) {
+		f.fatal("created resource id %q is not a UUIDv7", created.ID)
 	}
 	return created.ID
 }
@@ -1289,8 +1309,9 @@ func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	f.composeOK(ctx, "up", "--detach")
 	mysqlID := f.waitHealthy(ctx, "mysql", 4*time.Minute)
 	internID := f.waitHealthy(ctx, "intern", 4*time.Minute)
-	mysqlPort := f.publishedPort(ctx, "mysql", "3306/tcp")
-	apiPort := f.publishedPort(ctx, "intern", "8443/tcp")
+	// `docker compose port` takes the bare private port; the protocol defaults to tcp.
+	mysqlPort := f.publishedPort(ctx, "mysql", "3306")
+	apiPort := f.publishedPort(ctx, "intern", "8443")
 	f.mysqlPort, _ = strconv.Atoi(mysqlPort)
 	f.apiBase = "https://127.0.0.1:" + apiPort
 	f.newAPIClient()
@@ -1350,10 +1371,17 @@ func (f *d1Fixture) requireTransportFacts(t *testing.T) {
 	plain, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		strings.Replace(f.apiBase, "https://", "http://", 1)+"/healthz", nil)
 	require(t, err)
+	// Go's TLS server answers a plaintext HTTP request on the TLS port with a fixed
+	// 400 "Client sent an HTTP request to an HTTPS server" and serves nothing else;
+	// any outcome other than that refusal or a transport error means the port
+	// served HTTP without TLS.
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(plain)
 	if err == nil {
-		_ = response.Body.Close()
-		f.fatal("the TLS listener answered a plaintext request with %d", response.StatusCode)
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close() //nolint:errcheck // the status and body already decide the outcome
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "HTTP request to an HTTPS server") {
+			f.fatal("the TLS listener answered a plaintext request with %d %q", response.StatusCode, string(raw))
+		}
 	}
 	untrusted := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{RootCAs: x509.NewCertPool()},
@@ -1430,7 +1458,7 @@ func (f *d1Fixture) requireSocketAndKEK(t *testing.T, ctx context.Context) {
 	if !outcome.OK || outcome.Error != nil {
 		f.fatal("the source preflight did not pass: %s", body)
 	}
-	if !containsAll(outcome.Checks, "socket", "permissions", "version", "identity") {
+	if !containsAll(outcome.Checks, "identity", "compatibility", "volume", "mount", "privileges", "capacity") {
 		f.fatal("the preflight did not run the locked checks: %v", outcome.Checks)
 	}
 	f.report(d1KeySocket+"preflight_passed checks=%d source=%s repository=%s sealed=true",
@@ -1502,10 +1530,14 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 // is how the SIGTERM case keeps a real run in flight.
 func (f *d1Fixture) createPolicy(t *testing.T, name string, throttle int64) string {
 	t.Helper()
+	// Both schedules sit half a day away from now, so the in-process scheduler can
+	// never fire a run of its own during the acceptance and every run, parent and
+	// counter the cases assert is one the harness triggered itself.
+	quiet := (time.Now().UTC().Hour() + 12) % 24
 	body := fmt.Sprintf(`{"name":%q,"source_id":%q,"local_repository_id":%q,`+
-		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC",`+
+		`"full_cron":"0 %d * * *","incremental_cron":"30 %d * * *","timezone":"UTC",`+
 		`"max_chain_length":5,"parallel":1,"throttle":%d,"zstd_level":3,"page_tracking":false,"enabled":false}`,
-		name, f.sourceID, f.repositoryID, throttle)
+		name, f.sourceID, f.repositoryID, quiet, quiet, throttle)
 	return f.createdID(f.api(http.MethodPost, "/api/v1/policies", body, "", http.StatusCreated))
 }
 
@@ -1548,7 +1580,7 @@ func (f *d1Fixture) trigger(t *testing.T, kind, key string) string {
 		RunID string `json:"run_id"`
 	}
 	f.decode(raw, &created)
-	if !d1Hex32.MatchString(created.RunID) {
+	if !d1UUID.MatchString(created.RunID) {
 		f.fatal("trigger returned run_id %q", created.RunID)
 	}
 	return created.RunID
@@ -1874,7 +1906,7 @@ func (f *d1Fixture) triggerOn(t *testing.T, policyID, kind, key string) string {
 		RunID string `json:"run_id"`
 	}
 	f.decode(raw, &created)
-	if !d1Hex32.MatchString(created.RunID) {
+	if !d1UUID.MatchString(created.RunID) {
 		f.fatal("trigger returned run_id %q", created.RunID)
 	}
 	return created.RunID
@@ -2062,7 +2094,7 @@ func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	state := f.docker(ctx, "inspect", "--format",
 		"{{.State.ExitCode}} {{.State.OOMKilled}} {{.State.Status}}", id)
 	fields := strings.Fields(state)
-	if len(fields) != 3 || fields[2] != "exited" || fields[1] != "false" || fields[0] == "137" {
+	if len(fields) != 3 || fields[2] != "exited" || fields[1] != "false" || fields[0] != "0" {
 		f.fatal("the container did not exit cleanly on SIGTERM: %s", state)
 	}
 	f.composeOK(ctx, "start", "intern")
@@ -2171,7 +2203,7 @@ func (f *d1Fixture) seedDatabase(ctx context.Context) {
 	db := f.sourceDB()
 	defer func() { require(f.t, db.Close()) }()
 	for _, statement := range []string{
-		fmt.Sprintf("CREATE USER IF NOT EXISTS %q@'localhost' IDENTIFIED BY %%?", d1BackupUser),
+		"CREATE USER IF NOT EXISTS '" + d1BackupUser + "'@'localhost' IDENTIFIED BY ?",
 		"GRANT BACKUP_ADMIN, PROCESS, RELOAD, LOCK TABLES, REPLICATION CLIENT ON *.* TO 'intern_bkp'@'localhost'",
 		"GRANT SELECT ON performance_schema.log_status TO 'intern_bkp'@'localhost'",
 		"GRANT SELECT ON performance_schema.keyring_component_status TO 'intern_bkp'@'localhost'",
@@ -2185,7 +2217,9 @@ func (f *d1Fixture) seedDatabase(ctx context.Context) {
 	} {
 		if strings.HasPrefix(statement, "CREATE USER") {
 			_, err := db.ExecContext(ctx, statement, f.sourcePass)
-			require(f.t, err)
+			if err != nil {
+				f.fatal("creating the backup account failed: %v", err)
+			}
 			continue
 		}
 		_, err := db.ExecContext(ctx, statement)

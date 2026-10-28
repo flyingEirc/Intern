@@ -91,20 +91,20 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=d1[0-9a-f]+ mysql=[0-9a-f]{12,64} intern=[0-9a-f]{12,64} api=https://127\\.0\\.0\\.1:[1-9][0-9]* mysql_port=[1-9][0-9]* healthcheck=intern-web")) and
   ($output | test("D1-A2 create_admin=created user=d1-admin login=200 negotiated=1\\.[23] stdin=true")) and
   ($output | test("D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true container_user=999:999")) and
-  ($output | test("D1-A2 socket=preflight_passed checks=[1-9][0-9]* source=[0-9a-f]{32} repository=[0-9a-f]{32} sealed=true")) and
+  ($output | test("D1-A2 socket=preflight_passed checks=[1-9][0-9]* source=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} repository=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} sealed=true")) and
   ($output | test("D1-A2 identity [^\\n]*project=(d1[0-9a-f]+)[\\s\\S]*D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=\\1")) and
   ($output | test("D1-A2 stack=healthy[^\\n]*mysql=([0-9a-f]{12,64})[^\\n]*intern=([0-9a-f]{12,64})[\\s\\S]*D1-A2 kek secret=/run/secrets/intern_kek[^\\n]*mysql=\\1")) and
-  ($output | test("D1-A2 socket=preflight_passed checks=[0-9]+ source=([0-9a-f]{32}) repository=([0-9a-f]{32})[\\s\\S]*D1-A3 topology=[^\\n]* source=\\1 repository=\\2")) and
-  (([$output | scan("D1-A3 (?:full|incremental) run=[0-9a-f]{32} backup=([0-9a-f]{32})")] | map(.[0]) | unique) | length == 2) and
+  ($output | test("D1-A2 socket=preflight_passed checks=[0-9]+ source=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) repository=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})[\\s\\S]*D1-A3 topology=[^\\n]* source=\\1 repository=\\2")) and
+  (([$output | scan("D1-A3 (?:full|incremental) run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=([0-9a-f]{32})")] | map(.[0]) | unique) | length == 2) and
   (([$output | scan("D1-A4 (restart|recreate|upgrade) instance_id=([0-9a-zA-Z_-]{8,})")] | map(.[1]) | unique) | length == 1) and
   # The business loop: one chain of full then incremental, a restore of the
   # incremental whose published export is named after the restore itself, and a
   # brand-new pinned server that reproduces the recorded snapshot exactly.
-  ($output | test("D1-A3 topology=compose-mysql->intern-web->local-repository policy=[0-9a-f]{32} source=[0-9a-f]{32} repository=[0-9a-f]{32} replica=none")) and
-  ($output | test("D1-A3 full run=[0-9a-f]{32} backup=[0-9a-f]{32} status=completed seq=1 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
-  ($output | test("D1-A3 incremental run=[0-9a-f]{32} backup=[0-9a-f]{32} status=completed seq=2 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
+  ($output | test("D1-A3 topology=compose-mysql->intern-web->local-repository policy=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} source=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} repository=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} replica=none")) and
+  ($output | test("D1-A3 full run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=[0-9a-f]{32} status=completed seq=1 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
+  ($output | test("D1-A3 incremental run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=[0-9a-f]{32} status=completed seq=2 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
   ($output | test("D1-A3 incremental parent=[0-9a-f]{32} chain=[0-9a-f]{32} server_uuid_bound=true")) and
-  ($output | test("D1-A3 full run=[0-9a-f]{32} backup=([0-9a-f]{32})[\\s\\S]*?D1-A3 incremental run=[0-9a-f]{32} backup=([0-9a-f]{32}) status=completed seq=2[\\s\\S]*?D1-A3 incremental parent=\\1[\\s\\S]*?D1-A3 restore=[0-9a-f]{32} backup=\\2 status=completed")) and
+  ($output | test("D1-A3 full run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=([0-9a-f]{32})[\\s\\S]*?D1-A3 incremental run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=([0-9a-f]{32}) status=completed seq=2[\\s\\S]*?D1-A3 incremental parent=\\1[\\s\\S]*?D1-A3 restore=[0-9a-f]{32} backup=\\2 status=completed")) and
   ($output | test("D1-A3 restore=([0-9a-f]{32}) backup=[0-9a-f]{32} status=completed export=/var/lib/intern/export/\\1[\\s\\S]*D1-A3 export=\\1 mode_owner=750:999:999")) and
   ($output | test("D1-A3 export_mysql_started=1 expected_snapshot=([0-9a-f]{64}) container_snapshot=\\1 match=true")) and
   # Lifecycle: restart, recreate and image upgrade keep one metadata instance,
@@ -119,7 +119,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   # without ever producing a completed run.
   ($output | test("D1-A5 second_container=refused flock_text=true exit=[1-9][0-9]* primary_healthy=true primary_api=200")) and
   ($output | test("D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true")) and
-  ($output | test("D1-A5 sigterm run=[0-9a-f]{32} observed_running=true grace_seconds=1[0-9][0-9] stop_seconds=([0-9]|[1-8][0-9]) exit_code=0 oom_killed=false")) and
+  ($output | test("D1-A5 sigterm run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} observed_running=true grace_seconds=1[0-9][0-9] stop_seconds=([0-9]|[1-8][0-9]) exit_code=0 oom_killed=false")) and
   ($output | test("D1-A5 no_false_completed=true run_status=(?:failed|canceled) error_class=(?:canceled|interrupted) backup_id=none completed_runs_before=([0-9]+) completed_runs_after=\\1")) and
   # The candidate artifact binds the exact commit, the image that was built, the
   # tarball digest, and the binary digest the repeatable build compared.
