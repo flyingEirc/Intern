@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	driver "github.com/go-sql-driver/mysql"
@@ -246,50 +244,16 @@ func (e *execution) waitRehearsalSocket(ctx context.Context, process *physical.M
 	}
 }
 
-// killRehearsal kills the supervised server and reaps it. The SIGKILL this call
-// sends is the intended outcome, so the signaled exit status it produces is not a
-// teardown failure; a kill that could not be delivered or a bounded wait that
-// expired still is.
+// killRehearsal kills the supervised server and reaps it. A kill this process
+// requested is an intended teardown, so physical.WaitExit reports both possible
+// ends — the SIGKILL, or the supervisor's own teardown exit when it observed the
+// lifetime-pipe close first — as a clean exit. A kill that could not be
+// delivered or a bounded wait that expired is still a teardown failure.
 func (e *execution) killRehearsal(process *physical.MysqldProcess) error {
 	killErr := process.Kill()
 	waitCtx, cancel := context.WithTimeout(context.Background(), rehearsalShutdownTimeout)
 	defer cancel()
-	waitErr := process.WaitExit(waitCtx)
-	if onlyKilledExit(waitErr) {
-		waitErr = nil
-	}
-	return errors.Join(killErr, waitErr)
-}
-
-// onlyKilledExit reports whether err carries nothing but the exit status of a
-// process this process just SIGKILLed. Any other cause — a refused kill, an
-// expired wait, a second error joined next to the exit status — keeps the teardown
-// a failure.
-func onlyKilledExit(err error) bool {
-	if err == nil {
-		return false
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		parts := joined.Unwrap()
-		if len(parts) == 0 {
-			return false
-		}
-		for _, part := range parts {
-			if !onlyKilledExit(part) {
-				return false
-			}
-		}
-		return true
-	}
-	if wrapped := errors.Unwrap(err); wrapped != nil {
-		return onlyKilledExit(wrapped)
-	}
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
-		return false
-	}
-	status, ok := exit.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGKILL
+	return errors.Join(killErr, process.WaitExit(waitCtx))
 }
 
 func (e *execution) stopRehearsal(ctx context.Context, process *physical.MysqldProcess, db *sql.DB) error {

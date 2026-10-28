@@ -127,7 +127,9 @@ func (p *MysqldProcess) Exited() <-chan struct{} {
 }
 
 // WaitExit waits for the supervised server to exit, bounded by ctx. It returns
-// nil only for a clean exit.
+// nil only for a clean exit. A teardown this process requested through Kill is
+// clean whichever side ended it first: the SIGKILL, or the supervisor's own
+// teardown after it observed the lifetime-pipe close.
 func (p *MysqldProcess) WaitExit(ctx context.Context) error {
 	if p == nil || p.process == nil {
 		return errors.New("physical: no rehearsal process")
