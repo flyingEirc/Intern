@@ -1,4 +1,10 @@
 // Package artifact stores bounded streams using zstd and Tink AES-128-GCM.
+//
+// NewStream binds the manifest before payload streaming and exposes single-use
+// pipeline stages. After a successful run, Envelope seals the ciphertext size
+// and digest in the unchanged v1 format. The caller owns durable publication;
+// closing stages alone does not publish an artifact. Write and Read retain the
+// payload.bin/envelope.json layout, while ReadFiles accepts explicit member paths.
 package artifact
 
 import (
@@ -40,17 +46,6 @@ type metadata struct {
 }
 
 func digest(b []byte) string { sum := sha256.Sum256(b); return hex.EncodeToString(sum[:]) }
-
-type countWriter struct {
-	w io.Writer
-	n int64
-}
-
-func (w *countWriter) Write(p []byte) (int, error) {
-	n, err := w.w.Write(p)
-	w.n += int64(n)
-	return n, err
-}
 
 type contextReader struct {
 	ctx context.Context

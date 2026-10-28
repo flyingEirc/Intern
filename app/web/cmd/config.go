@@ -16,10 +16,15 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/server"
+	"github.com/flyingEirc/Intern/internal/credential"
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
+// configuration is the Web server's complete configuration. The credential and
+// preflight settings are optional: without them the server still starts, and only
+// the operations that need them answer 503.
 type configuration struct {
 	Listen               string             `mapstructure:"listen"`
 	MetadataDir          string             `mapstructure:"metadata_dir"`
@@ -27,7 +32,16 @@ type configuration struct {
 	TrustedProxies       []string           `mapstructure:"trusted_proxies"`
 	TLSTerminatedByProxy bool               `mapstructure:"tls_terminated_by_proxy"`
 	Session              auth.SessionConfig `mapstructure:"session"`
-	Log                  struct {
+	// KEKFile seals source and FTP repository passwords.
+	KEKFile string `mapstructure:"kek_file"`
+	// WorkRoot is the private scratch root the physical preflight and backups use.
+	WorkRoot string `mapstructure:"work_root"`
+	// XtrabackupPath is the exact XtraBackup executable the preflight probes.
+	XtrabackupPath string `mapstructure:"xtrabackup_path"`
+	// MinWorkBytes and MinBackupBytes are positive free-space policies.
+	MinWorkBytes   uint64 `mapstructure:"min_work_bytes"`
+	MinBackupBytes uint64 `mapstructure:"min_backup_bytes"`
+	Log            struct {
 		Level string `mapstructure:"level"`
 	} `mapstructure:"log"`
 	TLS struct {
@@ -111,7 +125,60 @@ func (c configuration) validate() error {
 	if err := c.validateTransport(); err != nil {
 		return err
 	}
+	if err := c.validateResources(); err != nil {
+		return err
+	}
 	return c.validateTLS()
+}
+
+// validateResources accepts every credential and preflight setting as absent,
+// and requires each supplied value to be usable on its own terms. Cross-field
+// rules belong to the operation that needs them, so a partial deployment still
+// starts and answers 503 only for the operations it cannot run.
+func (c configuration) validateResources() error {
+	for _, setting := range []struct{ name, value string }{
+		{"kek_file", c.KEKFile}, {"work_root", c.WorkRoot}, {"xtrabackup_path", c.XtrabackupPath},
+	} {
+		if setting.value == "" {
+			continue
+		}
+		if !filepath.IsAbs(setting.value) {
+			return fmt.Errorf("%s must be an absolute path", setting.name)
+		}
+	}
+	if c.MinWorkBytes == 0 && c.MinBackupBytes == 0 {
+		return nil
+	}
+	if c.MinWorkBytes == 0 {
+		return errors.New("min_work_bytes must be positive when min_backup_bytes is set")
+	}
+	if c.MinBackupBytes == 0 {
+		return errors.New("min_backup_bytes must be positive when min_work_bytes is set")
+	}
+	return nil
+}
+
+// resourceSettings resolves the credential and preflight service settings. The
+// KEK must sit outside the metadata and work directories, which is checked here
+// so a misplacement is a startup error rather than a per-request failure.
+func (c configuration) resourceSettings() (resources.Settings, error) {
+	settings := resources.Settings{
+		KeyFile: c.KEKFile, MetadataDir: c.MetadataDir, WorkRoot: c.WorkRoot,
+		XtrabackupPath: c.XtrabackupPath, MinWorkBytes: c.MinWorkBytes, MinBackupBytes: c.MinBackupBytes,
+	}
+	if c.KEKFile == "" {
+		return settings, nil
+	}
+	forbidden := []string{c.MetadataDir}
+	if c.WorkRoot != "" {
+		forbidden = append(forbidden, c.WorkRoot)
+	}
+	sealer, err := credential.Open(c.KEKFile, forbidden...)
+	if err != nil {
+		return resources.Settings{}, err
+	}
+	settings.Sealer = sealer
+	return settings, nil
 }
 
 // validateTransport rejects plain non-loopback listeners before any certificate

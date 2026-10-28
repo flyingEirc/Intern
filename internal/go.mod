@@ -6,6 +6,8 @@ require (
 	github.com/go-mysql-org/go-mysql v1.13.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gofrs/flock v0.12.1
+	github.com/hashicorp/go-version v1.9.0
+	github.com/jlaffaye/ftp v0.2.4
 	github.com/klauspost/compress v1.20.0
 	github.com/pingcap/tidb/pkg/parser v0.0.0-20250421232622-526b2c79173d
 	github.com/pressly/goose/v3 v3.26.0

@@ -15,11 +15,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
+	"github.com/flyingEirc/Intern/internal/artifact"
 )
 
 func cleanConfigEnv(t *testing.T) {
 	t.Helper()
-	keys := []string{"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_TLS_TERMINATED_BY_PROXY", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME"}
+	keys := []string{
+		"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_TLS_TERMINATED_BY_PROXY", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME",
+		"INTERN_KEK_FILE", "INTERN_WORK_ROOT", "INTERN_XTRABACKUP_PATH", "INTERN_MIN_WORK_BYTES", "INTERN_MIN_BACKUP_BYTES",
+	}
 	for _, key := range keys {
 		value, existed := os.LookupEnv(key)
 		t.Cleanup(func() {
@@ -85,6 +89,146 @@ func assertConfig(t *testing.T, c configuration, err error, listen, dir, level s
 	if !reflect.DeepEqual(c, want) {
 		t.Fatalf("configuration = %+v; want %+v", c, want)
 	}
+}
+
+// TestOptionalResourceSettings pins the Stage C configuration contract: every new
+// credential and preflight setting is optional and absent by default.
+func TestOptionalResourceSettings(t *testing.T) {
+	cleanConfigEnv(t)
+	defaults, err := loadConfig(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoResourceSettings(t, defaults)
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "kek.json")
+	loaded, err := loadConfig(t, "--kek-file", keyFile, "--work-root", filepath.Join(dir, "work"),
+		"--xtrabackup-path", "/usr/bin/xtrabackup", "--min-work-bytes", "1024", "--min-backup-bytes", "2048")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.KEKFile != keyFile || loaded.MinWorkBytes != 1024 || loaded.MinBackupBytes != 2048 ||
+		loaded.WorkRoot != filepath.Join(dir, "work") || loaded.XtrabackupPath != "/usr/bin/xtrabackup" {
+		t.Fatalf("resources = %+v", loaded)
+	}
+}
+
+func assertNoResourceSettings(t *testing.T, c configuration) {
+	t.Helper()
+	if c.KEKFile != "" || c.WorkRoot != "" || c.XtrabackupPath != "" || c.MinWorkBytes != 0 || c.MinBackupBytes != 0 {
+		t.Fatalf("defaults = %+v", c)
+	}
+}
+
+// TestOptionalResourceSettingsValidation requires each supplied value to be
+// absolute, and the two capacity thresholds to be supplied together.
+func TestOptionalResourceSettingsValidation(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args    []string
+		message string
+	}{
+		"relative kek":        {[]string{"--kek-file", "relative/kek.json"}, "kek_file must be an absolute path"},
+		"relative work":       {[]string{"--work-root", "work"}, "work_root must be an absolute path"},
+		"relative xtrabackup": {[]string{"--xtrabackup-path", "xtrabackup"}, "xtrabackup_path must be an absolute path"},
+		"work without backup": {[]string{"--min-work-bytes", "1024"}, "min_backup_bytes must be positive"},
+		"backup without work": {[]string{"--min-backup-bytes", "1024"}, "min_work_bytes must be positive"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cleanConfigEnv(t)
+			_, err := loadConfig(t, tc.args...)
+			if err == nil || !strings.Contains(err.Error(), tc.message) {
+				t.Fatalf("error = %v, want %q", err, tc.message)
+			}
+		})
+	}
+}
+
+// TestKEKInsideMetadataIsRefusedAtStartup covers the location rule that only
+// matters when the key exists and the server is starting.
+func TestKEKInsideMetadataIsRefusedAtStartup(t *testing.T) {
+	cleanConfigEnv(t)
+	metadata := privateConfigDir(t)
+	inside := filepath.Join(metadata, "kek.json")
+	if err := artifact.GenerateKey(inside); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(t, "--metadata-dir", metadata, "--kek-file", inside)
+	if err != nil {
+		t.Fatalf("configuration load refused an optional key: %v", err)
+	}
+	if _, err = c.resourceSettings(); err == nil {
+		t.Fatal("a KEK inside metadata_dir was accepted")
+	}
+}
+
+// TestKEKOutsideMetadataEnablesCredentials covers the accepted location: a key
+// outside the metadata directory enables sealing but not the physical preflight.
+func TestKEKOutsideMetadataEnablesCredentials(t *testing.T) {
+	cleanConfigEnv(t)
+	metadata := privateConfigDir(t)
+	outside := filepath.Join(t.TempDir(), "kek.json")
+	if err := artifact.GenerateKey(outside); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(t, "--metadata-dir", metadata, "--kek-file", outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := c.resourceSettings()
+	if err != nil {
+		t.Fatalf("an outside KEK was refused: %v", err)
+	}
+	if !settings.Credentials() || settings.Preflight() {
+		t.Fatalf("settings = %+v", settings)
+	}
+}
+
+// TestEmptyWorkRootDoesNotResolveToCwdForKEK proves an omitted work_root is not
+// passed to credential.Open, so a KEK sitting in the process cwd is accepted.
+func TestEmptyWorkRootDoesNotResolveToCwdForKEK(t *testing.T) {
+	cleanConfigEnv(t)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	keyFile := filepath.Join(cwd, "kek.json")
+	if err := artifact.GenerateKey(keyFile); err != nil {
+		t.Fatal(err)
+	}
+	metadata := privateConfigDir(t)
+	c, err := loadConfig(t, "--metadata-dir", metadata, "--kek-file", keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.WorkRoot != "" {
+		t.Fatalf("work_root = %q", c.WorkRoot)
+	}
+	settings, err := c.resourceSettings()
+	if err != nil || !settings.Credentials() {
+		t.Fatalf("empty work_root treated as cwd: %+v %v", settings, err)
+	}
+}
+
+// TestAbsentKEKDisablesOnlyDependentOperations proves an absent key is not a
+// startup failure.
+func TestAbsentKEKDisablesOnlyDependentOperations(t *testing.T) {
+	cleanConfigEnv(t)
+	metadata := privateConfigDir(t)
+	c, err := loadConfig(t, "--metadata-dir", metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := c.resourceSettings()
+	if err != nil || settings.Credentials() || settings.Preflight() {
+		t.Fatalf("unconfigured settings = %+v %v", settings, err)
+	}
+}
+
+func privateConfigDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "metadata")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestConfigErrorsHaveNoSideEffects(t *testing.T) {

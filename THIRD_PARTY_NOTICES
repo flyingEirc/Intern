@@ -24,3 +24,39 @@ code offer. Before external distribution, provide the corresponding source or
 other GPL-compliant source provision, and all required third-party notices for
 the chosen exact versions. A link alone is not claimed to satisfy every
 redistribution obligation. See docs/roadmap/数据库备份与恢复-2026-10-17.md, sections 10 and 15.
+
+Physical runner admission and verification (P2, issue #27):
+github.com/hashicorp/go-version v1.9.0 is used under MPL-2.0; its upstream
+LICENSE is retained by the Go module distribution:
+https://github.com/hashicorp/go-version/blob/v1.9.0/LICENSE
+The real-component harness reuses testcontainers-go v0.44.0 (MIT).
+It executes the unmodified percona/percona-xtrabackup:8.4.0-7 image pinned
+in internal/physical/compat.json. Percona XtraBackup is GPLv2 software:
+https://github.com/percona/percona-xtrabackup
+These tests do not publish an Intern runtime image or fulfill the separate
+D1 redistribution/source-provision acceptance requirement.
+The P2 login-path isolation fixture also executes the unmodified
+mysql_config_editor from the matching official client RPM, using the existing
+client-tools Dockerfile target and the checksum-pinned CLI profile for that
+same MySQL image. The native tool, not a reimplemented login-file codec, creates
+the fixture. This helper image is not published.
+
+Plain FTP repository and real-server verification (S1, issue #28):
+github.com/jlaffaye/ftp v0.2.4 is used under ISC:
+https://github.com/jlaffaye/ftp/blob/v0.2.4/LICENSE
+The private fixture builds unmodified Pure-FTPd 1.0.54 with quota support
+from its official release tarball, verified against the SHA512 pinned in
+app/web/integration/ftp.Dockerfile. Pure-FTPd is ISC-licensed:
+https://github.com/jedisct1/pure-ftpd/blob/1.0.54/COPYING
+The image retains COPYING at /usr/share/licenses/pure-ftpd/COPYING.
+The exact Alpine base digest and build/runtime package versions are pinned
+in that Dockerfile. Alpine package license information remains upstream:
+https://pkgs.alpinelinux.org/
+The fixture uses Pure-FTPd's built-in system crypt path with musl 1.2.6-r3
+(MIT), not the optional libsodium backend. Generated test credentials must
+use the upstream default bcrypt cost 10; an unexpected fallback is refused.
+https://pkgs.alpinelinux.org/package/v3.24/main/x86_64/musl
+https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT?h=v1.2.6
+This fixture is used only for private verification, not published as an
+Intern runtime image. SFTPGo was evaluated but is not the selected fixture:
+its quota/permission status codes did not match the locked fault scenarios.

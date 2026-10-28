@@ -1,11 +1,11 @@
 name: Intern quality
 
+# Automatic triggers are disabled: CircleCI (.circleci/config.yml) is the
+# active CI and this workflow is manual-only (workflow_dispatch). It is kept
+# for comparison once GitHub Actions billing is restored, and must be kept in
+# sync with .circleci/config.yml.
 on:
-  pull_request:
-  push:
   workflow_dispatch:
-  schedule:
-    - cron: '23 3 * * *'
 
 permissions:
   contents: read
@@ -62,6 +62,10 @@ jobs:
         run: go build ./internal/... ./app/cli/... ./app/web/...
       - name: Behavior and race tests
         run: go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...
+      # Same step as the CircleCI quality-fast job: the gates' own accept and
+      # reject cases, including an empty GITHUB_SHA, run here too.
+      - name: W4 evidence gate accept and reject cases
+        run: .github/scripts/w4-gate-cases.sh
       - name: Install pinned golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
       - name: Lint including integration code
@@ -71,7 +75,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -96,7 +100,7 @@ jobs:
       - name: Real CLI and database container scenarios
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
-          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=20m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
       - name: Reject incomplete or skipped scenario evidence
         if: always()
         run: |
@@ -116,9 +120,176 @@ jobs:
             .cache/quality/${{ matrix.profile }}/events.jsonl
             .cache/quality/${{ matrix.profile }}/receipts/*.json
 
+  container-physical:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native physical runner and source preflight
+        run: |
+          mkdir -p .cache/quality/physical
+          go test -json -tags=integration -count=1 -timeout=16m ./app/web/integration -run '^TestP2NativeContainers$' | tee .cache/quality/physical/events.jsonl
+      - name: Reject incomplete or skipped physical evidence
+        if: always()
+        run: .github/scripts/verify-physical-evidence.sh .cache/quality/physical/events.jsonl
+      - name: Retain allowlisted physical evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: physical-p2-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/physical/events.jsonl
+
+  container-ftp:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native FTP publication and fault acceptance
+        env:
+          INTERN_S1_ARCH: amd64
+        run: |
+          mkdir -p .cache/quality/ftp
+          go test -json -tags=integration -count=1 -timeout=14m ./app/web/integration -run '^TestS1NativeContainers$' | tee .cache/quality/ftp/events.jsonl
+      - name: Reject incomplete or skipped FTP evidence
+        if: always()
+        run: .github/scripts/verify-ftp-evidence.sh .cache/quality/ftp/events.jsonl
+      - name: Retain allowlisted FTP evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ftp-s1-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/ftp/events.jsonl
+
+  container-replication:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native replication, authentication and retention acceptance
+        run: |
+          mkdir -p .cache/quality/replication
+          go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run '^TestR1NativeContainers$' | tee .cache/quality/replication/events.jsonl
+      - name: Reject incomplete or skipped replication evidence
+        if: always()
+        run: .github/scripts/verify-replication-evidence.sh .cache/quality/replication/events.jsonl
+      - name: Retain allowlisted replication evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: replication-r1-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/replication/events.jsonl
+
+  container-web:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native Web resource, preflight and policy acceptance
+        run: |
+          mkdir -p .cache/quality/web
+          go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run '^TestW3NativeContainers$' | tee .cache/quality/web/events.jsonl
+      - name: Reject incomplete or skipped Web evidence
+        if: always()
+        run: .github/scripts/verify-w3-evidence.sh .cache/quality/web/events.jsonl
+      - name: Retain allowlisted Web evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-w3-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/web/events.jsonl
+
+  container-dispatch:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native dispatcher run, replica and SSE acceptance
+        run: |
+          mkdir -p .cache/quality/dispatch
+          go test -json -tags=integration -count=1 -timeout=40m ./app/web/integration -run '^TestW4NativeContainers$' | tee .cache/quality/dispatch/events.jsonl
+      - name: Reject incomplete or skipped dispatcher evidence
+        if: always()
+        run: .github/scripts/verify-w4-evidence.sh .cache/quality/dispatch/events.jsonl
+      - name: Retain allowlisted dispatcher evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dispatch-w4-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/dispatch/events.jsonl
+
   quality-gate:
     name: quality-gate
-    needs: [scope, quality-fast, container-mysql]
+    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -129,12 +300,17 @@ jobs:
           REQUIRED: ${{ needs.scope.outputs.required }}
           FAST: ${{ needs.quality-fast.result }}
           CONTAINERS: ${{ needs.container-mysql.result }}
+          PHYSICAL: ${{ needs.container-physical.result }}
+          FTP: ${{ needs.container-ftp.result }}
+          REPLICATION: ${{ needs.container-replication.result }}
+          WEB: ${{ needs.container-web.result }}
+          DISPATCH: ${{ needs.container-dispatch.result }}
         working-directory: .
         run: |
           test "$SCOPE" = success
           case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success; test "$WEB" = success; test "$DISPATCH" = success ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

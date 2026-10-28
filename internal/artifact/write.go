@@ -3,8 +3,6 @@ package artifact
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -12,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/tink-crypto/tink-go/v2/aead"
 	"github.com/tink-crypto/tink-go/v2/keyset"
 	"github.com/tink-crypto/tink-go/v2/streamingaead"
@@ -37,19 +34,18 @@ func Write(ctx context.Context, dir string, payload io.Reader, manifest []byte, 
 			return err
 		}
 	}
-	seal, err := newSealer(opts, manifest)
+	stream, err := NewStream(opts, manifest)
 	if err != nil {
 		return err
 	}
-	meta, err := seal.writePayload(ctx, dir, payload, opts.Compress)
+	if err = stream.writePayload(ctx, dir, payload); err != nil {
+		return err
+	}
+	encoded, err := stream.Envelope()
 	if err != nil {
 		return err
 	}
-	meta.Manifest = manifest
-	if err = seal.sealMetadata(meta); err != nil {
-		return err
-	}
-	return saveEnvelope(dir, seal.env)
+	return saveEnvelope(dir, encoded)
 }
 
 func newSealer(opts Options, manifest []byte) (*sealer, error) {
@@ -98,40 +94,28 @@ func (s *sealer) initializeEncryption(path string) error {
 	return nil
 }
 
-func (s *sealer) writePayload(ctx context.Context, dir string, payload io.Reader, compress bool) (meta metadata, retErr error) {
+func (s *Stream) writePayload(ctx context.Context, dir string, payload io.Reader) (retErr error) {
 	f, err := fsutil.OpenFile(filepath.Join(dir, "payload.bin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return meta, err
+		return err
 	}
 	defer fsutil.Close(&retErr, f)
-	hash := sha256.New()
-	counted := &countWriter{w: io.MultiWriter(f, hash)}
-	if err = s.encode(ctx, counted, payload, compress); err != nil {
-		return meta, err
+	if err = s.encode(ctx, f, payload); err != nil {
+		return err
 	}
-	if err = f.Sync(); err != nil {
-		return meta, err
-	}
-	return metadata{Size: counted.n, SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
+	return f.Sync()
 }
 
-func (s *sealer) encode(ctx context.Context, w io.Writer, payload io.Reader, compress bool) (retErr error) {
-	if s.stream != nil {
-		encrypted, err := s.stream.NewEncryptingWriter(w, s.env.AAD)
+func (s *Stream) encode(ctx context.Context, w io.Writer, payload io.Reader) (retErr error) {
+	// Construct downstream first; deferred closes run upstream first, retaining
+	// Write's original flush and file-ownership behavior on source failures.
+	for i := len(s.stages) - 1; i >= 0; i-- {
+		stage, err := s.stages[i](w)
 		if err != nil {
 			return err
 		}
-		defer fsutil.Close(&retErr, encrypted)
-		w = encrypted
-	}
-	if compress {
-		compressed, err := zstd.NewWriter(w, zstd.WithEncoderConcurrency(1))
-		if err != nil {
-			return err
-		}
-		// LIFO closes compression before the encrypting writer.
-		defer fsutil.Close(&retErr, compressed)
-		w = compressed
+		defer fsutil.Close(&retErr, stage)
+		w = stage
 	}
 	_, err := io.Copy(w, &contextReader{ctx: ctx, r: payload})
 	return errors.Join(err, ctx.Err())
@@ -152,11 +136,7 @@ func (s *sealer) sealMetadata(meta metadata) error {
 	return nil
 }
 
-func saveEnvelope(dir string, env envelope) (retErr error) {
-	encoded, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
+func saveEnvelope(dir string, encoded []byte) (retErr error) {
 	f, err := fsutil.OpenFile(filepath.Join(dir, "envelope.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err

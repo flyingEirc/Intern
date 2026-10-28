@@ -18,6 +18,9 @@ type AuditDetail struct {
 	PasswordChanged bool   `json:"password_changed,omitzero"`
 	Method          string `json:"method,omitempty"`
 	Route           string `json:"route,omitempty"`
+	// PlaintextFTP records that the stored FTP credential is sent without TLS.
+	// It is a risk flag for display, never a credential.
+	PlaintextFTP bool `json:"plaintext_ftp,omitzero"`
 }
 
 type AuditLog struct {
@@ -125,30 +128,25 @@ func (s *Store) AuditLogs(ctx context.Context, before int64, limit int) ([]Audit
 }
 
 // CreateAdmin commits the new administrator and system audit entry atomically.
-// BEGIN IMMEDIATE on the writable pool reserves the write lock before either insert.
-func (s *Store) CreateAdmin(ctx context.Context, username, hash string) (_ User, retErr error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return User{}, err
-	}
-	defer func() {
-		if retErr != nil {
-			if rollbackErr := tx.Rollback(); !errors.Is(rollbackErr, sql.ErrTxDone) {
-				retErr = errors.Join(retErr, rollbackErr)
-			}
+// BEGIN IMMEDIATE on the writable pool reserves the write lock before either
+// insert. The transaction runs detached like every store write: a canceled
+// caller can never leave a half-open transaction on the single connection.
+func (s *Store) CreateAdmin(ctx context.Context, username, hash string) (User, error) {
+	var user User
+	err := s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		queries := storesql.New(tx)
+		created, err := createUser(ctx, queries, username, hash, "admin")
+		if err != nil {
+			return err
 		}
-	}()
-	queries := storesql.New(tx)
-	user, err := createUser(ctx, queries, username, hash, "admin")
-	if err != nil {
-		return User{}, err
-	}
-	err = insertAudit(ctx, queries, AuditLog{
-		ActorType: "system", Action: "users.create_admin",
-		ResourceType: "user", ResourceID: user.ID, Result: "success", Detail: AuditDetail{Role: "admin"},
+		user = created
+		return insertAudit(ctx, queries, AuditLog{
+			ActorType: "system", Action: "users.create_admin",
+			ResourceType: "user", ResourceID: user.ID, Result: "success", Detail: AuditDetail{Role: "admin"},
+		})
 	})
 	if err != nil {
 		return User{}, err
 	}
-	return user, tx.Commit()
+	return user, nil
 }

@@ -28,6 +28,9 @@
 - 参考实现不能成为本项目的隐含约束。复用代码遵守许可、版权与声明；Databasus 等参考路径以项目根和实际布局为准，不能把参考方案直接当作 Intern 已支持能力。
 - SQL 变更维护源查询和生成代码，必要时运行 `mise run generate`；模式变更通过版本化迁移，不手改生成结果规避源定义。
 - 官方数据库工具使用明确的可执行文件与参数调用，维护进程生命周期、取消和错误传播；不自研 redo/binlog 协议或拼接 shell 来执行用户参数。
+- P2（#27）共享入口：`physical.Preflight` 在当前执行身份下查询真实源并检查只读挂载、卷归属、权限、加密、空间；必须提供正数 `MinWorkBytes` / `MinBackupBytes`。`BackupSource` 是单次 `pipeline.Source`，调用前每次重新预检；`Metadata()` 只在进程成功、原始元数据一致且私有工作目录清理成功后返回独立副本。`CheckpointsRaw` / `InfoRaw` 是工具 `--extra-lsndir` 的原文；流内 `xtrabackup_info` 会另行渲染，`backup_size` 可能不同。`Info.UUID` 是备份 UUID，不是 `Identity.UUID` 的服务器身份。物理链发布仍由 P3 负责，不把 Source 成功当作完整备份 completed。
+- Linux 物理工具通过私有继承描述符传递结构化配置，自重执行监督进程管理工具进程组及父进程死亡清理，支持父进程为容器 PID 1。凭据使用权限 `0600` 的匿名 memfd，经 `/proc/self/fd/4` 交给工具，不建立磁盘 `client.cnf`；`--no-login-paths` 与 MySQL 环境变量隔离阻止隐式凭据覆盖，工具原始诊断不进入公共错误。整个进程树被 SIGKILL 后可能遗留无凭据的工作子目录；调用方须为每次运行提供独占工作根，并由 P3 的持久归属/清理账本回收，禁止仅按前缀扫描删除。调用方 writer 必须可取消；任意卡死 Go `Write` 无法被强制中断。`physical.Extract` 仅是已认证可信 xbstream 的隔离解包原语，成功目录由调用方回收，不是完整恢复或恶意归档沙箱。
+- P2 真实组件入口：在原生 Linux amd64 Docker 上执行 `go test -v -tags=integration -count=1 -timeout=16m ./app/web/integration -run '^TestP2NativeContainers$'`。缺 runtime、平台不符或缺 fixture 都失败，不 skip；测试及 CI 结果绑定当次源码、worker 程序摘要和镜像 ID。证据包含只读挂载上的全备/增量与 extra-lsndir 原文字节、可写挂载拒绝、非 root PID 1 的 memfd 全备，以及 `mysql_config_editor` 登录文件在缺少 `--no-login-paths` 时认证失败。当前候选范围与限制见控制面方案第 3 节，不能把 arm64 进程测试称为 amd64 物理链验收。
 
 ## 安全与恢复约束
 
@@ -72,12 +75,16 @@ Web 默认只监听 `127.0.0.1:8080`。登录 Cookie 固定带 `Secure`；非回
 
 同机 HTTPS 反向代理也应显式配置，例如 `--listen 127.0.0.1:8080 --tls-terminated-by-proxy --trusted-proxies 127.0.0.1,::1`；未信任代理时所有转发请求都使用代理地址，登录限流会被所有用户共享。只有实际的代理地址才应加入信任范围。
 
+仓库、数据源与策略 API 的凭据与预检设置全部可选：`--kek-file`（密封数据源与 FTP 密码的独立 KEK）、`--work-root`、`--xtrabackup-path`，以及必须同时为正的 `--min-work-bytes` 与 `--min-backup-bytes`。未配置时服务启动与既有接口行为不变，只有依赖这些输入的端点返回 `503 unavailable` 与固定文案；KEK 必须位于 `metadata_dir`、`work_root` 之外，创建或修改本地仓库根目录时也会校验该根目录不包含 KEK。数据源与 FTP 密码用 Tink AES-128-GCM 加密存储，AAD 绑定 `表:行ID:字段`，因此错误 KEK、跨行或跨字段移动的密文都会失败；API 只写不读，响应仅含 `has_secret`，FTP 仓库另有 `plaintext_credentials: true`。显式明文 FTP 的创建/更新在同一事务写入 `detail.plaintext_ftp=true` 的成功审计；`tls_mode` 必须显式为 `plain`，省略或 `explicit`/`implicit`（FTPS）一律 `422`，当前仅回环开发为明文 HTTP。预检失败返回 `409 preflight_failed` 且不写库：创建或启用失败时策略保持未启用；已经启用的策略在更新预检失败时保持启用及原有设置。未配置 KEK 时写入数据源或带密码的 FTP 仓库返回 `503 unavailable`，本地仓库探测不需要 KEK。`kind` 与 `tls_mode` 在 PUT 中不可变，形状不符返回 `422 validation_failed`。时区必须是非空 IANA 名称，`Local` 与空字符串按 `validation_failed` 拒绝。数据源预检无论成败都持久化 `last_preflight_json`，仅在身份检查成功时写入服务器身份。
+
 用户创建、修改、改密、角色/禁用、会话吊销及登出的数据库变更与成功审计同事务提交；审计写入失败则变更不生效。失败/拒绝请求和登录审计仍尽力记录，Cookie 传输与改密后的 token 轮换不属于数据库事务，不承诺网络与数据库原子性。每进程密码哈希总并发为 2、匿名登录最多占 1；过载仍以 `503` 与 `Retry-After` 拒绝，不采用无界等待。会话响应缓冲最多 8 MiB，超限或尝试流式输出返回单一 `500`，不静默截断 `200`；这不是整进程内存上限，也不是 SSE 支持。
 
 `--shutdown-timeout` 是优雅关闭窗口，不是整个进程的绝对退出上限。窗口结束后取消请求并关闭连接，再等待脱离审计的截止窗口、SQLite `busy_timeout` 和少量调度余量（当前额外最多 10.5 秒）。SQLite busy 回调及内核磁盘 I/O 不保证能被 context 立即中断；超过排空窗口仍会报告错误，不承诺有限时间排空任意卡死 I/O。部署的停止宽限期应覆盖这些窗口。
 
+控制面库只有一条写连接（`SetMaxOpenConns(1)`）。因此写事务不能继承调用方的可取消 context：调用方在事务中途被取消时，连接可能停留在半开事务上，此后每次写入（包括系统审计）都要等满 `busy_timeout` 才报 `SQLITE_BUSY`，直到进程重启。`withTx`/`withTxDB` 因此只在开始前查询调用方 context —— 已结束则直接返回其错误，否则 `BeginTx`、每条语句以及 `Commit`/`Rollback` 都在 `context.WithoutCancel` 加 30 秒上限的窗口内执行。调用方被取消不会中断已开始的写事务，也绝不会留下半开事务；取消的语义是"这次写仍然完成"，不是"放弃这次写"。需要取消语义的调用点必须自己在进入事务前判断，或者像 dispatcher 的终态写一样显式使用脱离窗口。
+
 panic 发生在响应输出前时，可以丢弃部分缓冲并返回统一 `500`；字节已发送后无法收回或改写状态，只记录错误，不能把这类情形描述为已回滚。改密事务成功后若 token 轮换失败，密码与成功审计仍保留，旧会话不得被提升到新 epoch，需要用新密码重新登录。
 
-`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则，工作流位于实际 Git 根的 `.github/workflows/quality.yml`；实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或分支保护已通过验收。
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：活跃 CI 为 CircleCI（`.circleci/config.yml`），对每次推送（功能分支、PR 分支与合并后的 main）运行同一矩阵与全部 `verify-*-evidence.sh` 门禁，不做纯文档跳过；`.github/workflows/quality.yml` 仅保留手动触发（workflow_dispatch），用于计费恢复后的对照，须与 `.circleci/config.yml` 保持同步。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或合并门禁已通过验收。
 
-项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。
+项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`.circleci/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 与 CircleCI 配置都从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。

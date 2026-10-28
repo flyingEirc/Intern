@@ -30,6 +30,73 @@ type Instance struct {
 	CreatedAt string
 }
 
+type Policy struct {
+	ID                  string
+	Name                string
+	SourceID            string
+	LocalRepositoryID   string
+	ReplicaRepositoryID sql.NullString
+	FullCron            string
+	IncrementalCron     string
+	Timezone            string
+	MaxChainLength      int64
+	Parallel            int64
+	Throttle            int64
+	ZstdLevel           int64
+	PageTracking        int64
+	Enabled             int64
+	LastPreflightJson   sql.NullString
+	CreatedAt           string
+	UpdatedAt           string
+	NextFullAt          sql.NullString
+	NextIncrementalAt   sql.NullString
+}
+
+type Repository struct {
+	ID               string
+	Name             string
+	Kind             string
+	ConfigJson       string
+	SecretCiphertext []byte
+	TlsMode          string
+	CreatedAt        string
+	UpdatedAt        string
+}
+
+type Run struct {
+	ID                  string
+	PolicyID            string
+	SourceID            string
+	Kind                string
+	Trigger             string
+	IdempotencyKey      string
+	RequestHash         string
+	Status              string
+	ScheduledAt         string
+	CreatedAt           string
+	StartedAt           sql.NullString
+	FinishedAt          sql.NullString
+	BackupID            sql.NullString
+	ChainID             sql.NullString
+	PayloadSize         sql.NullInt64
+	ErrorClass          sql.NullString
+	ErrorCode           sql.NullString
+	CancelRequested     int64
+	ActorID             sql.NullString
+	LocalRepositoryID   sql.NullString
+	ReplicaRepositoryID sql.NullString
+}
+
+type RunLog struct {
+	RunID   string
+	Seq     int64
+	Ts      string
+	Level   string
+	Event   string
+	Message string
+	Data    interface{}
+}
+
 type Session struct {
 	Token  string
 	Data   []byte
@@ -39,6 +106,20 @@ type Session struct {
 type SessionTombstone struct {
 	Token  string
 	Expiry float64
+}
+
+type Source struct {
+	ID                string
+	Name              string
+	Socket            string
+	Datadir           string
+	Username          string
+	SecretCiphertext  []byte
+	ServerUuid        sql.NullString
+	ServerVersion     sql.NullString
+	LastPreflightJson sql.NullString
+	CreatedAt         string
+	UpdatedAt         string
 }
 
 type User struct {

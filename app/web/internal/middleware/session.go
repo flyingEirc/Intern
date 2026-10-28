@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alexedwards/scs/v2"
@@ -34,6 +35,13 @@ var (
 // rejection and before the handler. /healthz and /readyz skip the store entirely.
 // The handler's bytes stay buffered until Commit returns, so a failed commit
 // writes one 500 and the request log observes that status.
+//
+// The SSE stream routes are the exception: their responses must reach the
+// client unbuffered, so IsSSEPath requests keep the raw gin writer. The stream
+// group then performs the same authenticated load (user, disabled, epoch) and
+// permission checks before its first byte, through the shared authenticate
+// path, so bypassing the buffer does not bypass any session check. The
+// buffered path still commits or destroys the session for every other route.
 func Session(manager *scs.SessionManager, logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -53,6 +61,10 @@ func Session(manager *scs.SessionManager, logger *slog.Logger) gin.HandlerFunc {
 			return
 		}
 		c.Request = c.Request.WithContext(ctx)
+		if IsSSEPath(path) {
+			c.Next()
+			return
+		}
 		buffered := &bufferedResponse{ResponseWriter: c.Writer}
 		c.Writer = buffered
 		c.Next()
@@ -119,6 +131,19 @@ func rejectBuffered(c *gin.Context, manager *scs.SessionManager, logger *slog.Lo
 func logSessionFailure(c *gin.Context, logger *slog.Logger, err error) {
 	logger.ErrorContext(c.Request.Context(), "session persistence failed",
 		"request_id", c.Writer.Header().Get(render.RequestIDHeader), "error", err)
+}
+
+// sseStreamPrefix and sseStreamSuffix define the SSE stream route shape:
+// GET /api/v1/runs/{id}/events. IsSSEPath is the single place that decides
+// which requests skip the buffered response writer, so the middleware and the
+// route registration cannot disagree.
+const sseStreamPrefix, sseStreamSuffix = "/api/v1/runs/", "/events"
+
+// IsSSEPath reports whether the request path belongs to the SSE stream group,
+// whose responses must not be buffered by Session. The stream handler still
+// performs the same session and permission checks before its first byte.
+func IsSSEPath(path string) bool {
+	return strings.HasPrefix(path, sseStreamPrefix) && strings.HasSuffix(path, sseStreamSuffix)
 }
 
 // bufferedResponse holds the handler output until the session commit finishes.

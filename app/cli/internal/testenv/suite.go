@@ -36,11 +36,11 @@ type Suite struct {
 func NewSuite(t *testing.T) *Suite {
 	t.Helper()
 	s := &Suite{T: t}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
-	defer cancel()
 	must(t, s.loadSettings())
-	must(t, s.preflight(ctx))
-	must(t, s.buildCandidate(ctx))
+	buildCtx, buildCancel := context.WithTimeout(t.Context(), 15*time.Minute)
+	defer buildCancel()
+	must(t, s.preflight(buildCtx))
+	must(t, s.buildCandidate(buildCtx))
 	must(t, s.writeJSON("candidate.json", s.Candidate))
 	return s
 }

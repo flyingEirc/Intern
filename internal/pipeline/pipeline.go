@@ -44,8 +44,8 @@ type Stage func(next io.Writer) (io.WriteCloser, error)
 
 // Sink receives the finished byte stream. A nil error from Commit is the
 // object completion point; Abort is for an object that has not committed and
-// is idempotent. Local bytes stay private until Publish. Remote sinks are not
-// implemented.
+// is idempotent. Repository implementations define when committed bytes become
+// visible.
 type Sink interface {
 	io.Writer
 	Commit(ctx context.Context) (Receipt, error)

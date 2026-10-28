@@ -5,12 +5,14 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
+	"github.com/flyingEirc/Intern/app/web/internal/resources"
 )
 
 type Readiness interface {
@@ -21,7 +23,45 @@ type StatusResponse struct {
 	Status string `json:"status"`
 }
 
-func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service) (*gin.Engine, error) {
+// DispatcherControl is the dispatch surface the HTTP layer may call. The
+// server package never touches the dispatcher's loops directly.
+
+// NewEngine serves every route with the deployment capabilities authentication
+// already carries. A deployment without a KEK or preflight settings still serves:
+// only the operations that need them answer 503. The runs routes and the
+// authenticated SSE stream appear only when runs is non-nil.
+func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service, opts ...EngineOption) (*gin.Engine, error) {
+	return NewEngineWithResources(database, logger, trustedProxies, authentication,
+		&resources.Service{Store: authentication.Database}, nil, opts...)
+}
+
+// EngineOption configures optional engine behaviour such as the SSE heartbeat.
+type EngineOption func(*engineOptions)
+
+type engineOptions struct {
+	sseHeartbeat time.Duration
+}
+
+// WithSSEHeartbeat sets the SSE comment interval. Production leaves this unset
+// so the contract default of 15s applies. Tests pass a short interval so
+// heartbeat and revocation cases stay inside the default test timeout.
+func WithSSEHeartbeat(d time.Duration) EngineOption {
+	return func(o *engineOptions) {
+		if d > 0 {
+			o.sseHeartbeat = d
+		}
+	}
+}
+
+// NewEngineWithResources is NewEngine with explicit preflight and credential
+// settings. Callers outside the server package supply them from configuration.
+// runs may be nil: the runs APIs are then absent (unit tests of the resource
+// surface rely on this; production serve always passes the dispatcher).
+func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProxies []string, authentication *auth.Service, service *resources.Service, runs DispatcherControl, opts ...EngineOption) (*gin.Engine, error) {
+	options := engineOptions{sseHeartbeat: sseHeartbeat}
+	for _, opt := range opts {
+		opt(&options)
+	}
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.HandleMethodNotAllowed = true
@@ -58,5 +98,10 @@ func NewEngine(database Readiness, logger *slog.Logger, trustedProxies []string,
 		render.JSON(c, http.StatusOK, StatusResponse{Status: "ready"})
 	})
 	registerAuth(engine, authentication, logger)
+	registerResources(engine, authentication.Database, service, middleware.Authorization{Service: authentication}, logger)
+	if runs != nil {
+		registerRuns(engine, authentication.Database, runs, authentication,
+			middleware.Authorization{Service: authentication}, logger, options.sseHeartbeat)
+	}
 	return engine, nil
 }

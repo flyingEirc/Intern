@@ -1,0 +1,14 @@
+[
+  {
+    "distribution": "mysql-community",
+    "server_version": "8.4.11",
+    "tool_version": "8.4.0-7",
+    "platform": "linux/amd64",
+    "status": "candidate",
+    "verified": false,
+    "evidence_issue": "https://github.com/flyingEirc/Intern/issues/27",
+    "mysql_image": "mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a",
+    "pxb_image": "percona/percona-xtrabackup:8.4.0-7@sha256:bf1478c188271b2478faddb92a27e8378364b672b8e399c0df1c17fef8cb0ceb",
+    "pxb_amd64_manifest": "sha256:709a42328f6954136bf1d3fae69c37e3266c9aaf328b82a8ab9fbec84a6b79eb"
+  }
+]

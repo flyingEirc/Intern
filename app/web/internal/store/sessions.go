@@ -62,70 +62,38 @@ func (s *SessionStore) Commit(token string, data []byte, expiry time.Time) error
 	return s.CommitCtx(context.Background(), token, data, expiry)
 }
 
-func (s *SessionStore) CommitCtx(ctx context.Context, token string, data []byte, expiry time.Time) (retErr error) {
-	tx, err := s.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if retErr != nil {
-			if rollbackErr := tx.Rollback(); !errors.Is(rollbackErr, sql.ErrTxDone) {
-				retErr = errors.Join(retErr, rollbackErr)
-			}
-		}
-	}()
-	queries := storesql.New(tx)
-	now := unixSeconds(time.Now())
-	if _, err = queries.TombstoneActive(ctx, storesql.TombstoneActiveParams{Token: token, Expiry: now}); err == nil {
-		if err = queries.DeleteSession(ctx, token); err != nil {
+func (s *SessionStore) CommitCtx(ctx context.Context, token string, data []byte, expiry time.Time) error {
+	return s.store.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		queries := storesql.New(tx)
+		now := unixSeconds(time.Now())
+		if _, err := queries.TombstoneActive(ctx, storesql.TombstoneActiveParams{Token: token, Expiry: now}); err == nil {
+			// The token was tombstoned between the load and this commit: the
+			// session row goes with the tombstone.
+			return queries.DeleteSession(ctx, token)
+		} else if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		return tx.Commit()
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	err = queries.CommitSession(ctx, storesql.CommitSessionParams{Token: token, Data: data, Expiry: unixSeconds(expiry)})
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+		return queries.CommitSession(ctx, storesql.CommitSessionParams{Token: token, Data: data, Expiry: unixSeconds(expiry)})
+	})
 }
 
 func (s *SessionStore) Delete(token string) error { return s.DeleteCtx(context.Background(), token) }
 
-func (s *SessionStore) DeleteCtx(ctx context.Context, token string) (retErr error) {
-	tx, err := s.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		retErr = rollbackOnFailure(tx, retErr)
-	}()
-	queries := storesql.New(tx)
-	until, err := s.deletedSessionTombstoneExpiry(ctx, queries, token)
-	if err != nil {
-		return err
-	}
-	if err = queries.UpsertSessionTombstone(ctx, storesql.UpsertSessionTombstoneParams{Token: token, Expiry: until}); err != nil {
-		return err
-	}
-	if err = queries.DeleteSession(ctx, token); err != nil {
-		return err
-	}
-	if err = insertLogoutSuccessAudit(ctx, queries); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func rollbackOnFailure(tx *sql.Tx, err error) error {
-	if err == nil {
-		return nil
-	}
-	if rollbackErr := tx.Rollback(); !errors.Is(rollbackErr, sql.ErrTxDone) {
-		return errors.Join(err, rollbackErr)
-	}
-	return err
+func (s *SessionStore) DeleteCtx(ctx context.Context, token string) error {
+	return s.store.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		queries := storesql.New(tx)
+		until, err := s.deletedSessionTombstoneExpiry(ctx, queries, token)
+		if err != nil {
+			return err
+		}
+		if err = queries.UpsertSessionTombstone(ctx, storesql.UpsertSessionTombstoneParams{Token: token, Expiry: until}); err != nil {
+			return err
+		}
+		if err = queries.DeleteSession(ctx, token); err != nil {
+			return err
+		}
+		return insertLogoutSuccessAudit(ctx, queries)
+	})
 }
 
 func (s *SessionStore) deletedSessionTombstoneExpiry(ctx context.Context, queries *storesql.Queries, token string) (float64, error) {

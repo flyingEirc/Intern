@@ -34,6 +34,11 @@ func newConfigLoader(root *cobra.Command) *configLoader {
 	flags.Bool("tls-terminated-by-proxy", false, "Allow plain HTTP when a reverse proxy terminates TLS. Requires --trusted-proxies. Firewall direct access; this is not end-to-end TLS")
 	flags.Duration("session-idle-timeout", 30*time.Minute, "Maximum session inactivity (must not exceed lifetime)")
 	flags.Duration("session-lifetime", 12*time.Hour, "Absolute session lifetime")
+	flags.String("kek-file", "", "KEK keyset that seals source and FTP repository passwords (must be outside metadata_dir and work_root)")
+	flags.String("work-root", "", "Private absolute scratch root for physical preflight and backups")
+	flags.String("xtrabackup-path", "", "Absolute path to the XtraBackup executable the preflight probes")
+	flags.Uint64("min-work-bytes", 0, "Minimum free bytes required on the work volume (positive when set)")
+	flags.Uint64("min-backup-bytes", 0, "Minimum free bytes required on the local repository volume (positive when set)")
 	loader := &configLoader{v: v, flags: flags}
 	for flag, key := range flagBindings {
 		loader.initErr = errors.Join(loader.initErr, v.BindPFlag(key, flags.Lookup(flag)))
@@ -47,4 +52,6 @@ var flagBindings = map[string]string{
 	"shutdown-timeout": "shutdown_timeout", "trusted-proxies": "trusted_proxies",
 	"tls-terminated-by-proxy": "tls_terminated_by_proxy",
 	"session-idle-timeout":    "session.idle_timeout", "session-lifetime": "session.lifetime",
+	"kek-file": "kek_file", "work-root": "work_root", "xtrabackup-path": "xtrabackup_path",
+	"min-work-bytes": "min_work_bytes", "min-backup-bytes": "min_backup_bytes",
 }

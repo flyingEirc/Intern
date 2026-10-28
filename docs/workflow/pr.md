@@ -28,6 +28,14 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 
 合并前检查对应 Issue 的交付完整性和剩余门禁；发布还必须满足候选制品与支持矩阵要求。未满足 Issue 验收标准时不得将其标记完成。
 
+## 合并门禁
+
+GitHub 不做技术强制：本仓库是用户账号下的私有仓库，分支保护与 rulesets 需要 GitHub Pro 或公开仓库（当前返回 403），GitHub merge queue 仅面向组织仓库开放。合并门禁因此按以下流程执行，不依赖 GitHub 的强制检查。
+
+- 合并 PR 前：该 PR head SHA 对应的 CircleCI 流水线必须已完成，`quality-gate` 与全部 job 均成功；流水线 URL 附在 PR 中。没有对应流水线或结果不完整时不得合并。
+- 合并后：main 上合并提交对应的 CircleCI 流水线必须为绿色，其 URL 记录在对应 PR/Issue 中；main 变红时先修复，再合并任何后续 PR。
+- GitHub 侧没有强制的原因即上述计划限制。若仓库日后迁入符合条件的组织，可再启用 GitHub merge queue，CircleCI 的 "Pushes to merge queues" 触发（分支前缀 `gh-readonly-queue/`）随之生效。
+
 ## GitHub 模板入口
 
 默认 PR 模板位于**实际 Git 根目录**的 [.github/pull_request_template.md](../../.github/pull_request_template.md)，对应本项目目录的 `.github/pull_request_template.md`；GitHub 新建 PR 时自动带入下方“内容 / 验收”正文。

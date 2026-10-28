@@ -17,6 +17,8 @@ import (
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
 	"github.com/flyingEirc/Intern/internal/fsutil"
+	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication"
 )
 
 // BusyTimeout is the SQLite busy_timeout on every control-plane connection.
@@ -74,6 +76,14 @@ func openStore(ctx context.Context, dir string) (_ *Store, retErr error) {
 	latest := provider.ListSources()
 	s := &Store{db: db, provider: provider, latest: latest[len(latest)-1].Version}
 	if err = s.migrate(ctx); err != nil {
+		return nil, err
+	}
+	if err = physicalstore.Migrate(ctx, db); err != nil {
+		return nil, err
+	}
+	// Replication owns its own goose table and refers to the physical backups
+	// table, so it migrates after the physical schema.
+	if err = replication.Migrate(ctx, db); err != nil {
 		return nil, err
 	}
 	s.instanceID, err = ensureInstance(ctx, db)
@@ -179,13 +189,46 @@ func (s *Store) Ready(ctx context.Context) error {
 	if current != s.latest {
 		return fmt.Errorf("metadata database version %d does not match embedded latest version %d", current, s.latest)
 	}
+	physicalCurrent, physicalLatest, err := physicalstore.Version(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if physicalCurrent != physicalLatest {
+		return fmt.Errorf("physical database version %d does not match embedded latest version %d", physicalCurrent, physicalLatest)
+	}
+	replicationCurrent, replicationLatest, err := replication.Version(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	if replicationCurrent != replicationLatest {
+		return fmt.Errorf("replication database version %d does not match embedded latest version %d", replicationCurrent, replicationLatest)
+	}
 	return nil
 }
 
-// withTx runs fn inside one BEGIN IMMEDIATE transaction. A non-nil error rolls
-// the mutation and any success audit inserted by fn back together.
-func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (retErr error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+// txWindow bounds one detached write transaction. It is the same budget the
+// dispatcher's terminal run writes use, and it bounds only the transaction
+// itself: a statement waiting on a foreign lock still ends after SQLite's
+// busy_timeout, not after the full window.
+const txWindow = 30 * time.Second
+
+// writeTx runs fn inside one BEGIN IMMEDIATE transaction that caller
+// cancellation cannot poison. The pool holds a single connection, so a
+// transaction begun under a cancellable context that is canceled mid-write can
+// leave that connection half-open, and every later write then waits out
+// busy_timeout. The caller's context is therefore only consulted before the
+// transaction begins: an already-done context returns its error untouched, and
+// otherwise the begin, every statement, and the commit or rollback run under
+// context.WithoutCancel with the bounded window, so a canceled caller can never
+// leave a half-open transaction. A non-nil error rolls the mutation and any
+// success audit inserted by fn back together.
+func (s *Store) writeTx(ctx context.Context, fn func(ctx context.Context, tx *sql.Tx) error) (retErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txWindow)
+	defer cancel()
+	tx, err := s.db.BeginTx(txCtx, nil)
 	if err != nil {
 		return err
 	}
@@ -196,10 +239,23 @@ func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (r
 			}
 		}
 	}()
-	if err = fn(storesql.New(tx)); err != nil {
+	if err = fn(txCtx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// withTx runs fn inside one write transaction. fn receives the transaction's
+// own context and must run every statement with it.
+func (s *Store) withTx(ctx context.Context, fn func(ctx context.Context, q *storesql.Queries) error) error {
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error { return fn(ctx, storesql.New(tx)) })
+}
+
+// withTxDB is withTx for a caller that must also run one statement the Web
+// schema does not own, such as an existence count over a table migrated by the
+// physical or replication package. Anything else belongs in sqlc.
+func (s *Store) withTxDB(ctx context.Context, fn func(ctx context.Context, q *storesql.Queries, tx *sql.Tx) error) error {
+	return s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error { return fn(ctx, storesql.New(tx), tx) })
 }
 
 // Close closes the database before releasing exclusive ownership.

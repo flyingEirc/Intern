@@ -1,0 +1,282 @@
+// Local retention for completed physical chains. Retention is chain-level only.
+// A new local-delete reservation is allowed only when every member is verified
+// on the remote repository, the chain is not pinned, and a newer chain of the
+// same source is fully verified. A committed reservation is the authorization
+// to finish reclaim: a later pin, or any other loss of eligibility, does not
+// stop it. Pin only refuses a new reservation. Nothing here runs automatically.
+package replication
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/flyingEirc/Intern/internal/physical/store"
+	"github.com/flyingEirc/Intern/internal/replication/internal/replsql"
+)
+
+// Retention reasons are fixed, safe codes a caller may persist and display.
+const (
+	// RetentionPinned refuses a chain a user pinned.
+	RetentionPinned = "pinned"
+	// RetentionIncomplete refuses a chain with a member that is not completed.
+	RetentionIncomplete = "incomplete"
+	// RetentionUnverified refuses a chain that is not fully verified on this
+	// repository.
+	RetentionUnverified = "unverified"
+	// RetentionLatest refuses the newest chain of a source.
+	RetentionLatest = "latest"
+	// RetentionNoNewerVerified refuses a chain without a newer fully verified
+	// chain, so the verified prefix always keeps its newest chain.
+	RetentionNoNewerVerified = "no_newer_verified"
+)
+
+// IneligibleError reports why one chain may not lose its local payload.
+type IneligibleError struct{ ChainID, Reason string }
+
+func (e *IneligibleError) Error() string {
+	return "replication retention: chain " + e.ChainID + " is not eligible: " + e.Reason
+}
+
+// Eligible reports whether one whole chain may start a new local-payload
+// reservation. It reads state only and never deletes anything. A chain that
+// already has a committed reservation is finished by DeleteLocalChain or Recover
+// even if Eligible would now refuse it.
+func (r *Replicator) Eligible(ctx context.Context, chainID string) (bool, string, error) {
+	ok, reason, err := r.eligibility(ctx, chainID)
+	return ok, reason, err
+}
+
+func (r *Replicator) eligibility(ctx context.Context, chainID string) (bool, string, error) {
+	chain, err := r.Store.Chain(ctx, chainID)
+	if err != nil {
+		return false, "", err
+	}
+	if chain.Pinned {
+		return false, RetentionPinned, nil
+	}
+	members, err := r.Store.ChainBackups(ctx, chainID)
+	if err != nil {
+		return false, "", err
+	}
+	if !allCompleted(members) {
+		return false, RetentionIncomplete, nil
+	}
+	chains, err := r.Store.SourceChains(ctx, chain.SourceID)
+	if err != nil {
+		return false, "", err
+	}
+	index := chainIndex(chains, chainID)
+	if index < 0 {
+		return false, "", errors.New("replication retention: chain is not listed for its source")
+	}
+	verified, err := r.verifiedWith(ctx, chains)
+	if err != nil {
+		return false, "", err
+	}
+	if !verified[chainID] {
+		return false, RetentionUnverified, nil
+	}
+	return newerVerified(chains[index+1:], verified)
+}
+
+// newerVerified requires a strictly newer chain that is itself fully verified.
+// An empty newer set is the source's latest chain.
+func newerVerified(newer []store.Chain, verified map[string]bool) (bool, string, error) {
+	if len(newer) == 0 {
+		return false, RetentionLatest, nil
+	}
+	for _, chain := range newer {
+		if verified[chain.ID] {
+			return true, "", nil
+		}
+	}
+	return false, RetentionNoNewerVerified, nil
+}
+
+func chainIndex(chains []store.Chain, chainID string) int {
+	for i, chain := range chains {
+		if chain.ID == chainID {
+			return i
+		}
+	}
+	return -1
+}
+
+// verifiedWith returns which chains of one ordered source list are fully
+// verified on this repository.
+func (r *Replicator) verifiedWith(ctx context.Context, chains []store.Chain) (map[string]bool, error) {
+	members := make(map[string][]store.Backup, len(chains))
+	ids := make([]string, 0, len(chains))
+	for _, chain := range chains {
+		backups, err := r.Store.ChainBackups(ctx, chain.ID)
+		if err != nil {
+			return nil, err
+		}
+		members[chain.ID] = backups
+		for _, backup := range backups {
+			ids = append(ids, backup.ID)
+		}
+	}
+	statuses, err := r.ReplicaStatuses(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	verified := make(map[string]bool, len(chains))
+	for id, backups := range members {
+		verified[id] = allVerified(backups, statuses)
+	}
+	return verified, nil
+}
+
+func allCompleted(members []store.Backup) bool {
+	if len(members) == 0 {
+		return false
+	}
+	for _, member := range members {
+		if member.Status != "completed" {
+			return false
+		}
+	}
+	return true
+}
+
+func allVerified(members []store.Backup, statuses map[string]string) bool {
+	if !allCompleted(members) {
+		return false
+	}
+	for _, member := range members {
+		if statuses[member.ID] != replicaVerified {
+			return false
+		}
+	}
+	return true
+}
+
+// DeleteLocalChain removes the local payload directories of one chain. The
+// rows, checkpoints, and metadata stay, and no other chain is touched.
+//
+// Eligibility is required only to create a reservation. If the chain already
+// has pending local-delete rows, those rows are reclaimed without checking
+// eligibility again. Otherwise this checks eligibility, reserves, then reclaims.
+//
+// Every object path is reserved in the physical cleanup ledger, together with
+// local_present=0, before a directory is touched. A crash therefore leaves either
+// a fully local chain or a durable reservation, and running this again or Recover
+// reclaims whatever is left, so a repeated or resumed call is safe.
+func (r *Replicator) DeleteLocalChain(ctx context.Context, chainID string) error {
+	reserved, err := r.Store.LocalDeletePending(ctx, chainID)
+	if err != nil {
+		return err
+	}
+	if len(reserved) > 0 {
+		return r.reclaimOwn(ctx, reserved)
+	}
+	eligible, reason, err := r.eligibility(ctx, chainID)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return &IneligibleError{ChainID: chainID, Reason: reason}
+	}
+	reserved, err = r.Store.ReserveLocalDelete(ctx, chainID, r.retentionNow())
+	if err != nil {
+		return err
+	}
+	return r.reclaimOwn(ctx, reserved)
+}
+
+// reclaimOwn keeps this pair's reservations of the list and reclaims them. A
+// failed ownership read is returned: the caller must not be told the chain was
+// reclaimed when nothing was touched.
+func (r *Replicator) reclaimOwn(ctx context.Context, reserved []store.LocalDelete) error {
+	own, err := r.ownReservations(ctx, reserved)
+	if err != nil {
+		return err
+	}
+	return r.reclaimReserved(ctx, own)
+}
+
+// ownReservations keeps only the pending rows this (local, replica) pair owns:
+// the rows whose backup has a replica row bound to this pair's local
+// repository. A reservation created by another local repository sharing this
+// FTP repository is left untouched — never reclaimed here and never marked
+// done — because its object lives in the other repository's root and this
+// pair's recovery pass is what finishes it.
+//
+// A failed status read is an error, never an empty ownership set: reporting
+// success while reclaiming nothing would leave the reservation's objects in
+// place with the caller believing they are gone.
+func (r *Replicator) ownReservations(ctx context.Context, reserved []store.LocalDelete) ([]store.LocalDelete, error) {
+	ids := make([]string, 0, len(reserved))
+	for _, row := range reserved {
+		ids = append(ids, row.BackupID)
+	}
+	statuses, err := r.ReplicaStatuses(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	own := make([]store.LocalDelete, 0, len(reserved))
+	for _, row := range reserved {
+		if _, ok := statuses[row.BackupID]; ok {
+			own = append(own, row)
+		}
+	}
+	return own, nil
+}
+
+// recoverLocalDeletes finishes every pending local-delete reservation that
+// belongs to this (local, remote) pair, reclaiming it through this pair's local
+// root. A committed reservation stays authorized after a later pin. A
+// reservation of another local repository sharing the same replica repository
+// is not this pair's work: its object is not in this root, so reclaiming it here
+// would either fail or, worse, remove a same-named directory from the wrong
+// repository.
+func (r *Replicator) recoverLocalDeletes(ctx context.Context) error {
+	reserved, err := r.pendingLocalDeletes(ctx)
+	if err != nil {
+		return err
+	}
+	return r.reclaimReserved(ctx, reserved)
+}
+
+// pendingLocalDeletes reads the reservations this pair owns.
+func (r *Replicator) pendingLocalDeletes(ctx context.Context) ([]store.LocalDelete, error) {
+	rows, err := replsql.New(r.DB).PendingLocalDeletesForPair(ctx, replsql.PendingLocalDeletesForPairParams{
+		RepositoryID: r.RepositoryID, LocalRepositoryID: r.LocalRepositoryID, InstanceID: r.InstanceID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	reserved := make([]store.LocalDelete, 0, len(rows))
+	for _, row := range rows {
+		reserved = append(reserved, store.LocalDelete{ID: row.ID, BackupID: row.BackupID, Target: row.Target})
+	}
+	return reserved, nil
+}
+
+// reclaimReserved finishes one reservation. A row is removed only after its
+// directory is durably gone, so a failure keeps the remaining work recorded.
+func (r *Replicator) reclaimReserved(ctx context.Context, reserved []store.LocalDelete) error {
+	var result error
+	for _, row := range reserved {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(result, err)
+		}
+		if err := r.Local.ReclaimPublished(row.Target); err != nil {
+			result = errors.Join(result, err, r.Store.LocalDeleteFailed(ctx, row.ID, "cleanup_failed"))
+			continue
+		}
+		result = errors.Join(result, r.Store.LocalDeleteDone(ctx, row.ID))
+	}
+	return result
+}
+
+func (r *Replicator) retentionNow() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
+const replicaVerified = "verified"

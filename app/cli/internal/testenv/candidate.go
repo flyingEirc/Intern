@@ -19,7 +19,7 @@ import (
 
 var toolVersion = regexp.MustCompile(`\b[0-9]+\.[0-9]+\.[0-9]+\b`)
 
-func (s *Suite) buildCandidate(ctx context.Context) error {
+func (s *Suite) buildCandidate(buildCtx context.Context) error {
 	arch := strings.TrimPrefix(s.Candidate.Platform, "linux/")
 	pkg, err := s.Profile.ClientPackage(arch)
 	if err != nil {
@@ -31,11 +31,13 @@ func (s *Suite) buildCandidate(ctx context.Context) error {
 		args[key] = &value
 	}
 	request := tc.ContainerRequest{FromDockerfile: tc.FromDockerfile{Context: s.Root, Dockerfile: "Dockerfile", Repo: "intern-quality", Tag: s.Profile.ID + "-" + s.Candidate.SourceSHA[:12] + "-" + arch, BuildArgs: args, KeepImage: true}, Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, ImagePlatform: s.Candidate.Platform, ConfigModifier: rootUser, HostConfigModifier: boundedHost, WaitingFor: wait.ForExec([]string{"/usr/bin/test", "-x", "/usr/local/bin/intern"}).WithStartupTimeout(30 * time.Second)}
-	probe, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: request, Started: true})
+	probe, err := tc.GenericContainer(buildCtx, tc.GenericContainerRequest{ContainerRequest: request, Started: true})
 	tc.CleanupContainer(s.T, probe, tc.StopTimeout(5*time.Second))
 	if err != nil {
 		return fmt.Errorf("build real CLI candidate: %w", err)
 	}
+	ctx, cancel := context.WithTimeout(s.T.Context(), 5*time.Minute)
+	defer cancel()
 	inspected, err := probe.Inspect(ctx)
 	if err != nil {
 		return err
