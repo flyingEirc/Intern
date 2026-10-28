@@ -1,11 +1,11 @@
 name: Intern quality
 
+# Automatic triggers are disabled: CircleCI (.circleci/config.yml) is the
+# active CI and this workflow is manual-only (workflow_dispatch). It is kept
+# for comparison once GitHub Actions billing is restored, and must be kept in
+# sync with .circleci/config.yml.
 on:
-  pull_request:
-  push:
   workflow_dispatch:
-  schedule:
-    - cron: '23 3 * * *'
 
 permissions:
   contents: read

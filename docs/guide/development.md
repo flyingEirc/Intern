@@ -85,6 +85,6 @@ Web 默认只监听 `127.0.0.1:8080`。登录 Cookie 固定带 `Secure`；非回
 
 panic 发生在响应输出前时，可以丢弃部分缓冲并返回统一 `500`；字节已发送后无法收回或改写状态，只记录错误，不能把这类情形描述为已回滚。改密事务成功后若 token 轮换失败，密码与成功审计仍保留，旧会话不得被提升到新 epoch，需要用新密码重新登录。
 
-`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：`.github/workflows/quality.yml` 是既有 GitHub Actions 工作流；Actions 计费不可用期间，活跃 CI 为 CircleCI（`.circleci/config.yml`），它对每条流水线运行同一矩阵与全部 `verify-*-evidence.sh` 门禁，不做纯文档跳过。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或分支保护已通过验收。
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：活跃 CI 为 CircleCI（`.circleci/config.yml`），对每次推送（功能分支、PR 分支与合并后的 main）运行同一矩阵与全部 `verify-*-evidence.sh` 门禁，不做纯文档跳过；`.github/workflows/quality.yml` 仅保留手动触发（workflow_dispatch），用于计费恢复后的对照，须与 `.circleci/config.yml` 保持同步。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或合并门禁已通过验收。
 
 项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`.circleci/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 与 CircleCI 配置都从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。

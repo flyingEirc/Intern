@@ -1,10 +1,9 @@
 version: 2.1
 
-# Functional port of .github/workflows/quality.yml (which stays unchanged).
-# GitHub Actions is the existing workflow; CircleCI is the active CI while
-# Actions billing is blocked. It runs the same pinned toolchain, the same
-# container matrix, the same verify gates and the same evidence allowlists,
-# bound to the built commit SHA.
+# Functional port of .github/workflows/quality.yml. CircleCI is the active
+# CI; the Actions workflow is manual-only (workflow_dispatch). CircleCI runs
+# the same pinned toolchain, the same container matrix, the same verify
+# gates and the same evidence allowlists, bound to the built commit SHA.
 #
 # Deliberate differences, all decided by the main session:
 # - No `scope` job and no documentation-only skip: CircleCI always runs the
@@ -17,9 +16,10 @@ version: 2.1
 #   (max runtime is a plan setting). Each primary command carries a GNU
 #   `timeout` equal to the Actions job limit, and long steps raise
 #   no_output_timeout to that same limit.
-# - Retention of uploaded artifacts (7 days in Actions) and auto-cancel of
-#   redundant pipelines (Actions concurrency group) are CircleCI project
-#   settings, not config keys; configure them once in Project Settings.
+# - Retention of uploaded artifacts and auto-cancel of redundant workflows
+#   are web app settings, not config keys: set artifact retention to 7 days
+#   under Plan > Usage Controls and enable Project Settings > Advanced >
+#   Auto-cancel Redundant Workflows (full trigger setup: workflows section).
 
 executors:
   native-amd64:
@@ -305,17 +305,21 @@ jobs:
 
 workflows:
   quality:
-    # Nightly UTC run on main, matching the Actions schedule cron.
-    triggers:
-      - schedule:
-          cron: "23 3 * * *"
-          filters:
-            branches:
-              only:
-                - main
-    # Runs on every branch push and every tag push, matching Actions
-    # on: push / pull_request / workflow_dispatch (PR branches push the same
-    # commits; manual runs are the CircleCI "Trigger Pipeline" action).
+    # Triggered from the CircleCI web app; this file declares no `triggers:`
+    # because scheduled workflows are not available for GitHub App pipelines.
+    # One-time UI setup (Project Settings unless noted):
+    #   1. Project Setup: install the CircleCI GitHub App and set up the
+    #      project against .circleci/config.yml.
+    #   2. Triggers: add a GitHub App trigger "All pushes" — every feature
+    #      branch push, every PR branch push and main after each merge gets a
+    #      pipeline (a future merge queue's gh-readonly-queue/* branches are
+    #      ordinary branches and match the job filters below).
+    #   3. Triggers: add a Schedule trigger for branch main at 03:23 UTC
+    #      (cron "23 3 * * *"), the nightly run.
+    #   4. Advanced: enable Auto-cancel Redundant Workflows.
+    #   5. Plan > Usage Controls: set artifact retention to 7 days.
+    # The job filters run every branch and tag push; manual ad-hoc runs use
+    # the "Trigger Pipeline" action.
     jobs:
       - quality-fast:
           filters: "pipeline.git.branch or pipeline.git.tag"
