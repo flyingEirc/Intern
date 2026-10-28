@@ -32,7 +32,7 @@ func New(out, stderr io.Writer) *cobra.Command {
 	root.SetOut(out)
 	root.SetErr(stderr)
 	app := &application{config: newConfigLoader(root), out: out, stderr: stderr}
-	root.AddCommand(app.serveCommand(), app.migrateCommand(), app.userCommand())
+	root.AddCommand(app.serveCommand(), app.migrateCommand(), app.userCommand(), app.healthcheckCommand())
 	return root
 }
 
