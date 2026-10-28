@@ -114,7 +114,8 @@ func (e *execution) succeed(ctx context.Context) (Result, error) {
 		ExportPath: e.export, ExportBytes: e.exportBytes,
 		PreparedToLSN: e.plan.TargetToLSN, PrepareArgs: e.prepareArgs,
 	}
-	e.enter(PhaseRehearsing)
+	// rehearse() enters the rehearsing phase itself, and only when a rehearsal was
+	// requested: a restore without one ends at exporting.
 	e.result.Verify = e.rehearse(ctx)
 	e.cleanupWork()
 	return e.result, nil

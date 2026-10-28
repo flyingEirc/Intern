@@ -85,6 +85,11 @@ func (e *execution) rehearse(ctx context.Context) *VerifyResult {
 	if !e.req.Rehearse {
 		return nil
 	}
+	// The rehearsing phase begins here and nowhere else: a restore that was not
+	// asked to rehearse ends at exporting, so its progress and its persisted phase
+	// never name a stage that never ran. The phase is reported even when the server
+	// then fails to start, because the attempt is what the phase describes.
+	e.enter(PhaseRehearsing)
 	result := &VerifyResult{Status: "failed"}
 	process, err := physical.StartMysqld(ctx, physical.MysqldOptions{
 		Binary: e.opts.MysqldPath, DataDir: filepath.Join(e.work, "data"),

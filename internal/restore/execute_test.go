@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -189,4 +191,62 @@ func TestSpaceExhaustedUsesTheReportedBlockSize(t *testing.T) {
 			}
 		})
 	}
+}
+
+// phaseRecorder collects the phases one execution reports, in order.
+type phaseRecorder struct {
+	mu   sync.Mutex
+	seen []Phase
+}
+
+func (r *phaseRecorder) report(phase Phase, _ map[string]any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, phase)
+}
+
+func (r *phaseRecorder) phases() []Phase {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Phase(nil), r.seen...)
+}
+
+// TestSucceedEmitsRehearsingOnlyWhenRequested pins the phase sequence of a
+// published restore. A restore that was not asked to rehearse ends at exporting
+// and reports no verify result; a requested rehearsal ends at rehearsing, even
+// when the server cannot start, because the phase names the attempt.
+func TestSucceedEmitsRehearsingOnlyWhenRequested(t *testing.T) {
+	t.Run("no rehearsal", func(t *testing.T) {
+		e := publishFixture(t)
+		e.opts.WorkRoot = filepath.Dir(e.work)
+		e.req = Request{}
+		recorder := &phaseRecorder{}
+		e.progress = recorder.report
+		mustNoError(t, e.publish(t.Context()))
+		result, err := e.succeed(t.Context())
+		mustNoError(t, err)
+		if result.Verify != nil {
+			t.Fatalf("a restore without a rehearsal reported verify %+v", result.Verify)
+		}
+		if got := recorder.phases(); !slices.Equal(got, []Phase{PhaseExporting}) {
+			t.Fatalf("phases = %v, want [exporting]", got)
+		}
+	})
+	t.Run("rehearsal requested", func(t *testing.T) {
+		e := publishFixture(t)
+		e.opts.WorkRoot = filepath.Dir(e.work)
+		e.opts.MysqldPath = filepath.Join(t.TempDir(), "mysqld")
+		e.req = Request{Rehearse: true}
+		recorder := &phaseRecorder{}
+		e.progress = recorder.report
+		mustNoError(t, e.publish(t.Context()))
+		result, err := e.succeed(t.Context())
+		mustNoError(t, err)
+		if result.Verify == nil || result.Verify.Status != "failed" || result.Verify.FailureCode != "not_started" {
+			t.Fatalf("verify = %+v, want a failed rehearsal that never started", result.Verify)
+		}
+		if got := recorder.phases(); !slices.Equal(got, []Phase{PhaseExporting, PhaseRehearsing}) {
+			t.Fatalf("phases = %v, want [exporting rehearsing]", got)
+		}
+	})
 }
