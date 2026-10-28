@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 )
@@ -157,10 +158,13 @@ func MarshalRestoreRequest(backupID, planDigest string, rehearse bool, verifySQL
 	return string(encoded)
 }
 
-// newRestoreID returns the 32 lowercase hex id the API contract requires.
+// newRestoreID returns the 32 lowercase hex id the API contract requires. The
+// bytes are a UUIDv7 written without its dashes, so ids sort by creation time:
+// the documented "newest first, descending id order" list is true because id
+// order is time order, and restore.Recover still receives plain 32-hex ids.
 func newRestoreID() (string, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
+	id, err := uuid.NewV7()
+	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(id[:]), nil
@@ -224,8 +228,15 @@ func (d *Dispatcher) executeRestore(ctx context.Context, restore store.Restore, 
 		return d.finishRestoreFailed(ctx, restore, store.RestoreErrorUnavailable, RestoreCodeUnconfigured,
 			store.RestoreOutcome{SideEffects: store.RestoreSideEffects{}}, "restore runtime is not configured")
 	}
-	restoreCtx, unregister := d.registerRestoreContext(ctx, restore.ID)
+	restoreCtx, cancel, unregister := d.registerRestoreContext(ctx, restore.ID)
 	defer unregister()
+	// A cancel that landed between the claim and this registration set
+	// cancel_requested while no cancelable context existed yet, so nothing could
+	// act on it. Re-read the flag now and cancel before any engine work starts:
+	// the request is then honored as the canceled restore it was meant to be.
+	if d.restoreCancelRequested(ctx, restore.ID) {
+		cancel()
+	}
 
 	tracker := &restoreProgress{dispatcher: d, parent: ctx, restoreID: restore.ID}
 	result, execErr := d.config.Restore.Execute(restoreCtx, RestoreRequest{
@@ -380,8 +391,11 @@ func (d *Dispatcher) finishRestoreWrite(parent context.Context, restoreID string
 }
 
 // registerRestoreContext derives the cancelable context of one claimed restore
-// and registers it, so RequestRestoreCancel reaches the engine's tools.
-func (d *Dispatcher) registerRestoreContext(ctx context.Context, restoreID string) (context.Context, func()) {
+// and registers it, so RequestRestoreCancel reaches the engine's tools. It
+// returns the context, its cancel function and the unregister func; the caller
+// may cancel on its own, which is how a cancel request that arrived before this
+// registration is still honored.
+func (d *Dispatcher) registerRestoreContext(ctx context.Context, restoreID string) (context.Context, context.CancelFunc, func()) {
 	restoreCtx, cancel := context.WithCancel(ctx)
 	unregister := func() {
 		cancel()
@@ -396,7 +410,14 @@ func (d *Dispatcher) registerRestoreContext(ctx context.Context, restoreID strin
 	d.runningRestoreCancel = cancel
 	d.runningRestoreID = restoreID
 	d.mu.Unlock()
-	return restoreCtx, unregister
+	return restoreCtx, cancel, unregister
+}
+
+// restoreCancelRequested reads the stored cancel flag of one restore. A read
+// failure reports false: the caller keeps the outcome it already knows.
+func (d *Dispatcher) restoreCancelRequested(ctx context.Context, restoreID string) bool {
+	stored, err := d.config.Database.Restore(ctx, restoreID)
+	return err == nil && stored.CancelRequested
 }
 
 // progressRestore records one engine phase and appends its bounded log event.

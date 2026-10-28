@@ -73,7 +73,10 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=[0-9a-f]{16} ftp_writes=0 local_payloads=removed")) and
   ($output | test("W5-A2 refused backup_not_found=404 unconfigured=503")) and
   ($output | test("W5-A6 e2e chain=seq:1,2,3 inc1=[0-9a-f-]{36} inc2=[0-9a-f-]{36} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=[1-9][0-9]* phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing")) and
-  ($output | test("W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=[1-9][0-9]*")) and
+  # The state line is matched whole, in the order the worker logged it: a marker
+  # that merely appears somewhere in the output proves nothing about the case
+  # that emitted it.
+  ($output | test("W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=[1-9][0-9]* export_bytes=[1-9][0-9]* verify_status=(passed|not_requested) side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite")) and
   # Each restore names its published export and the source snapshot recorded at
   # that restore point in the same run; the harness starts a brand-new pinned
   # server on that export and digests the data it finds there.
@@ -93,11 +96,17 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A6 restored=inc1 container_snapshot=([0-9a-f]{64}) expected_snapshot=\\1 match=true")) and
   ($output | test("W5-A6 restored=inc2 container_snapshot=([0-9a-f]{64}) expected_snapshot=\\1 match=true")) and
   ($output | test("W5-A3 restored=full container_snapshot=([0-9a-f]{64}) expected_snapshot=\\1 match=true")) and
+  # The mutual-exclusion line must itself carry running_max=1: the gate requires
+  # the observation, it does not merely refuse a worse-looking one.
+  ($output | test("W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=[1-9][0-9]* sqlite_intervals=disjoint")) and
+  # The SIGKILL line must itself carry every recovery fact: they cannot be moved
+  # onto some other line and still count.
+  ($output | test("W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true")) and
   # A false success after SIGKILL, a deleted published export, or a second
   # concurrency slot are refusals even when every marker above is present.
   ($output | test("sigkill=completed") | not) and
   ($output | test("published_intact=false") | not) and
-  ($output | test("running_max=[2-9]") | not) and
+  ($output | test("running_max=[02-9]") | not) and
   ($output | test("side_effects=none") | not) and
   # The candidate identity is the exact commit under test, clean, with a native
   # amd64 daemon and a pinned non-root worker.

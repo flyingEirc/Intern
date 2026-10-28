@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -720,4 +721,113 @@ func requireRestoreID(value string) error {
 		}
 	}
 	return nil
+}
+
+// TestRestoreIDsAreTimeOrdered proves the id contract the API documents: 32
+// lowercase hex bytes of a UUIDv7, so id order is creation order and the
+// descending-id page starts with the newest restore instead of a random one.
+func TestRestoreIDsAreTimeOrdered(t *testing.T) {
+	f := newFixture(t)
+	user := f.restoreUser()
+	backupID := "00000000-0000-7000-8000-000000000070"
+	ids := make([]string, 0, 6)
+	for index := range 6 {
+		id, err := newRestoreID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = requireRestoreID(id); err != nil {
+			t.Fatalf("restore id %q: %v", id, err)
+		}
+		plan := restorePlan(backupID)
+		if _, err = f.database.CreateRestore(f.t.Context(), store.RestoreInput{
+			ID: id, BackupID: backupID, Plan: plan, PlanDigest: plan.Digest,
+			IdempotencyKey: "ordered-" + strconv.Itoa(index), RequestHash: "hash-ordered-" + strconv.Itoa(index),
+			RequestedBy: user.ID, Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+		// One millisecond is the UUIDv7 clock unit: a later id must sort after
+		// every earlier one.
+		time.Sleep(2 * time.Millisecond)
+	}
+	page, err := f.database.Restores(f.t.Context(), store.RestoresFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != len(ids) {
+		t.Fatalf("page has %d rows, want %d", len(page), len(ids))
+	}
+	for index, restore := range page {
+		want := ids[len(ids)-1-index]
+		if restore.ID != want {
+			t.Fatalf("position %d = %s, want the newest %s", index, restore.ID, want)
+		}
+	}
+}
+
+// TestRestoreCancelLandedBeforeContextRegistration proves the narrow window the
+// worker used to lose: the request arrived after the claim committed and before
+// any cancelable context existed, so nothing could act on it. Re-reading
+// cancel_requested once the context is registered must still cancel the restore
+// instead of running it to completion.
+func TestRestoreCancelLandedBeforeContextRegistration(t *testing.T) {
+	f := newFixture(t)
+	f.runtime.ExportRoot = t.TempDir()
+	user := f.restoreUser()
+	backupID := "00000000-0000-7000-8000-000000000071"
+	engine := &fakeRestoreEngine{
+		plan:    restorePlan(backupID),
+		execute: publishUnlessCanceled(f.runtime.ExportRoot),
+	}
+	// A dispatcher that is not started: only this test claims and executes, so
+	// the window is reproduced exactly rather than raced for.
+	d := f.newDispatcher(nil)
+	d.config.Restore = engine
+	f.queueRestore(backupID, user.ID, "")
+	restore, claimed, err := f.database.ClaimRestore(f.t.Context())
+	if err != nil || !claimed {
+		t.Fatalf("claimed = %v, err = %v", claimed, err)
+	}
+	if err = d.RequestRestoreCancel(f.t.Context(), restore.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !d.restoreCancelRequested(f.t.Context(), restore.ID) {
+		t.Fatal("the cancel request did not reach the stored row")
+	}
+	if err = d.executeRestore(f.t.Context(), restore, ""); err != nil {
+		t.Fatal(err)
+	}
+	requireCanceledInWindow(t, f.restoreRow(restore.ID))
+}
+
+// publishUnlessCanceled is the fake engine of the cancel window: a context that
+// is already canceled when the engine starts means the request was honored, and
+// anything else publishes an export, which is the bug this case refuses.
+func publishUnlessCanceled(exportRoot string) func(context.Context, RestoreRequest, RestoreProgress) (RestoreResult, error) {
+	return func(ctx context.Context, req RestoreRequest, _ RestoreProgress) (RestoreResult, error) {
+		if ctx.Err() != nil {
+			return RestoreResult{}, &RestoreExecError{Code: "canceled", Phase: "fetching"}
+		}
+		return RestoreResult{
+			ExportPath: filepath.Join(exportRoot, req.RestoreID), ExportBytes: 42,
+			SideEffects: store.RestoreSideEffects{ExportPublished: true},
+		}, nil
+	}
+}
+
+// requireCanceledInWindow requires the row the window produced: canceled, with
+// the engine's own code and no export.
+func requireCanceledInWindow(t *testing.T, canceled store.Restore) {
+	t.Helper()
+	if canceled.Status != store.RestoreStatusCanceled {
+		t.Fatalf("status = %s, want canceled: the request was lost", canceled.Status)
+	}
+	if canceled.ExportPath != nil {
+		t.Fatalf("a canceled restore published an export: %v", canceled.ExportPath)
+	}
+	if canceled.ErrorCode == nil || *canceled.ErrorCode != "canceled" {
+		t.Fatalf("error_code = %v", canceled.ErrorCode)
+	}
 }

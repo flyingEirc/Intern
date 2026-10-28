@@ -13,8 +13,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/flyingEirc/Intern/app/web/internal/dispatch"
+	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/restore"
 )
 
 // restoreControlStub is a deterministic RestoreControl for the route contract
@@ -488,4 +490,126 @@ func TestRestoreExecuteVerifiesFreshPlanAndIdempotency(t *testing.T) {
 	if engine.executed != 0 {
 		t.Fatal("the stopped dispatcher executed a queued restore")
 	}
+}
+
+// restoreVerifyPayload is one execute body with an explicit verify_sql list.
+type restoreVerifyPayload struct {
+	BackupID   string   `json:"backup_id"`
+	PlanDigest string   `json:"plan_digest"`
+	Password   string   `json:"password"`
+	VerifySQL  []string `json:"verify_sql"`
+}
+
+func restoreVerifyBody(t *testing.T, payload restoreVerifyPayload) string {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// restoreVerifyFixture serves the restore routes with a plan the stub accepts,
+// so the verify_sql cases judge the handler and not some other gate.
+func restoreVerifyFixture(t *testing.T) (*authFixture, store.RestorePlan, *http.Cookie) {
+	t.Helper()
+	plan := restoreTestPlan()
+	stub := &restoreControlStub{plan: plan, outcome: dispatch.RestoreCreated}
+	f := newRestoreAPIFixture(t, stub)
+	stub.database = f.database
+	f.seed(t, "restore-admin", "admin")
+	return f, plan, f.login(t, "restore-admin", testPassword)
+}
+
+// TestRestoreVerifySQLRefusesWhatTheEngineRefuses proves the API admits exactly
+// what the restore engine admits: every statement list the engine would refuse
+// is refused here, before any row or audit is written, so an accepted execute
+// can never degrade into a restore that fails at claim time.
+func TestRestoreVerifySQLRefusesWhatTheEngineRefuses(t *testing.T) {
+	f, plan, cookie := restoreVerifyFixture(t)
+	path := "/api/v1/restores"
+	overBytes := "SELECT " + strings.Repeat("a", restore.MaxVerifySQLBytes-len("SELECT ")+1)
+	tooMany := make([]string, 0, restore.MaxVerifySQLStatements+1)
+	for range restore.MaxVerifySQLStatements + 1 {
+		tooMany = append(tooMany, "SELECT 1")
+	}
+	// Bounds the document expresses are refused by both the document and the
+	// handler, so a client cannot be told one limit and answered another.
+	for _, statements := range [][]string{{""}, {overBytes}, tooMany} {
+		f.invalidRequest(t, "POST", path, restoreVerifyBody(t, restoreVerifyPayload{
+			BackupID: plan.BackupID, PlanDigest: plan.Digest, Password: testPassword, VerifySQL: statements,
+		}), cookie, http.StatusBadRequest)
+	}
+	// Rules the document cannot express are handler validation with the engine's
+	// own judgment: no separator after SELECT, a second statement, a statement
+	// that is not a SELECT, and a NUL byte.
+	for _, statements := range [][]string{{"selectx 1"}, {"SELECT 1; SELECT 2"}, {"DROP TABLE users"}, {"\x00"}} {
+		response := f.request(t, "POST", path, restoreVerifyBody(t, restoreVerifyPayload{
+			BackupID: plan.BackupID, PlanDigest: plan.Digest, Password: testPassword, VerifySQL: statements,
+		}), cookie, http.StatusBadRequest)
+		if decodeResponse[render.ErrorResponse](t, response).Error.Code != render.ValidationFailed {
+			t.Fatalf("verify_sql %q body = %s", statements[0], response.Body)
+		}
+	}
+	rows, err := f.database.Restores(t.Context(), store.RestoresFilter{Limit: 10})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("a refused verify_sql created rows: %+v, %v", rows, err)
+	}
+}
+
+// TestRestoreVerifySQLAdmitsTheEngineBoundary proves the engine's boundary is
+// admitted exactly: a statement of its maximum size, the maximum number of
+// times, is queued rather than refused.
+func TestRestoreVerifySQLAdmitsTheEngineBoundary(t *testing.T) {
+	f, plan, cookie := restoreVerifyFixture(t)
+	exact := "SELECT " + strings.Repeat("a", restore.MaxVerifySQLBytes-len("SELECT "))
+	if len(exact) != restore.MaxVerifySQLBytes {
+		t.Fatalf("boundary statement is %d bytes, want %d", len(exact), restore.MaxVerifySQLBytes)
+	}
+	maximum := make([]string, 0, restore.MaxVerifySQLStatements)
+	for range restore.MaxVerifySQLStatements {
+		maximum = append(maximum, exact)
+	}
+	f.request(t, "POST", "/api/v1/restores", restoreVerifyBody(t, restoreVerifyPayload{
+		BackupID: plan.BackupID, PlanDigest: plan.Digest, Password: testPassword, VerifySQL: maximum,
+	}), cookie, http.StatusAccepted)
+}
+
+// TestRestoreOpenAPICarriesTheEngineVerifyLimits keeps the specification and the
+// engine from drifting: the documented bounds are the engine's constants.
+func TestRestoreOpenAPICarriesTheEngineVerifyLimits(t *testing.T) {
+	schema := loadContract(t).Components.Schemas["RestoreExecuteRequest"].Value.Properties["verify_sql"].Value
+	if schema.MaxItems == nil || *schema.MaxItems != uint64(restore.MaxVerifySQLStatements) {
+		t.Fatalf("openapi maxItems = %v, the engine allows %d", schema.MaxItems, restore.MaxVerifySQLStatements)
+	}
+	statement := schema.Items.Value
+	if statement.MaxLength == nil || *statement.MaxLength != uint64(restore.MaxVerifySQLBytes) {
+		t.Fatalf("openapi maxLength = %v, the engine allows %d bytes", statement.MaxLength, restore.MaxVerifySQLBytes)
+	}
+	if statement.MinLength != 1 {
+		t.Fatalf("openapi minLength = %v, the engine requires at least 1 byte", statement.MinLength)
+	}
+}
+
+// TestRestoreConfirmationSharesOnePasswordLimiterWithAuth proves the two routes
+// that verify the current password spend one per-user budget: five failed
+// restore confirmations leave PUT /auth/password with nothing, so a stolen
+// session gets five guesses in total rather than five per route.
+func TestRestoreConfirmationSharesOnePasswordLimiterWithAuth(t *testing.T) {
+	plan := restoreTestPlan()
+	stub := &restoreControlStub{plan: plan, outcome: dispatch.RestoreCreated}
+	f := newRestoreAPIFixture(t, stub)
+	f.seed(t, "restore-admin", "admin")
+	cookie := f.login(t, "restore-admin", testPassword)
+	wrong := restoreExecuteBody(plan.BackupID, plan.Digest, changedPassword, false)
+	for range 5 {
+		f.request(t, "POST", "/api/v1/restores", wrong, cookie, http.StatusForbidden)
+	}
+	response := f.request(t, "PUT", "/api/v1/auth/password",
+		`{"current_password":"`+testPassword+`","new_password":"`+changedPassword+`"}`,
+		cookie, http.StatusTooManyRequests)
+	assertRateLimitResponse(t, response.Header().Get("Retry-After"), response.Body.Bytes())
+	// The restore route is the same bucket: the correct password must now wait.
+	f.request(t, "POST", "/api/v1/restores",
+		restoreExecuteBody(plan.BackupID, plan.Digest, testPassword, false), cookie, http.StatusTooManyRequests)
 }

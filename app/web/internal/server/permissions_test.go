@@ -271,9 +271,19 @@ func (f *authFixture) seedHashed(t *testing.T, username, role, hash string) stor
 	return user
 }
 
+// resetResources deletes every resource row the previous case left. The whole
+// sweep runs in one write transaction: the backup worker may claim a queued run
+// at any instant, and a run_log it inserts must never land between the child
+// delete and its parent delete, because that is a FOREIGN KEY constraint failure
+// on the sweep rather than anything the case tested.
 func (f *authFixture) resetResources(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
+	tx, err := f.database.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, stmt := range []string{
 		`DELETE FROM restore_logs`,
 		`DELETE FROM restores`,
@@ -283,52 +293,70 @@ func (f *authFixture) resetResources(t *testing.T) {
 		`DELETE FROM sources`,
 		`DELETE FROM repositories`,
 	} {
-		if _, err := f.database.DB().ExecContext(ctx, stmt); err != nil {
+		if _, err = tx.ExecContext(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }
 
-// drainRuns stops queued runs and waits out a running one, so every matrix
-// case starts with no dispatcher activity from the previous case.
+// drainRuns cancels queued work and waits out anything the dispatcher is
+// executing, so every matrix case starts with no dispatcher activity from the
+// previous case. It only returns once one full pass found nothing running and
+// nothing left to cancel.
 func (f *authFixture) drainRuns(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
-	deadline := time.Now().Add(5 * time.Second)
-	for f.drainOnce(t, ctx) {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		busy, pending := f.drainOnce(t, ctx)
+		if !busy && !pending {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("runs still running")
+			t.Fatalf("the dispatcher never quiesced: busy=%t work still queued", busy)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// drainOnce cancels every queued row and reports whether a run is still
-// running, so the next pass waits for the dispatcher to finish it.
-func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) bool {
+// drainOnce cancels every queued row and reports whether the dispatcher is
+// executing something. A queued row whose cancel changed nothing was claimed
+// between the read and the cancel: that run is now executing, so the pass must
+// report it busy and wait, instead of declaring the queue quiet and having the
+// next sweep delete a run the worker is still logging.
+func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) (busy, pending bool) {
 	t.Helper()
 	runs, err := f.database.Runs(ctx, store.RunsFilter{Limit: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
-	busy := false
 	for _, run := range runs {
 		switch run.Status {
 		case store.RunStatusQueued:
-			f.cancelQueued(t, ctx, run.ID)
+			if !f.cancelQueued(t, ctx, run.ID) {
+				busy = true
+			}
+			pending = true
 		case store.RunStatusRunning:
 			busy = true
 		}
 	}
-	return busy
+	return busy, pending
 }
 
-func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) {
+// cancelQueued cancels one queued run and reports whether the row was still
+// cancellable; false means the claim won the race.
+func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) bool {
 	t.Helper()
-	if _, err := f.database.CancelQueuedRun(ctx, runID,
-		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil); err != nil {
+	changed, err := f.database.CancelQueuedRun(ctx, runID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return changed
 }
 
 func (f *authFixture) restoreTarget(t *testing.T, target store.User, hash string) {

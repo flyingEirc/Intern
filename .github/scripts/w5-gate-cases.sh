@@ -52,7 +52,7 @@ payload() {
 		"W5-A6 export=${export_full} bytes=268435400 data_digest=2233445566778899 phase=rehearsing links=ftp:1" \
 		"W5-A3 restore=full source=ftp export=${export_full} expected_snapshot=${snapf} verify_status=not_requested" \
 		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 sqlite_intervals=disjoint" \
-		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=canceled side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite" \
+		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite" \
 		"W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true" \
 		"W5-A6 restored=inc1 container_snapshot=${snap1} expected_snapshot=${snap1} match=true" \
 		"W5-A6 restored=inc2 container_snapshot=${snap2} expected_snapshot=${snap2} match=true" \
@@ -155,6 +155,12 @@ reject published_deleted 'if has("Output") then .Output |= gsub("published_intac
 reject no_refusal 'if has("Output") then .Output |= sub("refused=source_unavailable:409"; "refused=none") else . end'
 reject recovery_twice 'if has("Output") then .Output |= sub("recovery_repeated=true"; "recovery_repeated=false") else . end'
 reject diagnostics_dump 'if has("Output") then .Output |= ("W4 diagnostics: begin (bounded to 400 lines)\n" + .) else . end'
+reject a4_running_max_dropped 'if has("Output") then .Output |= sub("restore_blocked_by_run=true running_max=1 queued_samples=48"; "restore_blocked_by_run=true queued_samples=48") else . end'
+reject a4_facts_reordered 'if has("Output") then .Output |= sub("running_max=1 queued_samples=48 sqlite_intervals=disjoint"; "queued_samples=48 running_max=1 sqlite_intervals=disjoint") else . end'
+reject a4_zero_slots 'if has("Output") then .Output |= sub("running_max=1"; "running_max=0") else . end'
+reject a5_state_facts_reordered 'if has("Output") then .Output |= sub("side_effects=explicit canceled_queued=true"; "canceled_queued=true side_effects=explicit") else . end'
+reject a5_sigkill_facts_moved 'if has("Output") then .Output |= sub("W5-A5 sigkill=failed/interrupted side_effects=explicit"; "W5-A5 sigkill=failed/interrupted\nW5-A5 recovery side_effects=explicit") else . end'
+reject a5_sigkill_facts_reordered 'if has("Output") then .Output |= sub("cleanup=exact published_intact=true"; "published_intact=true cleanup=exact") else . end'
 reject dirty_source 'if has("Output") then .Output |= sub("source_dirty=false"; "source_dirty=true") else . end'
 reject root_worker 'if has("Output") then .Output |= sub("worker_uid=999 worker_gid=999"; "worker_uid=0 worker_gid=0") else . end'
 reject emulated 'if has("Output") then .Output |= sub("daemon=linux/amd64"; "daemon=linux/arm64") else . end'

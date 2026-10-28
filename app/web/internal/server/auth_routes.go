@@ -35,8 +35,11 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-func registerAuth(engine *gin.Engine, service *auth.Service, logger *slog.Logger) {
-	h := authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: auth.NewPasswordLimiter(), logger: logger}
+// registerAuth wires the session, user and audit routes. passwords is the
+// deployment-wide per-user current-password limiter, shared with the restore
+// confirmation so one stolen session gets one budget, not two.
+func registerAuth(engine *gin.Engine, service *auth.Service, passwords *auth.PasswordLimiter, logger *slog.Logger) {
+	h := authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: passwords, logger: logger}
 	permissions := middleware.Authorization{Service: service}
 	engine.POST("/api/v1/auth/login", h.login)
 	self := engine.Group("/api/v1/auth", permissions.RequirePermission(auth.SessionSelf))

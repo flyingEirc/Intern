@@ -106,14 +106,18 @@ func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProx
 		}
 		render.JSON(c, http.StatusOK, StatusResponse{Status: "ready"})
 	})
-	registerAuth(engine, authentication, logger)
+	// One per-user password limiter for the whole deployment: it guards both the
+	// current-password check of PUT /auth/password and the password re-entry that
+	// confirms a restore, so a session cannot spend five guesses on each route.
+	passwords := auth.NewPasswordLimiter()
+	registerAuth(engine, authentication, passwords, logger)
 	registerResources(engine, authentication.Database, service, middleware.Authorization{Service: authentication}, logger)
 	if runs != nil {
 		registerRuns(engine, authentication.Database, runs, authentication,
 			middleware.Authorization{Service: authentication}, logger, options.sseHeartbeat)
 	}
 	if options.restores != nil {
-		registerRestores(engine, authentication.Database, options.restores, authentication,
+		registerRestores(engine, authentication.Database, options.restores, authentication, passwords,
 			middleware.Authorization{Service: authentication}, logger)
 	}
 	return engine, nil

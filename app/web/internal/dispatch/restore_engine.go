@@ -83,7 +83,7 @@ func (e *RestoreEngineAdapter) Execute(ctx context.Context, req RestoreRequest, 
 		VerifySQL: req.VerifySQL,
 	}, engineProgress)
 	if err != nil {
-		return RestoreResult{}, restoreEngineError(err)
+		return RestoreResult{}, restoreExecutionFailure(err, options, req.RestoreID)
 	}
 	effects := store.RestoreSideEffects{
 		WorkDirRemoved:       !pathExists(filepath.Join(options.WorkRoot, "restore-"+req.RestoreID)),
@@ -139,20 +139,33 @@ func (e *RestoreEngineAdapter) options(ctx context.Context) (restore.Options, er
 	}, nil
 }
 
-// localRoots lists every configured local repository root.
+// localRoots lists every configured local repository root. The repository list
+// is paged to its end: an export root must be checked against every local
+// repository, so a deployment with more rows than one page cannot leave a root
+// unexamined.
 func (e *RestoreEngineAdapter) localRoots(ctx context.Context) ([]string, error) {
-	repositories, err := e.database.Repositories(ctx, "", 200)
-	if err != nil {
-		return nil, err
-	}
-	roots := make([]string, 0, len(repositories))
-	for _, repository := range repositories {
-		if repository.Kind == store.RepositoryLocal && repository.Local != nil && repository.Local.Root != "" {
-			roots = append(roots, repository.Local.Root)
+	var roots []string
+	before := ""
+	for {
+		repositories, err := e.database.Repositories(ctx, before, repositoryPageSize)
+		if err != nil {
+			return nil, err
 		}
+		for _, repository := range repositories {
+			if repository.Kind == store.RepositoryLocal && repository.Local != nil && repository.Local.Root != "" {
+				roots = append(roots, repository.Local.Root)
+			}
+		}
+		if len(repositories) < repositoryPageSize {
+			return roots, nil
+		}
+		before = repositories[len(repositories)-1].ID
 	}
-	return roots, nil
 }
+
+// repositoryPageSize is one page of the repository list; localRoots keeps reading
+// until a short page ends the table.
+const repositoryPageSize = 200
 
 // restorePlanView converts the engine plan to the persisted wire view.
 func restorePlanView(plan restore.Plan, rehearsalAvailable bool) store.RestorePlan {
@@ -191,6 +204,30 @@ func restoreVerify(verify *restore.VerifyResult) (string, any) {
 		status = store.RestoreVerifyFailed
 	}
 	return status, verify
+}
+
+// restoreExecutionFailure converts one engine execution error into the W5 seam.
+// A typed *restore.ExecError already carries the engine's own cleanup
+// observation and is returned unchanged. An untyped or context error observed
+// nothing, so the two exact targets and the published export are read from the
+// filesystem here, the same way the success path reads them: side_effects must
+// never report "nothing removed" for a cleanup nobody watched.
+func restoreExecutionFailure(err error, options restore.Options, restoreID string) error {
+	failure := restoreEngineError(err)
+	var engineExec *restore.ExecError
+	if errors.As(err, &engineExec) {
+		return failure
+	}
+	var execErr *RestoreExecError
+	if !errors.As(failure, &execErr) {
+		return failure
+	}
+	execErr.SideEffects = store.RestoreSideEffects{
+		WorkDirRemoved:       !pathExists(filepath.Join(options.WorkRoot, "restore-"+restoreID)),
+		PendingExportRemoved: !pathExists(filepath.Join(options.ExportRoot, ".pending-"+restoreID)),
+		ExportPublished:      pathExists(filepath.Join(options.ExportRoot, restoreID)),
+	}
+	return execErr
 }
 
 // restoreEngineError converts the engine's typed errors onto the W5 seam.

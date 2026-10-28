@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/restore"
 )
 
 // RestoreControl is the restore dispatch surface the HTTP layer may call.
@@ -28,10 +28,6 @@ type RestoreControl interface {
 
 // restorePlanDigest is the exact plan digest shape: lowercase sha256 hex.
 var restorePlanDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-// maxVerifySQLStatements bounds the read-only verification statements one
-// restore may carry. Each is executed separately in a read-only transaction.
-const maxVerifySQLStatements = 20
 
 type restoreHandlers struct {
 	database       *store.Store
@@ -71,13 +67,16 @@ type restoreLogsPage struct {
 // registerRestores wires the W5 restore API onto the engine. The group is only
 // registered when a restore control is attached; production serve always
 // attaches the dispatcher, and an unconfigured deployment still answers 503 for
-// plan and execute.
+// plan and execute. passwords is the deployment's one per-user password
+// limiter, shared with PUT /auth/password, so re-entering the password here
+// spends the same budget it spends there and never doubles it.
 func registerRestores(engine *gin.Engine, database *store.Store, control RestoreControl,
-	authentication *auth.Service, permissions middleware.Authorization, lg logger,
+	authentication *auth.Service, passwords *auth.PasswordLimiter,
+	permissions middleware.Authorization, lg logger,
 ) {
 	h := restoreHandlers{
 		database: database, control: control, authentication: authentication,
-		passwords: auth.NewPasswordLimiter(), logger: lg,
+		passwords: passwords, logger: lg,
 	}
 	engine.POST("/api/v1/restores/plan", permissions.RequirePermission(auth.RestoresPlan), h.plan)
 	engine.POST("/api/v1/restores", permissions.RequirePermission(auth.RestoresExecute), h.execute)
@@ -181,31 +180,11 @@ func validateRestoreExecute(request restoreExecuteRequest) error {
 	if request.Password == "" {
 		return errors.New("password is required")
 	}
-	if len(request.VerifySQL) > maxVerifySQLStatements {
-		return errors.New("verify_sql accepts at most 20 statements")
-	}
-	for _, statement := range request.VerifySQL {
-		if err := validateVerifySQL(statement); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validateVerifySQL accepts one non-empty single SELECT statement without a
-// second statement separator. The engine executes it in a read-only
-// transaction; this is a lexical bound, not a SQL parser.
-func validateVerifySQL(statement string) error {
-	trimmed := strings.TrimSpace(statement)
-	if trimmed == "" || len(trimmed) > 8192 {
-		return errors.New("verify_sql statements must be 1 to 8192 bytes")
-	}
-	if strings.Contains(strings.TrimSuffix(trimmed, ";"), ";") {
-		return errors.New("verify_sql accepts one statement per entry")
-	}
-	lowered := strings.ToLower(strings.TrimSuffix(trimmed, ";"))
-	if !strings.HasPrefix(lowered, "select") {
-		return errors.New("verify_sql statements must be read-only SELECT statements")
+	// The engine owns the verify_sql limits: admitting a statement it would
+	// refuse means answering 202, writing the row and the success audit, and then
+	// failing the restore at claim time. One validator, one set of bounds.
+	if err := restore.ValidateVerifySQL(request.VerifySQL); err != nil {
+		return err
 	}
 	return nil
 }

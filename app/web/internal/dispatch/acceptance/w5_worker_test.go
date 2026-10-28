@@ -58,12 +58,18 @@ func TestW5Worker(t *testing.T) {
 		{"a4-exclusion", w5A4Exclusion},
 		{"a5-state", w5A5State},
 	}
+	// The cases share one chain: a2 builds it and every later case judges the
+	// state an earlier case really produced. A failed case therefore ends the run
+	// at once instead of letting the next one dereference state that was never
+	// written and panic the whole test binary.
 	for _, step := range steps {
-		t.Run(step.name, func(t *testing.T) {
+		if !t.Run(step.name, func(t *testing.T) {
 			f.t = t
 			t.Cleanup(func() { f.dumpDiagnostics(t) })
 			step.run(t, f)
-		})
+		}) {
+			t.Fatalf("W5 case %s failed: the shared chain state it was to produce is unknown, so no later case runs", step.name)
+		}
 	}
 }
 
@@ -140,6 +146,15 @@ const (
 // each restore point.
 func w5Chain(t *testing.T, f *fixture) {
 	t.Helper()
+	// The source must already carry substantive data when the full backup is
+	// taken, or the "restore of a full backup" proves nothing: the fixture is
+	// created with one records row and an empty lsn_pressure table, and the
+	// snapshot below requires both to be non-empty. Each round writes one
+	// records row and the 1 MiB lsn_pressure page that moves the LSN forward, and
+	// every snapshot invariant stays exactly as it was.
+	for round := range 5 {
+		f.dml(t, round)
+	}
 	fullID := f.triggerRun(t, f.e2ePolicy, store.RunKindFull, "w5-full")
 	w5.full = f.waitRun(t, fullID, store.RunStatusCompleted)
 	if w5.full.BackupID == nil {
@@ -164,6 +179,42 @@ func w5Chain(t *testing.T, f *fixture) {
 	w5.members = e2eMembers(t, f)
 	if w5.members[0].ID != *w5.full.BackupID || w5.members[1].ID != *w5.inc1.BackupID || w5.members[2].ID != *w5.inc2.BackupID {
 		t.Fatalf("the chain members are not the backups this scenario published: %+v", w5.members)
+	}
+}
+
+// w5RequireChain refuses a case whose shared chain is incomplete. The cases run
+// in one process and judge what an earlier case produced, so every backup id,
+// member and snapshot must really exist before a later case dereferences it;
+// without this a half-built chain is a nil pointer, not a finding.
+func w5RequireChain(t *testing.T) {
+	t.Helper()
+	for _, member := range []struct {
+		name string
+		id   *string
+	}{{"full", w5.full.BackupID}, {"inc1", w5.inc1.BackupID}, {"inc2", w5.inc2.BackupID}} {
+		if member.id == nil || *member.id == "" {
+			t.Fatalf("the shared chain has no %s backup id: the case that publishes it never completed", member.name)
+		}
+	}
+	if len(w5.members) != 3 {
+		t.Fatalf("the shared chain has %d members, want the three this scenario published", len(w5.members))
+	}
+	for _, point := range []w5Snapshot{w5.snapFull, w5.snap1, w5.snap2} {
+		if !w5DigestPattern.MatchString(point.digest) {
+			t.Fatal("the shared chain is missing a source snapshot")
+		}
+	}
+}
+
+// w5RequirePlans refuses a case whose confirmed plans were never built: a plan
+// digest is the execute request's whole precondition.
+func w5RequirePlans(t *testing.T, plans ...store.RestorePlan) {
+	t.Helper()
+	w5RequireChain(t)
+	for _, plan := range plans {
+		if !w5DigestPattern.MatchString(plan.Digest) || len(plan.Links) == 0 {
+			t.Fatalf("no plan was built for %s: the planning case never completed", plan.BackupID)
+		}
 	}
 }
 
@@ -824,6 +875,7 @@ func (f *fixture) w5UnconfiguredRefusal(t *testing.T) {
 // re-entry, and reads every result back from the API, SQLite, the export volume,
 // the restore log and the rehearsal's own answers.
 func w5A6E2E(t *testing.T, f *fixture) {
+	w5RequirePlans(t, w5.plan1, w5.plan2)
 	inc1 := f.w5RunRestore(t, *w5.inc1.BackupID, w5.plan1, "w5-e2e-inc1", true,
 		[]string{"SELECT COUNT(*) FROM fixture.records", "SELECT COUNT(*) FROM fixture.lsn_pressure WHERE id > 0"})
 	f.w5RequireRehearsal(t, inc1, w5.snap1)
@@ -1105,6 +1157,7 @@ func w5RawJSON(t *testing.T, value any) []byte {
 // row with its success audit. It then restores the full backup through the same
 // route so the export is compared in a brand-new server.
 func w5A3Execute(t *testing.T, f *fixture) {
+	w5RequirePlans(t, w5.planFull)
 	adminBody := w5ExecuteBody(*w5.full.BackupID, w5.planFull.Digest, f.secret.admin, false, nil)
 	// The operator's own credential is correct for its account: this request can
 	// only fail because restores:execute belongs to administrators.
@@ -1236,6 +1289,7 @@ func (f *fixture) w5RequireConfirmationLimiter(validBody string) (denied int, re
 // a queued restore is not claimed while a backup run is running. running_max is
 // sampled from the API and cross-checked against the stored intervals.
 func w5A4Exclusion(t *testing.T, f *fixture) {
+	w5RequirePlans(t, w5.planFull)
 	policy := f.createPolicy(t, "w5-exclusion", 8)
 	f.enable(t, policy)
 
@@ -1431,6 +1485,7 @@ func (f *fixture) w5RunIntervals(t *testing.T) []w5UnionInterval {
 // effects, a published export that nothing ever deletes, and the refusal when no
 // source is left.
 func w5A5State(t *testing.T, f *fixture) {
+	w5RequirePlans(t, w5.plan2, w5.planFull)
 	// One restore holds the slot so a second can be observed genuinely queued.
 	running := f.w5RunRestore(t, *w5.inc2.BackupID, w5.plan2, "w5-a5-running", false, nil)
 	f.w5WaitPhase(t, running, "fetching", "authenticating", "extracting")
@@ -1454,6 +1509,9 @@ func w5A5State(t *testing.T, f *fixture) {
 	}
 	f.assertNoSecret(t, w5RawJSON(t, logs))
 	completed := f.w5List(t, "status=completed&limit=200")
+	// The documented list order is an observed fact, not a coincidence of random
+	// bytes: the ids are time-ordered, so the page starts with the newest restore.
+	w5RequireNewestFirst(t, f.w5List(t, "limit=200"))
 	t.Logf("W5-A5 state phase_seen=%s sources=ftp completed_restores=%d export_bytes=%d verify_status=%s side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite",
 		strings.Join(phaseSeen, ","), len(completed), w5ExportedBytes(t, completed), canceled.VerifyStatus)
 	w5Sigkill(t, f, publishedBefore)
@@ -1476,12 +1534,28 @@ func w5ExportedBytes(t *testing.T, completed []store.Restore) int64 {
 	return total
 }
 
+// w5RequireNewestFirst requires the restores page to descend by id. The ids are
+// UUIDv7 bytes in lowercase hex, so id order is creation order: a page that does
+// not descend would contradict the "newest first" contract the document states.
+func w5RequireNewestFirst(t *testing.T, items []store.Restore) {
+	t.Helper()
+	if len(items) < 3 {
+		t.Fatalf("the restores page has %d rows, want several to order", len(items))
+	}
+	for index := 1; index < len(items); index++ {
+		if items[index-1].ID <= items[index].ID {
+			t.Fatalf("restores are not newest first: %s precedes %s", items[index-1].ID, items[index].ID)
+		}
+	}
+}
+
 // w5Sigkill kills the serving process while the engine is inside prepare, then
 // proves the restart records the interruption exactly: failed/interrupted with
 // explicit side effects, this restore's two targets reclaimed, nothing published
 // for it, and every earlier published export byte-identical.
 func w5Sigkill(t *testing.T, f *fixture, publishedBefore []string) {
 	t.Helper()
+	w5RequirePlans(t, w5.plan1, w5.plan2)
 	keep := w5ProtectedExports(t, f, publishedBefore)
 	f.startServeChild(t)
 	victim := f.w5RunRestore(t, *w5.inc1.BackupID, w5.plan1, "w5-a5-sigkill", false, nil)

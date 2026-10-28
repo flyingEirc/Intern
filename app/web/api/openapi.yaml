@@ -1364,14 +1364,17 @@ paths:
         Requires the administrator's password re-entry; a wrong password is 403
         confirmation_failed with a denied audit row and no restore row. Password
         confirmation is limited to 5 attempts/minute/user (429 with
-        Retry-After). plan_digest must equal a fresh plan built at request time,
+        Retry-After), on the same per-user budget PUT /auth/password spends: the
+        two routes share one limiter, so a session gets five guesses in total,
+        not five each. plan_digest must equal a fresh plan built at request time,
         otherwise 409 plan_changed. rehearse=true without a configured mysqld is
-        422 validation_failed. verify_sql statements are executed in a read-only
-        transaction by the rehearsal and are never written to the audit. The
-        queued restore row and its success audit commit in one transaction; an
-        audit failure rolls the row back and answers 500. An optional
-        Idempotency-Key replays the stored restore for the same request; the
-        same key with a different request is 409.
+        422 validation_failed. verify_sql is admitted by the restore engine's own
+        validator and bounds, then executed in a read-only transaction by the
+        rehearsal and never written to the audit. The queued restore row and its
+        success audit commit in one transaction; an audit failure rolls the row
+        back and answers 500. An optional Idempotency-Key replays the stored
+        restore for the same request; the same key with a different request is
+        409.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -2433,6 +2436,9 @@ components:
         id:
           type: string
           pattern: '^[0-9a-f]{32}$'
+          description: >-
+            UUIDv7 bytes in lowercase hex without dashes, so the id itself is
+            ordered by creation time and the list is newest first.
         backup_id:
           type: string
         status:
@@ -2452,6 +2458,9 @@ components:
           type: array
           items:
             type: string
+          description: >-
+            The statements confirmed with the request, exactly as admitted by
+            RestoreExecuteRequest.verify_sql.
         requested_by:
           type: string
         work_dir:
@@ -2578,14 +2587,19 @@ components:
           default: false
         verify_sql:
           type: array
-          maxItems: 20
+          maxItems: 16
           items:
             type: string
             minLength: 1
-            maxLength: 8192
+            maxLength: 4096
           description: >-
-            Read-only single SELECT statements executed by the rehearsal in a
-            read-only transaction. Never written to the audit.
+            Read-only statements executed by the rehearsal, one per entry, in the
+            restore engine's own bounds, which this document mirrors exactly: at
+            most 16 entries, each 1 to 4096 bytes with no NUL byte, no inner
+            statement separator (a single trailing ';' is allowed), and each
+            starting with SELECT followed by a space, tab, line break or '('. An
+            accepted request is therefore never refused later at claim time.
+            Executed in a read-only transaction and never written to the audit.
     RestoreAccepted:
       type: object
       additionalProperties: false
