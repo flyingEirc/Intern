@@ -831,3 +831,40 @@ func requireCanceledInWindow(t *testing.T, canceled store.Restore) {
 		t.Fatalf("error_code = %v", canceled.ErrorCode)
 	}
 }
+
+// TestRestoreRehearsalWithoutResultIsNotRun proves a row that asked for a
+// rehearsal never claims none was wanted: an execution that ended before a
+// rehearsal result existed is not_run, while a row without a rehearsal stays
+// not_requested.
+func TestRestoreRehearsalWithoutResultIsNotRun(t *testing.T) {
+	if status, _ := restoreVerify(nil, true); status != store.RestoreVerifyNotRun {
+		t.Fatalf("a rehearsal without a result = %s, want not_run", status)
+	}
+	if status, _ := restoreVerify(nil, false); status != store.RestoreVerifyNotRequested {
+		t.Fatalf("no rehearsal = %s, want not_requested", status)
+	}
+	f := newFixture(t)
+	f.runtime.ExportRoot = t.TempDir()
+	user := f.restoreUser()
+	backupID := "00000000-0000-7000-8000-0000000000d1"
+	engine := &fakeRestoreEngine{
+		plan: restorePlan(backupID),
+		execute: func(context.Context, RestoreRequest, RestoreProgress) (RestoreResult, error) {
+			return RestoreResult{}, errors.New("disk went away")
+		},
+	}
+	f.startRestores(engine)
+	plan := restorePlan(backupID)
+	queued, err := f.database.CreateRestore(f.t.Context(), store.RestoreInput{
+		ID: "ccccccccccccccccccccccccccccccc1", BackupID: backupID, Plan: plan, PlanDigest: plan.Digest,
+		Rehearse: true, RequestHash: "hash-rehearse", RequestedBy: user.ID,
+		Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := f.waitForRestoreState(queued.ID, store.RestoreStatusFailed)
+	if failed.VerifyStatus != store.RestoreVerifyNotRun {
+		t.Fatalf("a failed rehearsal row reports %s, want not_run", failed.VerifyStatus)
+	}
+}

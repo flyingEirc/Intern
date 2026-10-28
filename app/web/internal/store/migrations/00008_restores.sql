@@ -15,6 +15,9 @@
 --
 -- verify_status is separate from the restore status on purpose: a rehearsal
 -- that ran and failed does not make an otherwise published restore a failure.
+-- The closed set is not_requested (no rehearsal was asked for), pending (one
+-- was asked for and the row has not finished), passed, failed, and not_run (one
+-- was asked for but the restore ended before the rehearsal produced a result).
 -- side_effects_json records exactly what recovery removed or published; a
 -- published export is never deleted, by recovery or by a cancel.
 CREATE TABLE restores (
@@ -40,7 +43,7 @@ CREATE TABLE restores (
     error_code TEXT,
     side_effects_json TEXT,
     verify_status TEXT NOT NULL DEFAULT 'not_requested'
-        CHECK (verify_status IN ('not_requested', 'passed', 'failed')),
+        CHECK (verify_status IN ('not_requested', 'pending', 'passed', 'failed', 'not_run')),
     verify_result_json TEXT
 );
 

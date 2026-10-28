@@ -90,7 +90,7 @@ func (e *RestoreEngineAdapter) Execute(ctx context.Context, req RestoreRequest, 
 		PendingExportRemoved: !pathExists(filepath.Join(options.ExportRoot, ".pending-"+req.RestoreID)),
 		ExportPublished:      pathExists(result.ExportPath),
 	}
-	verifyStatus, verifyResult := restoreVerify(result.Verify)
+	verifyStatus, verifyResult := restoreVerify(result.Verify, req.Rehearse)
 	return RestoreResult{
 		ExportPath: result.ExportPath, ExportBytes: result.ExportBytes,
 		SideEffects: effects, VerifyStatus: verifyStatus, VerifyResult: verifyResult,
@@ -193,11 +193,14 @@ func restorePlanView(plan restore.Plan, rehearsalAvailable bool) store.RestorePl
 	}
 }
 
-// restoreVerify converts the optional rehearsal outcome. The rehearsal result
-// is stored and returned as-is; the status is separate from the restore status.
-func restoreVerify(verify *restore.VerifyResult) (string, any) {
+// restoreVerify converts the optional rehearsal outcome. The rehearsal result is
+// stored and returned as-is; the status is separate from the restore status. A
+// successful execution that asked for a rehearsal but produced no result is
+// not_run, never not_requested: the row must not claim a rehearsal was never
+// wanted when it was wanted and did not happen.
+func restoreVerify(verify *restore.VerifyResult, rehearse bool) (string, any) {
 	if verify == nil {
-		return store.RestoreVerifyNotRequested, nil
+		return store.VerifyStatusWithoutResult(rehearse), nil
 	}
 	status := verify.Status
 	if status != store.RestoreVerifyPassed && status != store.RestoreVerifyFailed {

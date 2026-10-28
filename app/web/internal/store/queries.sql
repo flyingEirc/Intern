@@ -340,8 +340,8 @@ RETURNING *;
 -- name: InsertRestore :one
 INSERT INTO restores (
     id, backup_id, status, plan_json, plan_digest, rehearse, verify_sql_json,
-    idempotency_key, request_hash, requested_by, created_at
-) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
+    idempotency_key, request_hash, requested_by, created_at, verify_status
+) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
 
 -- name: GetRestore :one
 SELECT * FROM restores WHERE id = ?;
@@ -370,7 +370,8 @@ UPDATE restores SET cancel_requested = 1 WHERE id = ? AND status IN ('queued', '
 -- queued cancel never started the engine, so all three targets are recorded as
 -- absent for this restore id.
 UPDATE restores SET status = 'canceled', phase = NULL, finished_at = sqlc.arg(finished_at),
-    side_effects_json = sqlc.arg(side_effects_json)
+    side_effects_json = sqlc.arg(side_effects_json),
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
 WHERE id = sqlc.arg(id) AND status = 'queued' AND cancel_requested = 0;
 
 -- name: CompleteRestore :execrows
@@ -401,7 +402,8 @@ WHERE id = sqlc.arg(id) AND status = 'running';
 UPDATE restores SET
     status = 'failed', phase = NULL, finished_at = sqlc.arg(finished_at),
     error_class = 'interrupted', error_code = 'interrupted',
-    side_effects_json = sqlc.arg(side_effects_json)
+    side_effects_json = sqlc.arg(side_effects_json),
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
 WHERE id = sqlc.arg(id) AND status = 'running';
 
 -- name: InterruptedRestores :many

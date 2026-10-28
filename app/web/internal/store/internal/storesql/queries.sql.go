@@ -12,7 +12,8 @@ import (
 
 const cancelQueuedRestore = `-- name: CancelQueuedRestore :execrows
 UPDATE restores SET status = 'canceled', phase = NULL, finished_at = ?1,
-    side_effects_json = ?2
+    side_effects_json = ?2,
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
 WHERE id = ?3 AND status = 'queued' AND cancel_requested = 0
 `
 
@@ -766,7 +767,8 @@ const failInterruptedRestore = `-- name: FailInterruptedRestore :execrows
 UPDATE restores SET
     status = 'failed', phase = NULL, finished_at = ?1,
     error_class = 'interrupted', error_code = 'interrupted',
-    side_effects_json = ?2
+    side_effects_json = ?2,
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
 WHERE id = ?3 AND status = 'running'
 `
 
@@ -1259,8 +1261,8 @@ func (q *Queries) InsertInstance(ctx context.Context, arg InsertInstanceParams) 
 const insertRestore = `-- name: InsertRestore :one
 INSERT INTO restores (
     id, backup_id, status, plan_json, plan_digest, rehearse, verify_sql_json,
-    idempotency_key, request_hash, requested_by, created_at
-) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
+    idempotency_key, request_hash, requested_by, created_at, verify_status
+) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
 `
 
 type InsertRestoreParams struct {
@@ -1274,6 +1276,7 @@ type InsertRestoreParams struct {
 	RequestHash    sql.NullString
 	RequestedBy    string
 	CreatedAt      string
+	VerifyStatus   string
 }
 
 func (q *Queries) InsertRestore(ctx context.Context, arg InsertRestoreParams) (Restore, error) {
@@ -1288,6 +1291,7 @@ func (q *Queries) InsertRestore(ctx context.Context, arg InsertRestoreParams) (R
 		arg.RequestHash,
 		arg.RequestedBy,
 		arg.CreatedAt,
+		arg.VerifyStatus,
 	)
 	var i Restore
 	err := row.Scan(

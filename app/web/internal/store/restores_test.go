@@ -251,3 +251,61 @@ func requireTerminalWriteRefused(t *testing.T, s *Store, id string) {
 		t.Fatal("a failed restore accepted a completed write")
 	}
 }
+
+// TestRestoreVerifyStatusTracksTheRehearsal proves the closed verify_status set
+// from the store's side: a row that asked for a rehearsal starts pending (a row
+// that did not stays not_requested), and a queued cancel that ended without a
+// rehearsal result records not_run instead of claiming none was ever wanted.
+func TestRestoreVerifyStatusTracksTheRehearsal(t *testing.T) {
+	s, user := restoreTestStore(t)
+	create := func(id string, rehearse bool) Restore {
+		t.Helper()
+		input := restoreTestInput(id, user.ID)
+		input.Rehearse = rehearse
+		return requireCreatedRestore(t, s, input)
+	}
+	if got := create("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1", false).VerifyStatus; got != RestoreVerifyNotRequested {
+		t.Fatalf("a row without a rehearsal starts %s, want not_requested", got)
+	}
+	if got := create("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2", true).VerifyStatus; got != RestoreVerifyPending {
+		t.Fatalf("a row that asked for a rehearsal starts %s, want pending", got)
+	}
+	if changed, err := s.CancelQueuedRestore(t.Context(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+		SystemAudit("restores.canceled", AuditDetail{}), nil); err != nil || !changed {
+		t.Fatalf("queued cancel = %v, %v", changed, err)
+	}
+	if got := requireStoredRestore(t, s, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2").VerifyStatus; got != RestoreVerifyNotRun {
+		t.Fatalf("a canceled rehearsal row reports %s, want not_run", got)
+	}
+}
+
+// TestRestoreInterruptedRehearsalIsNotRun proves startup recovery marks a row
+// whose rehearsal never ran as not_run: the interruption happens before the
+// rehearsal produced anything.
+func TestRestoreInterruptedRehearsalIsNotRun(t *testing.T) {
+	s, user := restoreTestStore(t)
+	input := restoreTestInput("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3", user.ID)
+	input.Rehearse = true
+	created := requireCreatedRestore(t, s, input)
+	claimed, ok, err := s.ClaimRestore(t.Context())
+	if err != nil || !ok || claimed.ID != created.ID {
+		t.Fatalf("claim = %+v, %v, %v", claimed, ok, err)
+	}
+	if err = s.FailInterruptedRestore(t.Context(), claimed.ID, RestoreSideEffects{},
+		SystemAudit("restores.interrupted", AuditDetail{}), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := requireStoredRestore(t, s, claimed.ID).VerifyStatus; got != RestoreVerifyNotRun {
+		t.Fatalf("an interrupted rehearsal row reports %s, want not_run", got)
+	}
+}
+
+// requireStoredRestore reads one stored restore row.
+func requireStoredRestore(t *testing.T, s *Store, id string) Restore {
+	t.Helper()
+	restore, err := s.Restore(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return restore
+}

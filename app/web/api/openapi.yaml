@@ -2320,9 +2320,12 @@ components:
       type: string
       description: >-
         Rehearsal outcome, separate from the restore status. not_requested when
-        no rehearsal was asked for; a failed rehearsal never fails a published
-        restore.
-      enum: [not_requested, passed, failed]
+        no rehearsal was asked for; pending from the moment a row that asked for
+        one is queued until the row finishes; passed or failed once the rehearsal
+        ran (a failed rehearsal never fails a published restore); not_run when a
+        rehearsal was asked for but the restore failed, was canceled or was
+        interrupted before the rehearsal produced a result.
+      enum: [not_requested, pending, passed, failed, not_run]
     RestoreSideEffects:
       type: object
       additionalProperties: false

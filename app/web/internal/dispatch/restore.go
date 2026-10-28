@@ -286,7 +286,10 @@ func (d *Dispatcher) refuseOrFailRestore(ctx context.Context, restore store.Rest
 	} else {
 		canceled = restore.CancelRequested
 	}
-	outcome := store.RestoreOutcome{SideEffects: effects, VerifyStatus: store.RestoreVerifyNotRequested}
+	outcome := store.RestoreOutcome{
+		SideEffects:  effects,
+		VerifyStatus: store.VerifyStatusWithoutResult(restore.Rehearse),
+	}
 	if canceled {
 		log := restoreLogWrite("warn", "restore canceled", map[string]any{"error_code": code, "phase": phase})
 		if err := d.finishRestoreWrite(ctx, restore.ID, func(writeCtx context.Context) error {
@@ -359,7 +362,7 @@ func (d *Dispatcher) finishRestoreFailed(ctx context.Context, restore store.Rest
 	outcome store.RestoreOutcome, message string,
 ) error {
 	if outcome.VerifyStatus == "" {
-		outcome.VerifyStatus = store.RestoreVerifyNotRequested
+		outcome.VerifyStatus = store.VerifyStatusWithoutResult(restore.Rehearse)
 	}
 	log := restoreLogWrite("error", message, map[string]any{"error_class": class, "error_code": code})
 	return d.finishRestoreWrite(ctx, restore.ID, func(writeCtx context.Context) error {

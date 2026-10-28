@@ -34,11 +34,35 @@ const (
 	RestoreErrorInterrupted = "interrupted"
 
 	// Restore verify status is separate from the restore status: a rehearsal
-	// that ran and failed does not make a published restore a failure.
+	// that ran and failed does not make a published restore a failure. A row that
+	// asked for a rehearsal starts pending and leaves pending only when the
+	// rehearsal produced a result (passed, failed) or never could (not_run, when
+	// the restore failed, was canceled or was interrupted first).
 	RestoreVerifyNotRequested = "not_requested"
+	RestoreVerifyPending      = "pending"
 	RestoreVerifyPassed       = "passed"
 	RestoreVerifyFailed       = "failed"
+	RestoreVerifyNotRun       = "not_run"
 )
+
+// InitialVerifyStatus is the verify_status a queued restore row starts with:
+// pending when the request asked for a rehearsal, not_requested otherwise.
+func InitialVerifyStatus(rehearse bool) string {
+	if rehearse {
+		return RestoreVerifyPending
+	}
+	return RestoreVerifyNotRequested
+}
+
+// VerifyStatusWithoutResult is the honest verify_status of a restore that ended
+// before a rehearsal produced one: not_run when a rehearsal was asked for,
+// not_requested otherwise.
+func VerifyStatusWithoutResult(rehearse bool) string {
+	if rehearse {
+		return RestoreVerifyNotRun
+	}
+	return RestoreVerifyNotRequested
+}
 
 // RestorePlanLink is one chain member of a restore plan. Source is "local" or
 // "ftp"; kind is the physical backup kind. Sizes are the stored payload and
@@ -263,6 +287,7 @@ func (s *Store) CreateRestore(ctx context.Context, in RestoreInput) (Restore, er
 			Rehearse: encodeBool(in.Rehearse), VerifySqlJson: verifySQL,
 			IdempotencyKey: nullable(in.IdempotencyKey), RequestHash: nullable(in.RequestHash),
 			RequestedBy: in.RequestedBy, CreatedAt: timestamp(),
+			VerifyStatus: InitialVerifyStatus(in.Rehearse),
 		})
 		if insertErr != nil {
 			return resourceError(insertErr)
