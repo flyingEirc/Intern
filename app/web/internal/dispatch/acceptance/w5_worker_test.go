@@ -128,9 +128,12 @@ var (
 )
 
 const (
-	// w5Poll is the API sampling period of the status and phase waits. It is far
-	// shorter than one engine phase, so a phase is observed while it is live.
+	// w5Poll is the API sampling period of the status waits.
 	w5Poll = 250 * time.Millisecond
+	// w5PhasePoll is the sampling period of the phase waits: a phase is only a
+	// window (the scenario cancels or kills inside it), so it is sampled faster
+	// and still far shorter than any real engine phase.
+	w5PhasePoll = 100 * time.Millisecond
 	// w5QueueSamples is how many consecutive samples must show a blocked row for
 	// the mutual-exclusion claim to count as observed rather than inferred.
 	w5QueueSamples = 6
@@ -553,7 +556,9 @@ func (f *fixture) w5WaitPhase(t *testing.T, id string, phases ...string) store.R
 		if restore.Phase != nil && w5HasStatus(phases, *restore.Phase) {
 			return restore
 		}
-		time.Sleep(w5Poll)
+		// The phase window is the one thing here that can close on its own, so it
+		// is sampled several times faster than a status wait.
+		time.Sleep(w5PhasePoll)
 	}
 	t.Fatalf("restore %s never reported phase %s", id, strings.Join(phases, "|"))
 	return store.Restore{}
@@ -836,9 +841,11 @@ type w5SpaceWindow struct {
 }
 
 // w5SpaceSlack is the drift one accepts between the engine's Statfs and the
-// test's own reading of the same volume: another writer on the shared CI volume
-// moved free space by 12 KiB between the two readings of a single plan request.
-const w5SpaceSlack = int64(1 << 20)
+// test's own readings of the same volume, in bytes. It is a fixed bound and not
+// a proportion: another writer on the shared CI volume shifted free space by
+// 12 KiB inside one plan request, while 1% of a 140 GiB runner would be 1.4 GiB
+// and would accept a figure borrowed from a much larger volume.
+const w5SpaceSlack = int64(16 << 20)
 
 // w5SpaceNow reads the real free space of both restore volumes.
 func (f *fixture) w5SpaceNow(t *testing.T) w5SpacePair {
@@ -877,20 +884,17 @@ func (f *fixture) w5RequirePlanSpace(t *testing.T, label string, plan store.Rest
 
 // w5RequirePlanCapacity requires one reported free-space figure to be an
 // observation of this volume, not a constant: it must be positive and lie within
-// the bracketed readings widened by the drift tolerance (1 MiB, or 1% of the
-// volume where that is larger, which is the tolerance the same estimate is
-// judged by on the engine side). A zero, a negative, a fabricated or a borrowed
-// value is still refused in both directions.
+// the bracketed readings widened by the fixed drift tolerance. A zero, a
+// negative, a fabricated or a borrowed value is still refused in both directions.
 func w5RequirePlanCapacity(t *testing.T, label, kind string, planned, before, after int64) {
 	t.Helper()
 	low, high := before, after
 	if low > high {
 		low, high = high, low
 	}
-	tolerance := max(w5SpaceSlack, high/100)
-	if planned <= 0 || planned < low-tolerance || planned > high+tolerance {
-		t.Fatalf("plan %s available_%s = %d, outside the live Statfs window %d..%d (tolerance %d)",
-			label, kind, planned, low, high, tolerance)
+	if planned <= 0 || planned < low-w5SpaceSlack || planned > high+w5SpaceSlack {
+		t.Fatalf("plan %s available_%s = %d, outside the live Statfs window %d..%d (slack %d)",
+			label, kind, planned, low, high, w5SpaceSlack)
 	}
 }
 
@@ -941,6 +945,10 @@ func w5A6E2E(t *testing.T, f *fixture) {
 	w5RequirePlans(t, w5.plan1, w5.plan2)
 	inc1 := f.w5RunRestore(t, *w5.inc1.BackupID, w5.plan1, "w5-e2e-inc1", true,
 		[]string{"SELECT COUNT(*) FROM fixture.records", "SELECT COUNT(*) FROM fixture.lsn_pressure WHERE id > 0"})
+	// The confirmation answers 202 while the row is still queued: the rehearsal
+	// facts are only written by the terminal transition, so the completed status
+	// is awaited before any result assertion judges them.
+	f.w5Wait(t, inc1, store.RestoreStatusCompleted)
 	f.w5RequireRehearsal(t, inc1, w5.snap1)
 	exported1 := f.w5Completed(t, inc1, w5.plan1, 2, w5.exported)
 	w5.exported = w5Append(w5.exported, exported1)
@@ -972,6 +980,17 @@ func (f *fixture) w5RunRestore(t *testing.T, backupID string, plan store.Restore
 	// scenario starts are spaced by one refill: the limiter can then never be the
 	// thing that fails an unrelated assertion.
 	time.Sleep(w5TokenWait)
+	return f.w5RunRestoreNow(t, backupID, plan, key, rehearse, verifySQL)
+}
+
+// w5RunRestoreNow confirms one restore without waiting for a limiter token: the
+// caller already did that. It exists for the case whose request must land inside
+// a live window (a running backup holds the execution slot), where waiting here
+// would spend the window instead of the token.
+func (f *fixture) w5RunRestoreNow(t *testing.T, backupID string, plan store.RestorePlan,
+	key string, rehearse bool, verifySQL []string,
+) string {
+	t.Helper()
 	id, _ := f.w5Execute(t, w5ExecuteBody(backupID, plan.Digest, f.secret.admin, rehearse, verifySQL), key,
 		http.StatusAccepted)
 	return id
@@ -1381,10 +1400,15 @@ func w5A4Exclusion(t *testing.T, f *fixture) {
 	// Direction two: a running backup run holds the slot, so a queued restore is
 	// not claimed. The run is proven to be really executing by the live
 	// xtrabackup process of its own work directory.
+	// The confirmation spends one limiter token and every spend is spaced by one
+	// refill. That spacing happens BEFORE the run starts: waiting after it would
+	// spend the contention window instead, and the execute request could land
+	// once the run had already released the slot.
+	time.Sleep(w5TokenWait)
 	second := f.triggerRun(t, policy, store.RunKindFull, "w5-a4-run-2")
 	backup := f.waitXtrabackup(t, second)
 	f.requireBackupAlive(t, backup)
-	queued := f.w5RunRestore(t, *w5.full.BackupID, w5.planFull, "w5-a4-queued", false, nil)
+	queued := f.w5RunRestoreNow(t, *w5.full.BackupID, w5.planFull, "w5-a4-queued", false, nil)
 	blockedRestore := f.w5Observe(t, "restore", queued, "run", second)
 	if blockedRestore.violated {
 		t.Fatal("a restore was claimed while a backup run was running")
@@ -1729,8 +1753,10 @@ func (f *fixture) w5RequireRunningCancel(t *testing.T, id string, published []st
 	t.Helper()
 	f.w5Cancel(t, id, http.StatusAccepted)
 	canceled := f.w5Wait(t, id, store.RestoreStatusCanceled)
-	if canceled.Phase == nil {
-		t.Fatal("a canceled restore lost its last engine phase")
+	// The cancel must have landed inside prepare, which is the stage the scenario
+	// waited for: the last recorded phase is the one the engine was in.
+	if canceled.Phase == nil || *canceled.Phase != "preparing" {
+		t.Fatalf("the cancel landed outside prepare: phase = %v", ptrString(canceled.Phase))
 	}
 	if canceled.ErrorClass == nil || *canceled.ErrorClass != store.RestoreErrorCanceled {
 		t.Fatalf("canceled error_class = %v", canceled.ErrorClass)
@@ -1770,6 +1796,12 @@ func (f *fixture) w5RequireInterrupted(t *testing.T, id string, published []stri
 	t.Helper()
 	interrupted := f.w5Wait(t, id, store.RestoreStatusFailed)
 	w5RequireInterruptedView(t, interrupted)
+	// The kill must have landed inside prepare: the log's last recorded engine
+	// phase is the stage the process died in, and the interrupted write nulls the
+	// row's own phase column, so the log is where that fact survives.
+	if phases := f.w5PhaseSeen(t, id); len(phases) == 0 || phases[len(phases)-1] != "preparing" {
+		t.Fatalf("the kill landed outside prepare: recorded phases = %s", strings.Join(phases, ","))
+	}
 	stored, class, code, effects, _ := f.w5SQLiteRestore(t, id)
 	if stored != store.RestoreStatusFailed || class != store.RestoreErrorInterrupted {
 		t.Fatalf("SQLite row = %s class=%q code=%q", stored, class, code)
