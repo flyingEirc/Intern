@@ -1606,17 +1606,27 @@ func (f *fixture) w5RunIntervals(t *testing.T) []w5UnionInterval {
 // source is left.
 func w5A5State(t *testing.T, f *fixture) {
 	w5RequirePlans(t, w5.plan2, w5.planFull)
+	// Both confirmations spend one password-limiter token, and a token only comes
+	// back after one refill. Waiting for the full bucket BEFORE the first restore
+	// starts is what keeps the window open: a restore lives roughly ten to fifteen
+	// seconds, so a wait spent after it started would outlast it and the second
+	// row would never be observed queued.
+	time.Sleep(w5FullBucket)
 	// One restore holds the slot so a second can be observed genuinely queued.
-	running := f.w5RunRestore(t, *w5.inc2.BackupID, w5.plan2, "w5-a5-running", false, nil)
+	running := f.w5RunRestoreNow(t, *w5.inc2.BackupID, w5.plan2, "w5-a5-running", false, nil)
 	f.w5WaitPhase(t, running, "fetching", "authenticating", "extracting")
-	queued := f.w5RunRestore(t, *w5.full.BackupID, w5.planFull, "w5-a5-queued", false, nil)
+	queued := f.w5RunRestoreNow(t, *w5.full.BackupID, w5.planFull, "w5-a5-queued", false, nil)
 	if got := f.w5Get(t, queued); got.Status != store.RestoreStatusQueued {
 		t.Fatalf("the second restore is %s while the first is running", got.Status)
 	}
 	publishedBefore := f.w5ExportEntries(t)
 	f.w5RequireQueuedCancel(t, queued)
 
-	f.w5WaitPhase(t, running, "preparing")
+	// The preparing phase alone is a 100 ms poll on a stage that is short, so the
+	// cancel is armed on the live prepare tool of this restore's work directory
+	// instead: the phase is already reported, and the tool is still running.
+	prepare := f.waitRestorePrepare(t, running)
+	requirePrepareAlive(t, prepare)
 	phaseSeen := f.w5PhaseSeen(t, running)
 	canceled := f.w5RequireRunningCancel(t, running, publishedBefore)
 	// The queued cancel is terminal: the freed slot must not resurrect it.
@@ -1721,7 +1731,8 @@ func w5Sigkill(t *testing.T, f *fixture, publishedBefore []string) {
 	keep := w5ProtectedExports(t, f, publishedBefore)
 	f.startServeChild(t)
 	victim := f.w5RunRestore(t, *w5.inc1.BackupID, w5.plan1, "w5-a5-sigkill", false, nil)
-	f.w5WaitPhase(t, victim, "preparing")
+	victimPrepare := f.waitRestorePrepare(t, victim)
+	requirePrepareAlive(t, victimPrepare)
 	if live := f.w5WorkDirLive(t, victim); !live {
 		t.Fatal("the victim restore never created its work directory")
 	}

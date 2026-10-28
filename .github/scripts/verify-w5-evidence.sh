@@ -84,6 +84,10 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A6 restore=inc2 source=ftp export=[0-9a-f]{32} expected_snapshot=[0-9a-f]{64} verify_status=not_requested")) and
   ($output | test("W5-A3 restore=full source=ftp export=[0-9a-f]{32} expected_snapshot=[0-9a-f]{64} verify_status=not_requested")) and
   ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=rehearsing links=ftp:2")) and
+  # The two restores that asked for no rehearsal end at exporting; only the
+  # rehearsed one may claim rehearsing, so each marker is tied to its own phase.
+  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:3")) and
+  ($output | test("W5-A6 export=[0-9a-f]{32} bytes=[1-9][0-9]* data_digest=[0-9a-f]{16} phase=exporting links=ftp:1")) and
   ($output | split("container_snapshot=") | length == 4) and
   ($output | test("W5-A6 restored=inc1 container_snapshot=[0-9a-f]{64} expected_snapshot=[0-9a-f]{64} match=true")) and
   ($output | test("W5-A6 restored=inc2 container_snapshot=[0-9a-f]{64} expected_snapshot=[0-9a-f]{64} match=true")) and

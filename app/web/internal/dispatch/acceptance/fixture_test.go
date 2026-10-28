@@ -1033,8 +1033,12 @@ const (
 	diagnosticLines       = 1200
 	diagnosticReplicaRows = 100
 	diagnosticRunRows     = 6
-	diagnosticRunLogLines = 50
-	diagnosticChildLines  = 200
+	// diagnosticRestoreRows and diagnosticRestoreLogRows bound the restore
+	// sections: every restore row plus the newest log rows of each one.
+	diagnosticRestoreRows    = 20
+	diagnosticRestoreLogRows = 200
+	diagnosticRunLogLines    = 50
+	diagnosticChildLines     = 200
 	// diagnosticChildBudget reserves room for the child log tails in the total
 	// dump budget, so the replica table and the run logs cannot crowd them out.
 	diagnosticChildBudget  = 4 * (diagnosticChildLines + 1)
@@ -1065,7 +1069,7 @@ func (f *fixture) dumpDiagnostics(t *testing.T) {
 	}
 	remaining := max(diagnosticLines-len(children)-2, 0)
 	lines := []string{fmt.Sprintf("W4 diagnostics: begin (bounded to %d lines)", diagnosticLines)}
-	for _, section := range [][]string{f.diagnosticReplicas(), f.diagnosticRuns()} {
+	for _, section := range [][]string{f.diagnosticReplicas(), f.diagnosticRuns(), f.diagnosticRestores(), f.diagnosticRestoreLogs()} {
 		if len(section) > remaining {
 			section = append(section[:remaining], "W4 diagnostics: further lines of this section omitted")
 		}
@@ -2092,3 +2096,153 @@ func ptrString(value *string) string {
 func errorClass(run store.Run) string { return ptrString(run.ErrorClass) }
 
 func errorCode(run store.Run) string { return ptrString(run.ErrorCode) }
+
+// diagnosticRestores prints every restore row with the fields a stuck or
+// mis-classified restore is diagnosed from: its status, its live phase, whether
+// it asked for a rehearsal, the verify status, the failure class and code, the
+// export size and the side-effect observation. Nothing on the row is a secret.
+func (f *fixture) diagnosticRestores() []string {
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore rows unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT id, backup_id, status, COALESCE(phase, ''), rehearse, verify_status,
+COALESCE(error_class, ''), COALESCE(error_code, ''), COALESCE(export_bytes, -1),
+COALESCE(side_effects_json, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
+FROM restores ORDER BY created_at, id LIMIT ?`, diagnosticRestoreRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore rows unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: restore rows"}
+	for rows.Next() {
+		var id, backup, status, phase, verify, class, code, effects, created, started, finished string
+		var rehearse, exportBytes int64
+		if err = rows.Scan(&id, &backup, &status, &phase, &rehearse, &verify, &class, &code,
+			&exportBytes, &effects, &created, &started, &finished); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: restore row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf(
+			"W4 diagnostics: restore %s backup=%s status=%s phase=%q rehearse=%t verify_status=%s error_class=%q error_code=%q export_bytes=%d side_effects=%s created_at=%s started_at=%q finished_at=%q",
+			id, backup, status, phase, rehearse != 0, verify, class, code, exportBytes, effects, created, started, finished))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore rows unreadable: %v", err))
+	}
+	return out
+}
+
+// diagnosticRestoreLogs prints the newest restore log rows. The engine's own
+// phase record lives only there once a restore is terminal, so a phase
+// assertion is diagnosed from these lines.
+func (f *fixture) diagnosticRestoreLogs() []string {
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore logs unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT restore_id, seq, ts, level, message FROM restore_logs
+ORDER BY ts DESC, seq DESC LIMIT ?`, diagnosticRestoreLogRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore logs unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: restore logs (newest first)"}
+	for rows.Next() {
+		var restoreID, ts, level, message string
+		var seq int64
+		if err = rows.Scan(&restoreID, &seq, &ts, &level, &message); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: restore log row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore_log %s seq=%d ts=%s level=%s message=%q",
+			restoreID, seq, ts, level, message))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore logs unreadable: %v", err))
+	}
+	return out
+}
+
+// restorePrepare is one matched `xtrabackup --prepare` of a restore.
+type restorePrepare struct {
+	pid int
+	// target is the matched --target-dir: it proves the process belongs to this
+	// restore's own work directory.
+	target string
+}
+
+// alive reports whether the matched prepare is still running the same argv.
+func (p restorePrepare) alive() bool {
+	argv, ok := processArgv(p.pid)
+	return ok && hasArgument(argv, "--prepare")
+}
+
+// waitRestorePrepare waits for the live prepare tool of one restore. The engine
+// reports the preparing phase before it starts the tool, but a single prepare
+// step is short, so the phase poll alone can miss it; the process is the proof
+// that the stage is really open at the instant the fault is injected.
+func (f *fixture) waitRestorePrepare(t *testing.T, restoreID string) restorePrepare {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if restore := f.w5Get(t, restoreID); restore.Status != store.RestoreStatusRunning {
+			t.Fatalf("restore %s is %s before a prepare process was observed", restoreID, restore.Status)
+		}
+		if prepare, ok := f.xtrabackupPrepare(restoreID); ok {
+			return prepare
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("no live xtrabackup --prepare process appeared while the restore was live")
+	return restorePrepare{}
+}
+
+// requirePrepareAlive rechecks the matched prepare immediately before the fault,
+// so a marker can only claim injection during a prepare that was still running.
+func requirePrepareAlive(t *testing.T, prepare restorePrepare) {
+	t.Helper()
+	if !prepare.alive() {
+		t.Fatalf("the matched prepare %d exited before the fault was injected; the injection would not be during a prepare", prepare.pid)
+	}
+}
+
+// xtrabackupPrepare finds the live prepare process whose --target-dir is inside
+// this restore's own work directory.
+func (f *fixture) xtrabackupPrepare(restoreID string) (restorePrepare, bool) {
+	want, err := filepath.EvalSymlinks(xtrabackupBin)
+	if err != nil {
+		return restorePrepare{}, false
+	}
+	roots := f.processRoots()
+	marker := "restore-" + restoreID
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return restorePrepare{}, false
+	}
+	for _, entry := range entries {
+		pid, ok := procPID(entry.Name())
+		if !ok || !executableIs(pid, want) || !descendsFrom(pid, roots) {
+			continue
+		}
+		if prepare, matched := prepareOfProcess(pid, marker); matched {
+			return prepare, true
+		}
+	}
+	return restorePrepare{}, false
+}
+
+// prepareOfProcess reports whether one process is a live prepare of the restore
+// whose work directory contains marker.
+func prepareOfProcess(pid int, marker string) (restorePrepare, bool) {
+	argv, ok := processArgv(pid)
+	if !ok || !hasArgument(argv, "--prepare") {
+		return restorePrepare{}, false
+	}
+	for _, arg := range argv {
+		if strings.HasPrefix(arg, "--target-dir=") && strings.Contains(arg, marker) {
+			return restorePrepare{pid: pid, target: strings.TrimPrefix(arg, "--target-dir=")}, true
+		}
+	}
+	return restorePrepare{}, false
+}

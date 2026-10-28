@@ -134,6 +134,8 @@ reject fabricated_match "if has(\"Output\") then .Output |= sub(\"restored=inc1 
 reject false_match 'if has("Output") then .Output |= gsub("expected_snapshot=[0-9a-f]{64} match=true"; "expected_snapshot=0000000000000000000000000000000000000000000000000000000000000000 match=false") else . end'
 reject exports_short 'if has("Output") then .Output |= sub("exports_started=3"; "exports_started=2") else . end'
 reject export_phase_wrong 'if has("Output") then .Output |= sub("data_digest=0011223344556677 phase=rehearsing links=ftp:2"; "data_digest=0011223344556677 phase=exporting links=ftp:2") else . end'
+reject export_phase_inc2 'if has("Output") then .Output |= sub("data_digest=1122334455667788 phase=exporting links=ftp:3"; "data_digest=1122334455667788 phase=rehearsing links=ftp:3") else . end'
+reject export_phase_full 'if has("Output") then .Output |= sub("data_digest=2233445566778899 phase=exporting links=ftp:1"; "data_digest=2233445566778899 phase=rehearsing links=ftp:1") else . end'
 reject mysql_unpinned "if has(\"Output\") then .Output |= sub(\"new_mysql=${mysql_image}\"; \"new_mysql=mysql:8.4\") else . end"
 reject no_confirm 'if has("Output") then .Output |= sub("confirm=403,confirmation_failed"; "confirm=200") else . end'
 reject row_created 'if has("Output") then .Output |= sub("confirm=403,confirmation_failed no_row=true"; "confirm=403,confirmation_failed no_row=false") else . end'
