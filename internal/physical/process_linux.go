@@ -31,6 +31,12 @@ const supervisorWaitDelay = 5 * time.Second
 
 const descendantReapTimeout = 2 * time.Second
 
+// supervisorTeardownExit is the supervisor's own exit code when it ends the
+// tool group itself: the parent lifetime ended, the parent identity was lost,
+// or a teardown step failed. waitTool normalizes the tool's own status to 0 or
+// 1, so this code never carries a tool exit.
+const supervisorTeardownExit = 125
+
 const (
 	supervisorLifetimeFD   = 3
 	supervisorCredentialFD = 4
@@ -186,11 +192,11 @@ func superviseTool() int {
 	// ExtraFiles clears O_NONBLOCK before exec. Restore it before NewFile so
 	// signal-driven Close wakes the runtime-pollable lifetime reader.
 	if err := unix.SetNonblock(supervisorLifetimeFD, true); err != nil {
-		return 125
+		return supervisorTeardownExit
 	}
 	lifetime := os.NewFile(supervisorLifetimeFD, "physical-parent-lifetime")
 	if lifetime == nil {
-		return 125
+		return supervisorTeardownExit
 	}
 	var closeLifetime sync.Once
 	release := func() { closeLifetime.Do(func() { closePipe(lifetime) }) }
@@ -198,7 +204,7 @@ func superviseTool() int {
 	watchSupervisorSignals(release)
 	config, err := readSupervisorConfig(lifetime)
 	if err != nil || !supportedParent(config.Parent) || config.Binary == "" || !validCleanupDirectory(config.Cleanup) {
-		return 125
+		return supervisorTeardownExit
 	}
 	return finishSupervision(lifetime, config)
 }
@@ -210,11 +216,11 @@ func supportedParent(pid int) bool {
 
 func finishSupervision(lifetime *os.File, config supervisorConfig) int {
 	result := superviseChild(lifetime, config)
-	if config.Cleanup == "" || result != 125 {
+	if config.Cleanup == "" || result != supervisorTeardownExit {
 		return result
 	}
 	if err := os.RemoveAll(config.Cleanup); err != nil {
-		return 125
+		return supervisorTeardownExit
 	}
 	return result
 }
@@ -251,17 +257,17 @@ func superviseChild(lifetime *os.File, config supervisorConfig) int {
 	defer runtime.UnlockOSThread()
 	// Adopt descendants so group teardown also reaps orphaned grandchildren.
 	if _, _, errno := syscall.Syscall6(syscall.SYS_PRCTL, unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0, 0); errno != 0 {
-		return 125
+		return supervisorTeardownExit
 	}
 	if parentIdentityLost(config.Parent) {
-		return 125
+		return supervisorTeardownExit
 	}
 	if !prepareToolDescriptors(config.Args) {
-		return 125
+		return supervisorTeardownExit
 	}
 	dead := supervisorParentClosed(lifetime)
 	if parentGone(dead) {
-		return 125
+		return supervisorTeardownExit
 	}
 	// #nosec G204 -- inherited private descriptor carries the configured tool and structured argv; no shell or CLI-derived command.
 	cmd := exec.Command(config.Binary, config.Args...)
@@ -270,11 +276,11 @@ func superviseChild(lifetime *os.File, config supervisorConfig) int {
 	cmd.Env = isolatedToolEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	if err := cmd.Start(); err != nil {
-		return 125
+		return supervisorTeardownExit
 	}
 	result := waitTool(cmd, dead)
 	if err := finishToolGroup(cmd.Process.Pid); err != nil {
-		return 125
+		return supervisorTeardownExit
 	}
 	return supervisorResult(result, config.Parent, dead)
 }
@@ -358,10 +364,10 @@ func waitTool(cmd *exec.Cmd, dead <-chan struct{}) int {
 		return 0
 	case <-dead:
 		if err := killToolGroup(cmd.Process.Pid); err != nil {
-			return 125
+			return supervisorTeardownExit
 		}
 		<-wait
-		return 125
+		return supervisorTeardownExit
 	}
 }
 
@@ -374,11 +380,11 @@ func finishToolGroup(pid int) error {
 
 func supervisorResult(result, parent int, dead <-chan struct{}) int {
 	if parentIdentityLost(parent) {
-		return 125
+		return supervisorTeardownExit
 	}
 	select {
 	case <-dead:
-		return 125
+		return supervisorTeardownExit
 	default:
 		return result
 	}

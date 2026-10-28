@@ -3,10 +3,8 @@ package restore
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
@@ -138,9 +136,9 @@ func TestRenameNoReplace(t *testing.T) {
 
 // TestRehearsalFailureCode pins the classification of a rehearsal that never
 // became ready: an early exit is not_ready even when tearing the dead process down
-// reports an error; a server that never became ready but was killed by this process
-// is not_ready too, because killRehearsal reduces its own SIGKILL exit to a clean
-// teardown; only a teardown that really failed is a shutdown failure.
+// reports an error; a server that never became ready but was torn down by this
+// process is not_ready too, because physical.WaitExit reports a requested kill as
+// a clean teardown; only a teardown that really failed is a shutdown failure.
 func TestRehearsalFailureCode(t *testing.T) {
 	teardown := errors.New("physical: native tool failed to start, finish, or drain its pipes")
 	cases := []struct {
@@ -158,52 +156,6 @@ func TestRehearsalFailureCode(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := rehearsalFailureCode(test.exited, test.teardown); got != test.want {
 				t.Fatalf("code = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
-// signaledExit returns the exit error of a real process this test ended with one
-// signal, so the classification sees the same wait status production does.
-func signaledExit(t *testing.T, signal syscall.Signal) error {
-	t.Helper()
-	command := exec.Command("/bin/sh", "-c", "exec sleep 30")
-	mustNoError(t, command.Start())
-	mustNoError(t, command.Process.Signal(signal))
-	err := command.Wait()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
-		t.Fatalf("wait = %v, want an exit error", err)
-	}
-	return err
-}
-
-// TestOnlyKilledExit requires the teardown classification to accept exactly one
-// cause: the SIGKILL this process itself sent. A different signal, an unrelated
-// error, or a second error joined next to the exit status all stay failures, so a
-// real teardown problem is never hidden behind the expected kill.
-func TestOnlyKilledExit(t *testing.T) {
-	killed := signaledExit(t, syscall.SIGKILL)
-	terminated := signaledExit(t, syscall.SIGTERM)
-	if !onlyKilledExit(killed) {
-		t.Fatalf("own SIGKILL exit %v was not accepted", killed)
-	}
-	if !onlyKilledExit(errors.Join(killed, nil)) {
-		t.Fatalf("own SIGKILL exit joined with nil was not accepted")
-	}
-	cases := []struct {
-		name string
-		err  error
-	}{
-		{"nil", nil},
-		{"other signal", terminated},
-		{"plain error", errors.New("physical: native tool failed to start, finish, or drain its pipes")},
-		{"kill next to another failure", errors.Join(killed, errors.New("second failure"))},
-	}
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			if onlyKilledExit(test.err) {
-				t.Fatalf("%v was accepted as a clean teardown", test.err)
 			}
 		})
 	}

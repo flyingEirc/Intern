@@ -64,8 +64,8 @@ func assertSupervisorInterrupted(t *testing.T, done <-chan error) {
 	select {
 	case err := <-done:
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 125 {
-			t.Fatalf("supervisor result=%v, want exit125", err)
+		if !errors.As(err, &exit) || exit.ExitCode() != supervisorTeardownExit {
+			t.Fatalf("supervisor result=%v, want exit %d", err, supervisorTeardownExit)
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("supervisor signal did not interrupt its owned process group")

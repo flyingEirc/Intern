@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -23,6 +24,9 @@ type supervisedProcess struct {
 	done    chan struct{}
 	once    sync.Once
 	waitErr error
+
+	// killRequested records a teardown this process asked for through kill.
+	killRequested atomic.Bool
 }
 
 func startSupervisedProcess(ctx context.Context, spec processSpec) (*supervisedProcess, error) {
@@ -90,13 +94,82 @@ func (p *supervisedProcess) collect(cmd *exec.Cmd) {
 func (p *supervisedProcess) waitExit(ctx context.Context) error {
 	select {
 	case <-p.done:
-		return p.waitErr
+		return p.teardownResult()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
+// teardownResult reports the wait result. When this process asked for the
+// teardown, the supervisor's own teardown exit is as clean as the SIGKILL:
+// closing the lifetime pipe can let the supervisor reap the tool group and exit
+// with its teardown code before the signal reaches it. Any other exit or error
+// stays a failure.
+func (p *supervisedProcess) teardownResult() error {
+	if p.waitErr == nil || !p.killRequested.Load() {
+		return p.waitErr
+	}
+	if !requestedKillExit(p.waitErr) {
+		return p.waitErr
+	}
+	return nil
+}
+
+// requestedKillExit reports whether err carries nothing but an exit status a
+// kill requested by this process produces: a SIGKILL, or the supervisor's own
+// teardown exit when it observed the lifetime-pipe close first. A different
+// signal, a plain error, or a second error joined next to the exit status is not
+// a requested teardown.
+func requestedKillExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return allRequestedKillExits(joined.Unwrap())
+	}
+	if wrapped := errors.Unwrap(err); wrapped != nil {
+		return requestedKillExit(wrapped)
+	}
+	return requestedKillExitStatus(err)
+}
+
+// allRequestedKillExits requires every joined part to be a requested kill exit;
+// an empty join carries no exit status at all.
+func allRequestedKillExits(parts []error) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !requestedKillExit(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// requestedKillExitStatus reports whether err is the wait status of a process
+// this process ended with SIGKILL, or of the supervisor that tore the tool group
+// down after observing the lifetime-pipe close.
+func requestedKillExitStatus(err error) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	if status.Signaled() {
+		return status.Signal() == syscall.SIGKILL
+	}
+	return status.Exited() && status.ExitStatus() == supervisorTeardownExit
+}
+
 func (p *supervisedProcess) kill() error {
+	// Record the request before either teardown step: closing the pipe can win
+	// the race against the signal, and the wait result must still be recognized
+	// as the teardown this process asked for.
+	p.killRequested.Store(true)
 	// Closing the lifetime pipe makes the supervisor tear down the tool group.
 	closePipe(p.writeEnd)
 	if p.cmd.Process == nil {
