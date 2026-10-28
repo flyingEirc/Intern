@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/flyingEirc/Intern/internal/fsutil"
 	"github.com/flyingEirc/Intern/internal/physical"
@@ -82,6 +83,10 @@ type execution struct {
 	result      Result
 	prepareArgs [][]string
 	exportBytes int64
+
+	// rehearsalReady shortens the readiness bound for tests only. Production leaves
+	// it zero and uses the frozen rehearsalReadyTimeout.
+	rehearsalReady time.Duration
 }
 
 func (e *execution) run(ctx context.Context) (Result, error) {
