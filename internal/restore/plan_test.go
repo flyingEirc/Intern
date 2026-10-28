@@ -399,3 +399,72 @@ func directoryDigest(t *testing.T, root string) string {
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(sum[:])
 }
+
+// TestBuildPlanProbeFailureIsUnconfigured keeps "the configured tool cannot be
+// probed" apart from "the tool disagrees with the stored chain": only the latter
+// is tool_version_mismatch, so a refused plan never hides a real matrix, source
+// or space defect behind a version code.
+func TestBuildPlanProbeFailureIsUnconfigured(t *testing.T) {
+	fixture := newPlanFixture(t)
+	opts := fixture.options()
+	opts.probeTool = func(context.Context, string) (physical.ToolVersion, error) {
+		return physical.ToolVersion{}, errors.New("physical: unsupported or ambiguous xtrabackup version output")
+	}
+	_, err := BuildPlan(t.Context(), opts, fixture.backup(2).ID)
+	requirePlanCode(t, err, CodeUnconfigured)
+}
+
+// TestBuildPlanRefusesTheMoreSpecificConfigurationFault first proves that a
+// version disagreement is still reported when the tool answers, then that an
+// unusable export root wins over every tool condition: one request with two
+// defects must report the configuration fault, never a version mismatch.
+func TestBuildPlanRefusesTheMoreSpecificConfigurationFault(t *testing.T) {
+	fixture := newPlanFixture(t)
+	mismatch := fixture.options()
+	mismatch.probeTool = func(context.Context, string) (physical.ToolVersion, error) {
+		return physical.ToolVersion{Version: "8.4.0-8"}, nil
+	}
+	fixture.exec("UPDATE chains SET server_version = '8.4.12' WHERE id = ?", fixtureChain)
+	_, err := BuildPlan(t.Context(), mismatch, fixture.backup(2).ID)
+	requirePlanCode(t, err, CodeToolVersionMismatch)
+
+	link := filepath.Join(t.TempDir(), "export-link")
+	mustNoError(t, os.Symlink(fixture.exportRoot, link))
+	mismatch.ExportRoot = link
+	_, err = BuildPlan(t.Context(), mismatch, fixture.backup(2).ID)
+	requirePlanCode(t, err, CodeUnconfigured)
+}
+
+// TestBuildPlanRejectsReorderedSequence covers a chain whose stored sequence is
+// permuted: the plan must refuse instead of slicing a wrong link set.
+func TestBuildPlanRejectsReorderedSequence(t *testing.T) {
+	fixture := newPlanFixture(t)
+	// Permuted sequence: the incremental-2 row now sits at seq 2 and the
+	// incremental-1 row at seq 3, so the sorted rows no longer follow parentage.
+	fixture.exec("UPDATE backups SET seq = 9 WHERE id = ?", fixture.backup(1).ID)
+	fixture.exec("UPDATE backups SET seq = 2 WHERE id = ?", fixture.backup(2).ID)
+	fixture.exec("UPDATE backups SET seq = 3 WHERE id = ?", fixture.backup(1).ID)
+	_, err := BuildPlan(t.Context(), fixture.options(), fixture.backup(1).ID)
+	requirePlanCode(t, err, CodeChainBroken)
+	_, err = BuildPlan(t.Context(), fixture.options(), fixture.backup(2).ID)
+	requirePlanCode(t, err, CodeChainBroken)
+}
+
+// TestExpandLimitIsTheVerifiedWorkSpace pins the artifact read bound: it follows
+// the free space the plan measured in the private work root, because a real
+// backup stream expands by far more than the recorded ciphertext multiple, and
+// it keeps a floor so the small tool metadata artifact stays readable.
+func TestExpandLimitIsTheVerifiedWorkSpace(t *testing.T) {
+	const floor = int64(64 << 20)
+	for _, test := range []struct{ available, want int64 }{
+		{available: 0, want: floor},
+		{available: floor, want: floor},
+		{available: floor - 1, want: floor},
+		{available: 3 * floor, want: 3 * floor},
+	} {
+		execution := &execution{plan: Plan{AvailableWorkBytes: test.available, Links: []PlanLink{{PayloadSize: 1}}}}
+		if got := execution.expandLimit(); got != test.want {
+			t.Errorf("available %d expand limit = %d, want %d", test.available, got, test.want)
+		}
+	}
+}

@@ -82,7 +82,7 @@ func restoreFTPResume(t *testing.T, w *worker, opts restore.Options, plan restor
 	progress := &events{}
 	result, err := restore.ExecuteWithFetchFault(t.Context(), opts, request, progress.report, fault)
 	if err != nil {
-		w.logf("FTP restore failed: %s", withhold(err.Error()))
+		w.logf("FTP restore failed:\n%s", failureTree(err))
 		t.Fatalf("FTP restore: %v", err)
 	}
 	resumed := maxOffset(offsets)
@@ -116,7 +116,7 @@ func restoreFTPPlain(t *testing.T, w *worker, opts restore.Options, plan restore
 	}
 	result, err := w.execute(t, opts, request, &events{})
 	if err != nil {
-		w.logf("FTP restore inc2 failed: %s", withhold(err.Error()))
+		w.logf("FTP restore inc2 failed:\n%s", failureTree(err))
 		t.Fatalf("FTP restore inc2: %v", err)
 	}
 	w.assertRestored(t, file, request, result)
@@ -171,10 +171,10 @@ func runRejection(t *testing.T, w *worker, test rejectCase) {
 	before := strings.Join(entryNames(t, w.paths.export), ",")
 	if executeRequest != nil {
 		_, err := restore.Execute(t.Context(), opts, *executeRequest, nil)
-		assertRejection(t, test, err)
+		w.assertRejection(t, test, err)
 	} else {
 		_, err := restore.BuildPlan(t.Context(), opts, backupID)
-		assertRejection(t, test, err)
+		w.assertRejection(t, test, err)
 	}
 	if before != strings.Join(entryNames(t, w.paths.export), ",") {
 		t.Fatal("the rejection changed the export root")
@@ -293,7 +293,10 @@ func rejectionCases() []rejectCase {
 	}
 }
 
-func assertRejection(t *testing.T, test rejectCase, err error) {
+// assertRejection requires the fixed code of one refusal. When an execution
+// refusal carries the wrong code it first reports the whole withheld cause
+// chain, so a native run names the refusing sub-step instead of only the code.
+func (w *worker) assertRejection(t *testing.T, test rejectCase, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("%s was accepted", test.name)
@@ -301,6 +304,7 @@ func assertRejection(t *testing.T, test rejectCase, err error) {
 	if test.stage == "execute" {
 		var execErr *restore.ExecError
 		if !errors.As(err, &execErr) || execErr.Code != test.code {
+			w.logf("%s execute diagnosis:\n%s", test.name, failureTree(err))
 			t.Fatalf("%s execute code = %v, want %s", test.name, err, test.code)
 		}
 		side := execErr.SideEffects
@@ -365,10 +369,10 @@ func (w *worker) rejectPlanCase(t *testing.T, name, code, stage, backupID string
 		plan := w.planFor(t, opts, backupID)
 		request := restore.Request{RestoreID: randomRestoreID(t), Plan: plan}
 		_, err := restore.Execute(t.Context(), opts, request, nil)
-		assertRejection(t, rejectCase{name: name, code: code, stage: stage}, err)
+		w.assertRejection(t, rejectCase{name: name, code: code, stage: stage}, err)
 	} else {
 		_, err := restore.BuildPlan(t.Context(), opts, backupID)
-		assertRejection(t, rejectCase{name: name, code: code, stage: stage}, err)
+		w.assertRejection(t, rejectCase{name: name, code: code, stage: stage}, err)
 	}
 	if before != strings.Join(entryNames(t, w.paths.export), ",") {
 		t.Fatal("the rejection changed the export root")

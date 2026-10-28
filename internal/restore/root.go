@@ -72,9 +72,15 @@ func validateKeyOutsideExport(keyFile, exportRoot string) error {
 	return nil
 }
 
-// pathWithin reports whether child is parent or below it.
+// pathWithin reports whether child is parent or below it. Both arguments must
+// already be absolute and symlink-resolved (canonicalPath); containment is then
+// a pure component comparison, so a relative or otherwise uncanonical argument
+// is refused rather than compared as a string prefix.
 func pathWithin(child, parent string) bool {
-	relative, err := filepath.Rel(parent, child)
+	if !filepath.IsAbs(child) || !filepath.IsAbs(parent) {
+		return false
+	}
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
 	if err != nil {
 		return false
 	}
@@ -110,7 +116,12 @@ func canonicalPath(path string) (string, error) {
 	}
 }
 
-// validatePrivateWorkRoot requires an existing 0700 non-symlink directory.
+// validatePrivateWorkRoot requires an existing directory whose mode is exactly
+// 0700. The exact comparison is deliberate and matches the backup path's own
+// private work root check, so a group- or world-writable root, or one carrying
+// setgid or sticky bits, is refused: a restore work directory holds
+// authenticated ciphertext and a prepared datadir, and only the restoring
+// process may reach it.
 func validatePrivateWorkRoot(root string) error {
 	if !filepath.IsAbs(root) || strings.ContainsAny(root, "\x00\r\n") || filepath.Clean(root) != root {
 		return errors.New("restore: work root must be a clean absolute path")

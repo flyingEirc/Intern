@@ -66,6 +66,37 @@ func (w *worker) logf(format string, args ...any) {
 	w.t.Log(message)
 }
 
+// failureTree renders the whole diagnostic chain of a refused run, one withheld
+// line per cause, so a native run names the refusing sub-step — for an
+// authentication failure: record, member, payload or tool_metadata — instead of
+// only its fixed code. ExecError.Error() deliberately stops at code and phase;
+// the cause is reachable through Unwrap, carries only fixed labels, and every
+// line still passes through withhold before it is logged.
+func failureTree(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	var lines []string
+	appendCauses(err, 0, func(depth int, message string) {
+		lines = append(lines, strings.Repeat("  ", depth)+withhold(message))
+	})
+	return strings.Join(lines, "\n")
+}
+
+func appendCauses(err error, depth int, visit func(int, string)) {
+	if err == nil {
+		return
+	}
+	visit(depth, err.Error())
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, part := range joined.Unwrap() {
+			appendCauses(part, depth+1, visit)
+		}
+		return
+	}
+	appendCauses(errors.Unwrap(err), depth+1, visit)
+}
+
 func (w *worker) planFor(t *testing.T, opts restore.Options, backupID string) restore.Plan {
 	t.Helper()
 	plan, err := restore.BuildPlan(t.Context(), opts, backupID)
@@ -99,29 +130,59 @@ func (w *worker) assertContinuous(t *testing.T, plan restore.Plan) {
 	}
 }
 
+// a1Plan builds one plan per produced backup and checks the link set itself: the
+// full backup restores with one link, incremental 1 with two and incremental 2
+// with three, each link naming the backup the harness produced at that position.
+// The locked case targets incremental 1 (not the newest) and incremental 2.
 func a1Plan(t *testing.T, w *worker) {
 	opts := w.options()
-	first := w.planFor(t, opts, w.manifest.backup(t, 0).BackupID)
-	second := w.planFor(t, opts, w.manifest.backup(t, 1).BackupID)
-	third := w.planFor(t, opts, w.manifest.backup(t, 2).BackupID)
-	w.assertContinuous(t, first)
-	w.assertContinuous(t, second)
-	w.assertContinuous(t, third)
-	if sourcesOf(first) != "local,local" || sourcesOf(second) != "local,local,local" {
-		t.Fatalf("local plan sources = %s / %s", sourcesOf(first), sourcesOf(second))
+	plans := make([]restore.Plan, 0, len(w.manifest.Backups))
+	for index, file := range w.manifest.Backups {
+		plan := w.planFor(t, opts, file.BackupID)
+		w.assertContinuous(t, plan)
+		assertPlanLinks(t, w, plan, index+1)
+		if want := strings.TrimSuffix(strings.Repeat("local,", index+1), ","); sourcesOf(plan) != want {
+			t.Fatalf("plan for seq=%d sources = %s, want %s", file.Seq, sourcesOf(plan), want)
+		}
+		plans = append(plans, plan)
 	}
-	assertPlanSpace(t, w, second)
-	assertPlanRisks(t, third)
-	w.assertPlanReadOnly(t, opts, third)
+	inc1, inc2 := plans[1], plans[2]
+	assertPlanSpace(t, w, inc1)
+	assertPlanRisks(t, inc2)
+	w.assertPlanReadOnly(t, opts, inc2)
 	keyID, err := artifact.KeyID(w.paths.key)
 	must(t, err)
-	w.logf("P4-A1 plan target=inc1 sources=%s links=%d lsn_continuous=true", sourcesOf(first), len(first.Links))
-	w.logf("P4-A1 plan target=inc2 sources=%s links=%d lsn_continuous=true digest=%s", sourcesOf(third), len(third.Links), third.Digest)
+	w.logf("P4-A1 plan target=inc1 sources=%s links=%d lsn_continuous=true", sourcesOf(inc1), len(inc1.Links))
+	w.logf("P4-A1 plan target=inc2 sources=%s links=%d lsn_continuous=true digest=%s", sourcesOf(inc2), len(inc2.Links), inc2.Digest)
 	w.logf("P4-A1 plan_readonly db=unchanged repo=unchanged export=empty ftp_writes=0")
 	w.logf("P4-A1 space required_work=%d required_export=%d available_work=%d available_export=%d matches_statfs=true",
-		second.RequiredWorkBytes, second.RequiredExportBytes, second.AvailableWorkBytes, second.AvailableExportBytes)
+		inc1.RequiredWorkBytes, inc1.RequiredExportBytes, inc1.AvailableWorkBytes, inc1.AvailableExportBytes)
 	w.logf("P4-A1 matrix server=%s tool=%s prepare_version=%s key_id=%s",
-		second.ServerVersion, second.ToolVersion, w.preflight.Tool.Version, keyID)
+		inc1.ServerVersion, inc1.ToolVersion, w.preflight.Tool.Version, keyID)
+}
+
+// assertPlanLinks requires exactly the links of one prefix of the produced
+// chain, in sequence, each naming the backup and recorded sizes the harness
+// produced at that position, and the target LSN of the last one.
+func assertPlanLinks(t *testing.T, w *worker, plan restore.Plan, links int) {
+	t.Helper()
+	if len(plan.Links) != links {
+		t.Fatalf("plan links = %d, want %d", len(plan.Links), links)
+	}
+	for index, link := range plan.Links {
+		produced := w.manifest.backup(t, index)
+		if link.BackupID != produced.BackupID || link.Seq != produced.Seq {
+			t.Fatalf("plan link %d is %s seq %d, want %s seq %d",
+				index, link.BackupID, link.Seq, produced.BackupID, produced.Seq)
+		}
+		if link.PayloadSize != produced.PayloadSize || link.MetadataSize != produced.MetadataSize {
+			t.Fatalf("plan link %d sizes %d/%d differ from the produced %d/%d",
+				index, link.PayloadSize, link.MetadataSize, produced.PayloadSize, produced.MetadataSize)
+		}
+	}
+	if last := plan.Links[len(plan.Links)-1]; last.ToLSN != plan.TargetToLSN {
+		t.Fatal("plan target LSN differs from its last link")
+	}
 }
 
 func assertPlanSpace(t *testing.T, w *worker, plan restore.Plan) {
@@ -361,7 +422,7 @@ func a2Local(t *testing.T, w *worker) {
 		}
 		result, err := w.execute(t, opts, request, progress)
 		if err != nil {
-			w.logf("restore %s failed: %s", name, withhold(err.Error()))
+			w.logf("restore %s failed:\n%s", name, failureTree(err))
 			t.Fatalf("restore %s: %v", name, err)
 		}
 		w.assertRestored(t, file, request, result)
@@ -593,7 +654,7 @@ func a6ENOSPC(t *testing.T, w *worker) {
 	_ = os.Remove(filler)
 	var execErr *restore.ExecError
 	if !errors.As(err, &execErr) || execErr.Code != restore.CodeDiskFull {
-		w.logf("enospc error: %s", withhold(errString(err)))
+		w.logf("enospc error:\n%s", failureTree(err))
 		t.Fatalf("ENOSPC error = %v, want disk_full", err)
 	}
 	if execErr.SideEffects.ExportPublished || !execErr.SideEffects.WorkDirRemoved {
@@ -635,7 +696,7 @@ func a6Cancel(t *testing.T, w *worker) {
 		cancel()
 		var execErr *restore.ExecError
 		if !errors.As(err, &execErr) || execErr.Code != restore.CodeCanceled {
-			w.logf("cancel during %s error: %s", phase, withhold(errString(err)))
+			w.logf("cancel during %s error:\n%s", phase, failureTree(err))
 			t.Fatalf("cancel during %s error = %v, want canceled", phase, err)
 		}
 		if execErr.SideEffects.ExportPublished || !execErr.SideEffects.WorkDirRemoved || !execErr.SideEffects.PendingExportRemoved {
@@ -791,17 +852,32 @@ func assertNoCredentialInRefusal(t *testing.T, refusal error) {
 	}
 }
 
+// exportRestoreIDs lists the exports this suite published itself. The SIGKILL
+// case seeds a foreign export directory holding only a sentinel file to prove
+// recovery leaves another restore alone, and that tree is not a restore export,
+// so the mode check runs over the ids the engine recorded and requires each of
+// them to still be on disk.
 func (w *worker) exportRestoreIDs(t *testing.T) []string {
 	t.Helper()
 	entries, err := os.ReadDir(w.paths.export)
 	must(t, err)
-	ids := make([]string, 0, len(entries))
+	present := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
-			ids = append(ids, entry.Name())
+			present[entry.Name()] = true
 		}
 	}
+	ids := make([]string, 0, len(w.facts.prepareArgs))
+	for id := range w.facts.prepareArgs {
+		if !present[id] {
+			t.Fatalf("the export published by restore %s is missing", id)
+		}
+		ids = append(ids, id)
+	}
 	sort.Strings(ids)
+	if len(ids) == 0 {
+		t.Fatal("no published export to inspect")
+	}
 	return ids
 }
 

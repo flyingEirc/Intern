@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -53,6 +54,22 @@ func artifactReadMetadata(ctx context.Context, opts Options, dir string, output 
 		artifact.ReadOptions{KeyFile: opts.KeyFile, WorkDirectory: dir, MaxBytes: limit, Encrypt: true})
 }
 
+// Authentication sub-step labels. They appear only in the cause chain of an
+// execution failure, never in ExecError.Error(), so a native run can tell which
+// of the checks refused while the public error text stays free of any tool
+// diagnostic, path or credential.
+const (
+	authStepRecord       = "record"
+	authStepMember       = "member"
+	authStepPayload      = "payload"
+	authStepToolMetadata = "tool_metadata"
+)
+
+// authFailure attaches one fixed sub-step label to a refusal.
+func authFailure(step string, err error) error {
+	return fmt.Errorf("restore: authenticate %s: %w", step, err)
+}
+
 // authenticate checks all four members against the stored record and both
 // artifacts to EOF before any extract. For an FTP source the recorded member
 // digests are checked as well; the local repository has no separate envelope
@@ -60,7 +77,7 @@ func artifactReadMetadata(ctx context.Context, opts Options, dir string, output 
 func (e *execution) authenticate(ctx context.Context, link PlanLink, dir string) error {
 	backup, err := e.opts.Store.Backup(ctx, link.BackupID)
 	if err != nil || !backupMatchesLink(backup, link) {
-		return errors.New("restore: the backup row changed")
+		return authFailure(authStepRecord, errors.New("the backup row changed"))
 	}
 	if err = e.authenticateMembers(ctx, link, dir, backup); err != nil {
 		return err
@@ -80,14 +97,14 @@ func backupMatchesLink(backup store.Backup, link PlanLink) bool {
 func (e *execution) authenticatePayload(ctx context.Context, dir string, backup store.Backup) error {
 	identityRaw, err := artifactRead(ctx, e.opts, dir, io.Discard, e.expandLimit(), true)
 	if err != nil {
-		return errors.New("restore: the payload artifact did not authenticate")
+		return authFailure(authStepPayload, errors.New("the payload artifact did not authenticate"))
 	}
 	var identity identityManifest
 	if err = json.Unmarshal(identityRaw, &identity); err != nil {
-		return errors.New("restore: the payload manifest is unreadable")
+		return authFailure(authStepPayload, errors.New("the payload manifest is unreadable"))
 	}
 	if !matchesIdentity(identity, backup, e.plan, "xbstream") {
-		return errors.New("restore: the payload manifest differs from the backup record")
+		return authFailure(authStepPayload, errors.New("the payload manifest differs from the backup record"))
 	}
 	return nil
 }
@@ -96,35 +113,38 @@ func (e *execution) authenticateToolMetadata(ctx context.Context, dir string, ba
 	var body bytes.Buffer
 	metaRaw, err := artifactReadMetadata(ctx, e.opts, dir, &body, e.expandLimit())
 	if err != nil {
-		return errors.New("restore: the metadata artifact did not authenticate")
+		return authFailure(authStepToolMetadata, errors.New("the metadata artifact did not authenticate"))
 	}
 	if !bytes.Equal(metaRaw, body.Bytes()) {
-		return errors.New("restore: the metadata body and its authenticated manifest disagree")
+		return authFailure(authStepToolMetadata, errors.New("the metadata body and its authenticated manifest disagree"))
 	}
 	var tool toolManifest
 	if err = json.Unmarshal(metaRaw, &tool); err != nil {
-		return errors.New("restore: the tool manifest is unreadable")
+		return authFailure(authStepToolMetadata, errors.New("the tool manifest is unreadable"))
 	}
 	if !matchesIdentity(tool.Identity, backup, e.plan, "tool-metadata") {
-		return errors.New("restore: the tool manifest differs from the backup record")
+		return authFailure(authStepToolMetadata, errors.New("the tool manifest differs from the backup record"))
 	}
 	if !bytes.Equal(tool.CheckpointsRaw, backup.CheckpointsRaw) || !bytes.Equal(tool.InfoRaw, backup.InfoRaw) {
-		return errors.New("restore: the tool manifest does not bind the stored tool bytes")
+		return authFailure(authStepToolMetadata, errors.New("the tool manifest does not bind the stored tool bytes"))
 	}
 	if tool.PayloadSize != backup.PayloadSize || tool.PayloadSHA256 != backup.PayloadSHA256 {
-		return errors.New("restore: the tool manifest does not bind the payload")
+		return authFailure(authStepToolMetadata, errors.New("the tool manifest does not bind the payload"))
 	}
 	return nil
 }
 
 func (e *execution) authenticateMembers(ctx context.Context, link PlanLink, dir string, backup store.Backup) error {
 	if err := checkFetchedMembers(dir, backup); err != nil {
-		return err
+		return authFailure(authStepMember, err)
 	}
 	if link.Source != "ftp" {
 		return nil
 	}
-	return e.checkReplicaMembers(ctx, link, dir)
+	if err := e.checkReplicaMembers(ctx, link, dir); err != nil {
+		return authFailure(authStepMember, err)
+	}
+	return nil
 }
 
 // checkFetchedMembers requires every member to be a regular nonempty file and
@@ -136,15 +156,15 @@ func checkFetchedMembers(dir string, backup store.Backup) error {
 		path := filepath.Join(dir, member)
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
-			return errors.New("restore: a fetched member is missing or not a regular file")
+			return errors.New("a fetched member is missing or not a regular file")
 		}
 		if size, ok := sizes[member]; ok && info.Size() != size {
-			return errors.New("restore: a fetched member size differs from the record")
+			return errors.New("a fetched member size differs from the record")
 		}
 		if digest, ok := digests[member]; ok {
 			actual, err := fileDigest(path)
 			if err != nil || actual != digest {
-				return errors.New("restore: a fetched member digest differs from the record")
+				return errors.New("a fetched member digest differs from the record")
 			}
 		}
 	}
@@ -154,21 +174,21 @@ func checkFetchedMembers(dir string, backup store.Backup) error {
 func (e *execution) checkReplicaMembers(ctx context.Context, link PlanLink, dir string) error {
 	record, err := e.opts.Replication.Replica(ctx, link.BackupID, link.RepositoryID)
 	if err != nil || record.Status != "verified" {
-		return errors.New("restore: the replica is no longer verified")
+		return errors.New("the replica is no longer verified")
 	}
 	for _, member := range memberOrder {
 		path := filepath.Join(dir, member)
 		info, err := os.Lstat(path)
 		if err != nil {
-			return errors.New("restore: a fetched member is missing")
+			return errors.New("a fetched member is missing")
 		}
 		recorded, ok := record.ReplicaMemberByName(member)
 		if !ok || recorded.Size != info.Size() {
-			return errors.New("restore: a replica member size differs from the recorded member")
+			return errors.New("a replica member size differs from the recorded member")
 		}
 		actual, err := fileDigest(path)
 		if err != nil || actual != recorded.SHA256 {
-			return errors.New("restore: a replica member digest differs from the recorded member")
+			return errors.New("a replica member digest differs from the recorded member")
 		}
 	}
 	return nil
@@ -197,10 +217,23 @@ func matchesIdentity(identity identityManifest, backup store.Backup, plan Plan, 
 	return matchesChainIdentity(identity, plan)
 }
 
+// manifestKinds maps the kind a backup tool manifest records onto the kind the
+// catalog row stores. The chain writes the planning kind it was handed ("full",
+// "incremental") into the manifest, while the backups row is written with the
+// catalog vocabulary "physical-" + planning kind
+// (internal/physical/store/transitions.go). They are the same fact in two
+// vocabularies, so the identity check maps one onto the other; every other
+// pairing, including a full manifest against an incremental row, stays a refusal.
+var manifestKinds = map[string]string{"full": "physical-full", "incremental": "physical-incremental"}
+
+func kindsMatch(manifestKind, recordKind string) bool {
+	return manifestKind == recordKind || manifestKinds[manifestKind] == recordKind
+}
+
 func matchesBackupIdentity(identity identityManifest, backup store.Backup, sourceID string) bool {
 	return identity.InstanceID == backup.InstanceID && identity.SourceID == sourceID &&
 		identity.BackupID == backup.ID && identity.ChainID == backup.ChainID &&
-		identity.Seq == backup.Seq && identity.Kind == backup.Kind && identity.ParentID == backup.ParentID
+		identity.Seq == backup.Seq && kindsMatch(identity.Kind, backup.Kind) && identity.ParentID == backup.ParentID
 }
 
 func matchesChainIdentity(identity identityManifest, plan Plan) bool {

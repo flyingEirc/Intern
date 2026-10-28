@@ -352,9 +352,14 @@ func (w *worker) rejectOptions() restore.Options {
 	return opts
 }
 
-// toolWrapper is the real pinned xtrabackup plus an argv log. The version banner
-// is re-emitted under the wrapper path so the engine's probe accepts it, and
-// every prepare would be recorded; the rejection suite requires no prepare line.
+// toolWrapper is the real pinned xtrabackup plus an argv log.
+//
+// Percona XtraBackup prints its version banner on stderr and echoes the path it
+// was invoked as, so a wrapper must forward --no-defaults (otherwise the tool
+// also logs option-file diagnostics) and must rewrite the banner on the
+// descriptor it actually arrives on, or the engine's probe rejects the tool for
+// a configured path that is not in the banner. Every prepare invocation would be
+// recorded; the rejection suite requires no prepare line.
 func (w *worker) toolWrapper() string {
 	w.t.Helper()
 	path := filepath.Join(w.paths.root, "bin", "xtrabackup")
@@ -367,7 +372,7 @@ log="${INTERN_P4_TOOL_LOG:?}"
 printf '%s\n' "$*" >> "$log"
 for arg in "$@"; do
   if [ "$arg" = "--version" ]; then
-    /usr/bin/xtrabackup --version | sed -e "s#^/usr/bin/xtrabackup#$0#"
+    /usr/bin/xtrabackup --no-defaults --version 2>&1 | sed -e "s#^/usr/bin/xtrabackup version #$0 version #"
     exit 0
   fi
 done

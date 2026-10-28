@@ -24,6 +24,7 @@ fi
 jq -e -s --arg source "${GITHUB_SHA:-}" '
   (.) as $events |
   ([$events[] | .Output // ""] | join("")) as $output |
+  "TestP4Worker" as $worker |
   [
     "a1-plan", "a2-local", "a5-argv", "a6-enospc", "a3-ftp", "a4-reject", "a6-cancel", "a6-sigkill", "a7-security"
   ] as $cases |
@@ -64,8 +65,13 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   all($events[]; .Action != "skip" and .Action != "fail") and
   ([$events[] | select(.Action == "pass" and .Test == "TestP4NativeContainers" and .Package == "github.com/flyingEirc/Intern/app/web/integration")] | length == 1) and
   ([$events[] | select(.Action == "pass" and .Test == null and .Package == "github.com/flyingEirc/Intern/app/web/integration")] | length == 1) and
-  ([$events[] | select(.Action == "pass" and .Test == "TestP4Worker")] | length == 1) and
-  all($cases[]; . as $case | ([$events[] | select(.Action == "pass" and .Test == "TestP4Worker/" + $case)] | length == 1)) and
+  # The restore worker is a compiled test binary executed inside the container,
+  # so its per-case results reach this stream only as output text logged by the
+  # harness event, never as events of this package: require exactly one PASS line
+  # per case in that text, and the FAIL and SKIP guard below still refuses any
+  # case that did not pass.
+  (($output | split("--- PASS: " + $worker + " (") | length) == 2) and
+  all($cases[]; . as $case | (($output | split("--- PASS: " + $worker + "/" + $case + " (") | length) == 2)) and
   ($output | contains("--- FAIL:") or contains("--- SKIP:") | not) and
   all($markers[]; . as $marker | $output | contains($marker)) and
   all($rejects[]; . as $name | ($output | split("P4-A4 rejected=" + $name + " ") | length == 2)) and

@@ -22,10 +22,13 @@ const (
 // syncs it, and then renames it to the final export path without replacing an
 // existing entry. The export is never a partially copied tree.
 func (e *execution) publish(ctx context.Context) error {
+	// The frozen phase set names exporting, and this is the stage that writes the
+	// export volume, so the observer sees it begin even if the pending directory
+	// cannot be created.
+	e.enter(PhaseExporting)
 	if err := os.Mkdir(e.pending, 0o700); err != nil {
 		return stage(CodeExportFailed, errors.New("restore: cannot create the pending export"))
 	}
-	e.pendingCreated = true
 	copied, err := copyTree(ctx, filepath.Join(e.work, "data"), filepath.Join(e.pending, "data"))
 	if err != nil {
 		return stage(CodeExportFailed, err)
@@ -39,8 +42,14 @@ func (e *execution) publish(ctx context.Context) error {
 		}
 		return stage(CodeExportFailed, err)
 	}
-	e.pendingCreated = false
 	e.exportBytes = copied
+	// The non-replacing rename is the publication point: the export exists from
+	// here, so the side effects are recorded before any later durability step can
+	// fail. Syncing the export root only makes that rename crash-proof; a failure
+	// there is still reported as export_failed, but never as an unpublished
+	// export, because the tree is already in place for the operator.
+	e.side.ExportPublished = true
+	e.side.PendingExportRemoved = true
 	if err = syncDirectory(e.opts.ExportRoot); err != nil {
 		return stage(CodeExportFailed, err)
 	}

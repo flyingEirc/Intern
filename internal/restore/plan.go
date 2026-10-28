@@ -29,10 +29,13 @@ func BuildPlan(ctx context.Context, opts Options, backupID string) (Plan, error)
 	if err != nil {
 		return Plan{}, err
 	}
-	if err = validatePlanIdentity(ctx, opts, snapshot, backupID); err != nil {
+	// A bad export root is the more specific refusal than a tool problem, so it
+	// is checked before the tool identity: one request must never report
+	// tool_version_mismatch while the export root is unusable.
+	if err = validateExportConfiguration(opts, backupID); err != nil {
 		return Plan{}, err
 	}
-	if err = validateExportConfiguration(opts, backupID); err != nil {
+	if err = validatePlanIdentity(ctx, opts, snapshot, backupID); err != nil {
 		return Plan{}, err
 	}
 	links, err := planLinks(ctx, opts, snapshot.links)
@@ -76,6 +79,11 @@ func validateOptions(opts Options, backupID string) error {
 
 // validatePlanIdentity checks the KEK, the prepare tool and the admission
 // matrix before any source is inspected, so those refusals have fixed codes.
+// A tool that cannot be probed at all is a configuration fault
+// ("unconfigured"), never a version disagreement: only a probe that answers
+// with a version the stored chain did not produce is "tool_version_mismatch",
+// and only a version pair outside the admission matrix is
+// "matrix_unsupported".
 func validatePlanIdentity(ctx context.Context, opts Options, snapshot chainSnapshot, backupID string) error {
 	if err := checkKeyIdentity(opts, snapshot.links); err != nil {
 		return planRefusal(CodeKeyUnavailable, backupID)
@@ -85,7 +93,7 @@ func validatePlanIdentity(ctx context.Context, opts Options, snapshot chainSnaps
 	}
 	tool, err := opts.toolVersion(ctx)
 	if err != nil {
-		return planRefusal(CodeToolVersionMismatch, backupID)
+		return planRefusal(CodeUnconfigured, backupID)
 	}
 	if err = physical.CheckPrepareVersion(snapshot.chain.ToolVersion, tool.Version); err != nil {
 		return planRefusal(CodeToolVersionMismatch, backupID)

@@ -193,9 +193,11 @@ type QueryResult struct {
 
 // SideEffects states exactly which restore-owned paths this execution removed
 // or published. A true removal flag means this restore id has no such path when
-// the call returns, including when the path was never created. A published
-// export is never reported as removed, and the flags are reported even when the
-// cleanup itself failed, in which case the execution code is cleanup_failed.
+// the call returns: this call removed it, it never existed, or the pending
+// export was renamed to the published export. A true ExportPublished means the
+// export directory is in place, even when the execution then failed to sync its
+// parent; a published export is never reported as removed. When the cleanup
+// itself failed the code is cleanup_failed and the flags still say what is absent.
 type SideEffects struct {
 	WorkDirRemoved       bool `json:"work_dir_removed"`
 	PendingExportRemoved bool `json:"pending_export_removed"`

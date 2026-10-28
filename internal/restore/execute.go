@@ -77,14 +77,11 @@ type execution struct {
 	pending string
 	export  string
 
-	phase          Phase
-	side           SideEffects
-	result         Result
-	prepareArgs    [][]string
-	exportBytes    int64
-	workCreated    bool
-	pendingCreated bool
-	published      bool
+	phase       Phase
+	side        SideEffects
+	result      Result
+	prepareArgs [][]string
+	exportBytes int64
 }
 
 func (e *execution) run(ctx context.Context) (Result, error) {
@@ -109,7 +106,8 @@ func (e *execution) run(ctx context.Context) (Result, error) {
 }
 
 func (e *execution) succeed(ctx context.Context) (Result, error) {
-	e.published = true
+	// The pending path no longer exists once publish renamed it, so both the
+	// publication and the absence of a pending entry are reported here.
 	e.side.ExportPublished = true
 	e.side.PendingExportRemoved = true
 	e.result = Result{
@@ -155,7 +153,6 @@ func (e *execution) createRoots() error {
 	if err := os.Mkdir(e.work, 0o700); err != nil {
 		return errors.New("restore: cannot create the private work directory")
 	}
-	e.workCreated = true
 	return nil
 }
 
@@ -191,10 +188,8 @@ func (e *execution) abort(ctx context.Context, code string, cause error) (Result
 func (e *execution) cleanupFailure() error {
 	workErr := removeExactDirectory(e.work, e.opts.WorkRoot)
 	e.side.WorkDirRemoved = workErr == nil
-	e.workCreated = false
 	pendingErr := removeExactDirectory(e.pending, e.opts.ExportRoot)
 	e.side.PendingExportRemoved = pendingErr == nil
-	e.pendingCreated = false
 	return errors.Join(workErr, pendingErr)
 }
 
@@ -203,26 +198,64 @@ func (e *execution) cleanupWork() {
 		return
 	}
 	e.side.WorkDirRemoved = true
-	e.workCreated = false
 }
 
-// removeExactDirectory removes one directory entry by exact name and syncs its
-// parent. An absent entry is still synced so a retried recovery is durable.
-func removeExactDirectory(path, parent string) error {
-	info, err := os.Lstat(path)
+// removeExactDirectory removes one restore-owned directory entry by exact name
+// and syncs its parent. The inspection and the removal both run against the
+// pinned parent directory descriptor with no-follow semantics, so an entry that
+// is replaced by a symlink between them cannot redirect this call to a tree
+// outside the parent: os.Root refuses to traverse outside it and never follows
+// the link itself. An absent entry is still synced so a retried recovery is
+// durable.
+func removeExactDirectory(path, parent string) (retErr error) {
+	name, err := restoreEntryName(path, parent)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, root.Close()) }()
+	info, err := root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
-		return syncDirectory(parent)
+		return syncRoot(root)
 	}
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if !ownedDirectory(info) {
 		return errors.New("restore: refusing to remove a non-directory restore target")
 	}
-	if err = os.RemoveAll(path); err != nil {
+	if err = root.RemoveAll(name); err != nil {
 		return err
 	}
-	return syncDirectory(parent)
+	return syncRoot(root)
+}
+
+// restoreEntryName returns the entry name of a path that is a direct child of
+// parent, refusing anything else.
+func restoreEntryName(path, parent string) (string, error) {
+	name := filepath.Base(path)
+	if filepath.Dir(path) != parent || name == "." || name == ".." || name == string(filepath.Separator) {
+		return "", errors.New("restore: refusing to remove a target outside its own root")
+	}
+	return name, nil
+}
+
+// ownedDirectory reports a real directory, never a symlink.
+func ownedDirectory(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+// syncRoot durably records the entries of an already pinned directory.
+func syncRoot(root *os.Root) (retErr error) {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, dir)
+	return dir.Sync()
 }
 
 func syncDirectory(path string) (retErr error) {
@@ -452,16 +485,21 @@ func (e *execution) extract(ctx context.Context, link PlanLink, dir string) erro
 	return extractErr
 }
 
+// expandLimit bounds how many plaintext bytes one authenticated artifact may
+// decode into. The ciphertext is verified to EOF before a single byte is
+// decoded, so this is a resource guard, not a trust boundary, and it must never
+// refuse a real backup: a MySQL datadir compresses by an order of magnitude, so
+// a bound derived from the recorded ciphertext size is meaningless for the
+// expanded stream. Every decoded byte is destined for the private work root
+// (io.Discard during authentication, then xbstream during extraction), so the
+// honest ceiling is the free space this restore measured there when it planned
+// itself; a stream that would not fit there is refused instead of being written
+// and failing with ENOSPC half way through. The floor keeps the tiny tool
+// metadata artifact readable on a small or already full work root.
 func (e *execution) expandLimit() int64 {
-	factor := int64(e.opts.ExpansionFactor)
-	if factor < 1 {
-		factor = DefaultExpansionFactor
+	const floor = int64(64 << 20)
+	if e.plan.AvailableWorkBytes > floor {
+		return e.plan.AvailableWorkBytes
 	}
-	limit := int64(64 << 20)
-	for _, link := range e.plan.Links {
-		if link.PayloadSize > 0 && link.PayloadSize <= (1<<62)/factor {
-			limit = max(limit, link.PayloadSize*factor)
-		}
-	}
-	return limit
+	return floor
 }

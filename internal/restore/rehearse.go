@@ -112,10 +112,12 @@ func (e *execution) rehearsalSocket() string { return filepath.Join(e.work, "mys
 func (e *execution) verify(ctx context.Context, db *sql.DB, process *physical.MysqldProcess, result *VerifyResult) {
 	checkCode := e.runChecks(ctx, db, result)
 	shutdownErr := e.stopRehearsal(ctx, process, db)
-	closeErr := db.Close()
-	result.FailureCode = firstFailure(checkCode,
-		outcomeCode("shutdown_failed", shutdownErr),
-		outcomeCode("database_close", closeErr))
+	// The handle is always released. A server that shut down cleanly has already
+	// dropped its unix socket, so the driver close of that connection reports the
+	// dead socket rather than a failed check; the process wait in stopRehearsal is
+	// the authoritative outcome, and the pooled resources are released either way.
+	_ = db.Close() //nolint:errcheck // the exited server closed the socket first.
+	result.FailureCode = firstFailure(checkCode, outcomeCode("shutdown_failed", shutdownErr))
 	if result.FailureCode == "" {
 		result.Status = "passed"
 	}

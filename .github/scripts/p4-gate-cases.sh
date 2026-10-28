@@ -91,8 +91,12 @@ payload() {
 	done
 }
 
-# stream wraps one payload file in the pass events the gate counts: one pass per
-# case, one worker pass, one harness pass and one package pass.
+# stream wraps one payload file in the events a real `go test -json` run of the
+# harness produces. The restore worker is a compiled test binary executed inside
+# the container, so its own PASS lines reach the stream only as text logged by the
+# harness event; the only events carrying an Action are the harness test and the
+# package. The synthetic stream is built in exactly that shape, so the gate is
+# never validated against an event stream CI cannot emit.
 stream() {
 	local payload_file=$1
 	jq -cn --rawfile raw "$payload_file" --arg pkg "$package" '
@@ -100,11 +104,12 @@ stream() {
 			{Action: action, Package: $pkg, Test: test}
 			+ (if output == null then {} else {Output: output} end);
 		(["a1-plan", "a2-local", "a5-argv", "a6-enospc", "a3-ftp", "a4-reject", "a6-cancel", "a6-sigkill", "a7-security"]
-			| [ .[] | ev("pass"; "TestP4Worker/" + .; "--- PASS: TestP4Worker/" + . + " (1.00s)\n") ])
-		+ [ ev("pass"; "TestP4Worker"; "--- PASS: TestP4Worker (900.00s)\n"),
-			ev("output"; null; $raw),
-			ev("pass"; "TestP4NativeContainers"; null),
-			ev("pass"; null; null) ]
+			| map("--- PASS: TestP4Worker/" + . + " (1.00s)\n")
+			| join("")) as $cases |
+		[ ev("output"; "TestP4NativeContainers";
+			$cases + "--- PASS: TestP4Worker (900.00s)\n" + $raw),
+		  ev("pass"; "TestP4NativeContainers"; null),
+		  ev("pass"; null; null) ]
 		| .[]
 	' | jq -c .
 }
@@ -138,9 +143,11 @@ reject() {
 	echo "ok: reject $name"
 }
 
-reject missing_case 'select(.Test != "TestP4Worker/a6-sigkill")'
-reject skipped_case '. , {Action: "skip", Package: $pkg, Test: "TestP4Worker/a3-ftp"}'
-reject failed_case '. , {Action: "fail", Package: $pkg, Test: "TestP4Worker/a2-local"}'
+# The three case-set mutations edit the harness text exactly as a real run would:
+# a missing PASS line, a skipped case and a failed case.
+reject missing_case 'if has("Output") then .Output |= sub("--- PASS: TestP4Worker/a6-sigkill \\(1.00s\\)\n"; "") else . end'
+reject skipped_case 'if has("Output") then .Output |= sub("--- PASS: TestP4Worker/a3-ftp \\(1.00s\\)"; "--- SKIP: TestP4Worker/a3-ftp") else . end'
+reject failed_case 'if has("Output") then .Output |= sub("--- PASS: TestP4Worker/a2-local \\(1.00s\\)"; "--- FAIL: TestP4Worker/a2-local") else . end'
 reject no_rejection 'if has("Output") then .Output |= select((. // "") | contains("P4-A4 rejected=key_unavailable ") | not) else . end'
 reject widened_rejection 'if has("Output") then .Output |= sub("P4-A4 rejected=matrix_unsupported code=matrix_unsupported"; "P4-A4 rejected=matrix_unsupported code=unconfigured") else . end'
 reject prepare_called 'if has("Output") then .Output |= sub("chain_broken_missing_middle code=chain_broken stage=plan export_unchanged=true work_gone=true prepare_calls=0"; "chain_broken_missing_middle code=chain_broken stage=plan export_unchanged=true work_gone=true prepare_calls=1") else . end'
