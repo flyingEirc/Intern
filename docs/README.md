@@ -5,7 +5,7 @@
 | 目录 / 文档 | 内容与阅读时机 |
 | --- | --- |
 | [roadmap/Web优先与多应用架构-2026-10-17.md](roadmap/Web优先与多应用架构-2026-10-17.md) | 当前总路线：Web 优先、CLI 暂停扩展、app/internal 目录和 Web 推进阶段。所有开发先阅读。 |
-| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B 已合入并闭环（#12、#22–#24）；阶段 C 准备入口 [#13](https://github.com/flyingEirc/Intern/issues/13)，子任务 #27–#32 尚未实施。C 验收副本完整性，D 验收实际 FTP 恢复；完整产品恢复门禁不变，前端 F 暂缓。实施 Web 任何子任务前阅读。 |
+| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B 已合入并闭环（#12、#22–#24）；阶段 C 的子任务 #27–#32（P2、S1、P3、R1、W3、W4）均已原生验收 ACCEPT，后端验收 C-A1–C-A5 通过。C 验收副本完整性，D 验收实际 FTP 恢复与 prepare（尚未执行）；完整产品恢复门禁不变，前端 F 暂缓。实施 Web 任何子任务前阅读。 |
 | [roadmap/数据库备份与恢复-2026-10-17.md](roadmap/数据库备份与恢复-2026-10-17.md) | 备份恢复详细方案：范围、选型、逻辑/物理设计、CLI 基线和历史验证；开发顺序与当前应用职责以 Web 优先总路线为准。 |
 | [workflow/issue.md](workflow/issue.md) | 以 GitHub Issue 跟踪背景、功能、步骤、验收、交付；含 harness/模型和 UI/UX 证据要求。开始或调整任务时阅读。 |
 | [workflow/pr.md](workflow/pr.md) | 小功能提交、提交前检查、PR 的关联 Issue 与逐项验收汇总。提交或提 PR 前阅读。 |

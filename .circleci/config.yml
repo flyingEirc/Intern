@@ -86,6 +86,12 @@ jobs:
           name: Behavior and race tests
           no_output_timeout: 20m
           command: timeout 20m go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...
+      # The evidence gates are enforced per container job below; this step
+      # exercises their accept and reject cases, including an empty GITHUB_SHA,
+      # so a silently weakened gate fails the build instead of passing later.
+      - run:
+          name: W4 evidence gate accept and reject cases
+          command: .github/scripts/w4-gate-cases.sh
       - run:
           name: Install pinned golangci-lint
           no_output_timeout: 20m

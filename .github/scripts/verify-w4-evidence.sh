@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Evidence gate for the W4 native acceptance run. It accepts one `go test -json`
 # event stream and requires every locked marker, the exact case set, a clean
-# source identity bound to GITHUB_SHA, and no skip or failure anywhere.
+# source identity bound to GITHUB_SHA, and no skip or failure anywhere. An
+# empty or unset GITHUB_SHA is a rejection, not a wildcard.
 #
 # Every marker is emitted only after the worker's own assertions passed, and
 # each value in it is read back from state: the API, SQLite, the local
@@ -76,7 +77,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("first_event_ms=[0-9]{1,4} ")) and
   ($output | test("W4 candidate source=[0-9a-f]{40} source_dirty=false binary_sha256=[0-9a-f]{64} ")) and
   ($output | test("worker_gid=[1-9][0-9]* tool_sha256=[0-9a-f]{64} ")) and
-  ($source == "" or ($output | contains("W4 candidate source=" + $source + " source_dirty=false"))) and
+  ($source != "" and ($output | contains("W4 candidate source=" + $source + " source_dirty=false"))) and
   ($output | test("daemon=linux/(x86_64|amd64) platform=linux/amd64")) and
   ($output | test("worker_uid=[1-9][0-9]* worker_gid=[1-9][0-9]*")) and
   ($output | contains("server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 topology=private-network-no-NAT"))

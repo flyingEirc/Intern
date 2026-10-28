@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# An empty or unset GITHUB_SHA is a rejection: a stream that names no commit
+# proves nothing about this one.
 set -euo pipefail
 
 test "$#" -eq 1
@@ -24,7 +26,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
     ($output | split("--- PASS: TestS1RepositoryWorker/" + $case[1] + " (") | length == 2) and
     ($output | contains("S1-" + $case[0] + " " + $case[1] + ":"))) and
   ($output | test("source=[0-9a-f]{40} source_dirty=false binary_sha256=[0-9a-f]{64} server_binary_sha256=[0-9a-f]{64}")) and
-  ($source == "" or ($output | contains("source=" + $source + " source_dirty=false"))) and
+  ($source != "" and ($output | contains("source=" + $source + " source_dirty=false"))) and
   ($output | test("daemon=linux/(x86_64|amd64) platform=linux/amd64")) and
   ($output | contains("server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 uid=1000 passive=EPSV/PASV:50000-50020 topology=private-network-no-NAT")) and
   ($output | contains("S1 fixture authentication backend=musl-crypt algorithm=bcrypt cost=10 accounts=normal,quota")) and

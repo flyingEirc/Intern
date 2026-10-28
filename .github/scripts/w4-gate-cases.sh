@@ -107,4 +107,12 @@ if run_gate "$wrong_source" "$work/accept.jsonl" "$work/sha.log"; then
 fi
 echo 'ok: reject sha_mismatch'
 
-echo 'w4 gate cases: 1 accept, 7 rejects'
+# An empty or unset GITHUB_SHA is never a wildcard: without a bound commit the
+# stream is not evidence for any revision, so the gate must refuse it.
+if run_gate '' "$work/accept.jsonl" "$work/empty-sha.log"; then
+	echo 'FAIL: the gate accepted an empty GITHUB_SHA' >&2
+	exit 1
+fi
+echo 'ok: reject sha_empty'
+
+echo 'w4 gate cases: 1 accept, 8 rejects'

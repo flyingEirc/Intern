@@ -6,9 +6,16 @@
 // that own the backups table. A replica row is per (backup, repository); its
 // idem_key makes enqueue repeatable.
 //
-// Copying is strictly FIFO per (source, repository): an item is processed only
-// when every earlier item for that pair is verified, so the verified prefix
-// never skips a gap. A blocked replication item never blocks local backups.
+// The queue, the FIFO rule and Recover are all scoped per (local repository,
+// replica repository) pair, keyed by replicas.local_repository_id from
+// migration 00002: a row left without that binding matches no replicator, and
+// one replica repository shared by two local repositories keeps two
+// independent queues. Inside a pair copying is strictly FIFO - an item is
+// processed only when every earlier item of that pair is verified. The remote
+// protection point is not that FIFO prefix: it is the gap-skipping verified
+// prefix over the union of the source's rows on the repository (verifiedPrefix
+// in queue.go), so a seq gap drops only the chain it falls in. A blocked
+// replication item never blocks local backups.
 //
 // Local objects are read through the published local repository. Remote objects
 // go through the narrow Remote interface; NewFTPRemote adapts the real FTP
