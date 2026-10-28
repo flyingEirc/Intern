@@ -130,7 +130,7 @@ RUN set -eu \
       echo "pxb_image=${PXB_IMAGE}"; \
       echo "intern_web=$(/usr/local/bin/intern-web --help 2>&1 | head -n 1)"; \
       echo "mysqld=$(mysqld --version)"; \
-      echo "xtrabackup=$(xtrabackup --version 2>&1)"; \
+      echo "xtrabackup=$(xtrabackup --version 2>&1 | grep -m1 '^xtrabackup version ')"; \
       echo "xbstream=$(xbstream --version 2>&1)"; \
       echo ""; \
       echo "License texts shipped with this image:"; \
