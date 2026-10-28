@@ -28,7 +28,7 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 - 失败场景先到达可观察注入点，再核对拒绝、目标前后状态、公开备份列表、水位和资源清理。setup 失败不能冒充成功触发业务拒绝。
 - 必需入口的 runtime 不可用、镜像/工具不匹配、零用例、缺矩阵结果、skip 或取消必须阻断门禁，不得自动回退 mock 或把未执行写成通过。
 - 候选 CLI/发布镜像与被测对象必须一致；源码 SHA、程序 SHA256、镜像 digest、平台和工具版本都要可追踪。测试后重建的新制品不能继承旧制品通过结论。
-- CI 的固定汇总门禁必须核对依赖成功、预期案例集合、矩阵完整与 skip=0；分支保护需要实际配置证据，不能靠 workflow 文件存在宣称 required gate 已启用。
+- CI 的固定汇总门禁必须核对依赖成功、预期案例集合、矩阵完整与 skip=0；分支保护需要实际配置证据，不能靠 workflow 文件存在宣称 required gate 已启用。CI 位置：`.github/workflows/quality.yml` 是既有 GitHub Actions 工作流；Actions 计费不可用期间，活跃 CI 为 CircleCI（`.circleci/config.yml`），每条流水线运行同一矩阵与同一组 `verify-*-evidence.sh` 门禁。
 
 ## 证据与支持范围
 
