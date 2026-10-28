@@ -367,9 +367,6 @@ func (f *d1Fixture) writeOverride() error {
 		`      - "` + f.probes + `:/d1-secrets:ro"`,
 		"",
 	}, "\n")
-	if os.Getenv("INTERN_LOCAL_SHAKEOUT") != "" { // TEMP-LOCAL-SHAKEOUT: remove before commit
-		body += "    blkio_config: !reset {}\n"
-	}
 	f.override = filepath.Join(f.hostDir, "override.yaml")
 	return os.WriteFile(f.override, []byte(body), 0o600)
 }
