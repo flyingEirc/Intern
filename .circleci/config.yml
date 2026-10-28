@@ -93,6 +93,9 @@ jobs:
           name: W4 evidence gate accept and reject cases
           command: .github/scripts/w4-gate-cases.sh
       - run:
+          name: P4 evidence gate accept and reject cases
+          command: .github/scripts/p4-gate-cases.sh
+      - run:
           name: Install pinned golangci-lint
           no_output_timeout: 20m
           command: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
@@ -288,6 +291,31 @@ jobs:
           destination: dispatch-w4/events.jsonl
       - save-go-caches
 
+  container-restore:
+    executor: native-amd64
+    steps:
+      - checkout
+      - install-go
+      - run:
+          name: Native isolated restore acceptance
+          no_output_timeout: 55m
+          command: |
+            set -eo pipefail
+            mkdir -p .cache/quality/restore
+            timeout 55m go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestP4NativeContainers$' | tee .cache/quality/restore/events.jsonl
+      - run:
+          name: Reject incomplete or skipped restore evidence
+          when: always
+          no_output_timeout: 55m
+          command: |
+            set -eo pipefail
+            export GITHUB_SHA="$CIRCLE_SHA1"
+            .github/scripts/verify-p4-evidence.sh .cache/quality/restore/events.jsonl
+      - store_artifacts:
+          path: .cache/quality/restore/events.jsonl
+          destination: restore-p4/events.jsonl
+      - save-go-caches
+
   quality-gate:
     executor: native-amd64
     steps:
@@ -347,6 +375,8 @@ workflows:
           filters: "pipeline.git.branch or pipeline.git.tag"
       - container-dispatch:
           filters: "pipeline.git.branch or pipeline.git.tag"
+      - container-restore:
+          filters: "pipeline.git.branch or pipeline.git.tag"
       - quality-gate:
           requires:
             - quality-fast
@@ -356,4 +386,5 @@ workflows:
             - container-replication
             - container-web
             - container-dispatch
+            - container-restore
           filters: "pipeline.git.branch or pipeline.git.tag"
