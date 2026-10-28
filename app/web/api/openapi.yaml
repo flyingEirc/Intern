@@ -2310,7 +2310,10 @@ components:
     RestorePhase:
       type: string
       description: >-
-        The engine phase of a running restore. Null outside a run.
+        The live engine phase of a running restore. Every terminal write nulls
+        it, so a queued, completed, failed or canceled row reports null; the
+        sequence the engine really recorded is in the restore log
+        (GET /api/v1/restores/{id}/logs).
       enum: [fetching, authenticating, extracting, preparing, exporting, rehearsing]
     RestoreErrorClass:
       type: string

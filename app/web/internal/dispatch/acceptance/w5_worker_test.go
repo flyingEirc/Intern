@@ -579,6 +579,18 @@ func (f *fixture) w5PhaseSeen(t *testing.T, id string) []string {
 	return w5LogPhases(f.w5Logs(t, id))
 }
 
+// w5LastPhase is the last engine phase one restore's log recorded. The row's own
+// phase column is NULL once the restore is terminal, so the log is the only
+// record of how far the engine really got.
+func (f *fixture) w5LastPhase(t *testing.T, id string) string {
+	t.Helper()
+	phases := f.w5PhaseSeen(t, id)
+	if len(phases) == 0 {
+		t.Fatalf("restore %s recorded no engine phase", id)
+	}
+	return phases[len(phases)-1]
+}
+
 // w5LogPhases reads the phase sequence straight out of the fixed-format restore
 // log messages, so the recorded engine phases are the marker's only source. The
 // engine reports fetching and authenticating once per chain link and preparing
@@ -1007,7 +1019,7 @@ func (f *fixture) w5Completed(t *testing.T, id string, plan store.RestorePlan, l
 	mode, bytes, digest := f.w5RequireCompletedExport(t, id, restore, published, links)
 	f.w5RequireCompletedStored(t, id, restore)
 	t.Logf("W5-A6 export=%s bytes=%d data_digest=%s phase=%s links=ftp:%d mode=%s",
-		id, bytes, digest, ptrString(restore.Phase), links, mode)
+		id, bytes, digest, f.w5LastPhase(t, id), links, mode)
 	return id
 }
 
@@ -1083,19 +1095,36 @@ func (f *fixture) w5RequireCompletedExport(t *testing.T, id string, restore stor
 	if entries := f.w5ExportEntries(t); !w5EqualLists(entries, want) {
 		t.Fatalf("export root = %s, want %s", entries, want)
 	}
+	f.w5RequireCompletedPhases(t, id, restore)
+	if restore.ExportBytes == nil {
+		t.Fatal("a completed restore reports no export size")
+	}
+	return mode, *restore.ExportBytes, digest
+}
+
+// w5RequireCompletedPhases requires the completed restore's engine phases. The
+// row carries no live phase once it is terminal (every terminal write nulls the
+// column), so the sequence and the stage the engine finished in are read from
+// the restore log: a rehearsed restore ends at rehearsing, one without a
+// rehearsal ends at exporting.
+func (f *fixture) w5RequireCompletedPhases(t *testing.T, id string, restore store.Restore) {
+	t.Helper()
 	seen := f.w5PhaseSeen(t, id)
 	for _, phase := range w5CompletedPhases {
 		if !w5HasStatus(seen, phase) {
 			t.Fatalf("restore %s never recorded phase %s: %s", id, phase, strings.Join(seen, ","))
 		}
 	}
-	if restore.Phase == nil {
-		t.Fatal("a completed restore reports no phase")
+	if restore.Phase != nil {
+		t.Fatalf("a completed restore still reports a live phase %q", *restore.Phase)
 	}
-	if restore.ExportBytes == nil {
-		t.Fatal("a completed restore reports no export size")
+	wantLast := "exporting"
+	if restore.Rehearse {
+		wantLast = "rehearsing"
 	}
-	return mode, *restore.ExportBytes, digest
+	if last := f.w5LastPhase(t, id); last != wantLast {
+		t.Fatalf("the completed restore's log ends at phase %s, want %s", last, wantLast)
+	}
 }
 
 // w5RequireCompletedStored requires the persisted row and its explicit side
@@ -1754,9 +1783,14 @@ func (f *fixture) w5RequireRunningCancel(t *testing.T, id string, published []st
 	f.w5Cancel(t, id, http.StatusAccepted)
 	canceled := f.w5Wait(t, id, store.RestoreStatusCanceled)
 	// The cancel must have landed inside prepare, which is the stage the scenario
-	// waited for: the last recorded phase is the one the engine was in.
-	if canceled.Phase == nil || *canceled.Phase != "preparing" {
-		t.Fatalf("the cancel landed outside prepare: phase = %v", ptrString(canceled.Phase))
+	// waited for. The canceled row carries no live phase (every terminal write
+	// nulls it), so the log's last recorded engine phase is the record of where
+	// the engine was when it stopped.
+	if canceled.Phase != nil {
+		t.Fatalf("a canceled restore still reports a live phase %q", *canceled.Phase)
+	}
+	if last := f.w5LastPhase(t, id); last != "preparing" {
+		t.Fatalf("the cancel landed outside prepare: the log ends at phase %s", last)
 	}
 	if canceled.ErrorClass == nil || *canceled.ErrorClass != store.RestoreErrorCanceled {
 		t.Fatalf("canceled error_class = %v", canceled.ErrorClass)
@@ -1828,6 +1862,11 @@ func w5RequireInterruptedView(t *testing.T, interrupted store.Restore) {
 	}
 	if interrupted.ErrorCode == nil || *interrupted.ErrorCode != "interrupted" {
 		t.Fatalf("interrupted error_code = %v", interrupted.ErrorCode)
+	}
+	// Every terminal write nulls the live phase, including the interrupt
+	// recovery: the stage it died in is only in the log.
+	if interrupted.Phase != nil {
+		t.Fatalf("an interrupted restore still reports a live phase %q", *interrupted.Phase)
 	}
 	if interrupted.SideEffects == nil || interrupted.SideEffects.ExportPublished {
 		t.Fatalf("interrupted side_effects = %+v", interrupted.SideEffects)
