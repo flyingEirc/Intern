@@ -224,6 +224,11 @@ ORDER BY id DESC LIMIT sqlc.arg(row_limit);
 -- holds the database write lock, so the loser's statement runs after the
 -- winner's commit and no longer matches. No result means no claimable run.
 --
+-- The restore queue shares the same global slot, so a queued run is also
+-- refused while any restore is running. Both claims read both tables inside
+-- one write statement, which SQLite serializes: the two queues can never run
+-- a backup chain and a restore at the same time.
+--
 -- The claim also snapshots the policy's (local, replica) pair onto the row, in
 -- the same statement that reads the policy, so the run and its replication
 -- binding can never disagree: a later PUT moves the next run's pair only.
@@ -237,6 +242,7 @@ WHERE id = (
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
 ) AND status = 'queued'
 AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
+AND NOT EXISTS (SELECT 1 FROM restores WHERE status = 'running')
 RETURNING *;
 
 -- name: CancelQueuedRun :execrows
@@ -317,3 +323,105 @@ JOIN repositories lr ON lr.id = r.local_repository_id
 JOIN repositories rr ON rr.id = r.replica_repository_id
 WHERE r.status = 'completed' AND r.replica_repository_id IS NOT NULL
 ORDER BY r.local_repository_id, r.replica_repository_id;
+
+-- Restore queue (W5). The claim mirrors ClaimNextRun: a queued restore is
+-- claimed only when no run and no other restore is running, so the two queues
+-- share one global execution slot. The oldest queued row wins.
+-- name: ClaimNextRestore :one
+UPDATE restores SET status = 'running', started_at = sqlc.arg(started_at), phase = NULL
+WHERE id = (
+    SELECT id FROM restores WHERE status = 'queued' AND cancel_requested = 0
+    ORDER BY created_at, id LIMIT 1
+) AND status = 'queued'
+AND NOT EXISTS (SELECT 1 FROM restores WHERE status = 'running')
+AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
+RETURNING *;
+
+-- name: InsertRestore :one
+INSERT INTO restores (
+    id, backup_id, status, plan_json, plan_digest, rehearse, verify_sql_json,
+    idempotency_key, request_hash, requested_by, created_at
+) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *;
+
+-- name: GetRestore :one
+SELECT * FROM restores WHERE id = ?;
+
+-- name: GetRestoreByIdempotencyKey :one
+SELECT * FROM restores WHERE idempotency_key = ?;
+
+-- name: ListRestores :many
+SELECT * FROM restores
+WHERE (CAST(sqlc.arg(before) AS TEXT) = '' OR id < CAST(sqlc.arg(before) AS TEXT))
+    AND (CAST(sqlc.arg(status) AS TEXT) = '' OR status = CAST(sqlc.arg(status) AS TEXT))
+    AND (CAST(sqlc.arg(backup_id) AS TEXT) = '' OR backup_id = CAST(sqlc.arg(backup_id) AS TEXT))
+ORDER BY id DESC LIMIT sqlc.arg(row_limit);
+
+-- name: SetRestoreWorkDir :exec
+UPDATE restores SET work_dir = ? WHERE id = ? AND status = 'running';
+
+-- name: UpdateRestorePhase :exec
+UPDATE restores SET phase = ? WHERE id = ? AND status = 'running';
+
+-- name: RequestRestoreCancel :execrows
+UPDATE restores SET cancel_requested = 1 WHERE id = ? AND status IN ('queued', 'running');
+
+-- name: CancelQueuedRestore :execrows
+-- Every terminal restore row carries the explicit side-effect observation: a
+-- queued cancel never started the engine, so all three targets are recorded as
+-- absent for this restore id.
+UPDATE restores SET status = 'canceled', phase = NULL, finished_at = sqlc.arg(finished_at),
+    side_effects_json = sqlc.arg(side_effects_json)
+WHERE id = sqlc.arg(id) AND status = 'queued' AND cancel_requested = 0;
+
+-- name: CompleteRestore :execrows
+UPDATE restores SET
+    status = 'completed', phase = NULL, finished_at = sqlc.arg(finished_at),
+    export_path = sqlc.arg(export_path), export_bytes = sqlc.arg(export_bytes),
+    side_effects_json = sqlc.arg(side_effects_json),
+    verify_status = sqlc.arg(verify_status), verify_result_json = sqlc.narg(verify_result_json)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: FailRestore :execrows
+UPDATE restores SET
+    status = 'failed', phase = NULL, finished_at = sqlc.arg(finished_at),
+    error_class = sqlc.arg(error_class), error_code = sqlc.narg(error_code),
+    side_effects_json = sqlc.arg(side_effects_json),
+    verify_status = sqlc.arg(verify_status), verify_result_json = sqlc.narg(verify_result_json)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: CancelRunningRestore :execrows
+UPDATE restores SET
+    status = 'canceled', phase = NULL, finished_at = sqlc.arg(finished_at),
+    error_class = sqlc.arg(error_class), error_code = sqlc.narg(error_code),
+    side_effects_json = sqlc.arg(side_effects_json),
+    verify_status = sqlc.arg(verify_status), verify_result_json = sqlc.narg(verify_result_json)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: FailInterruptedRestore :execrows
+UPDATE restores SET
+    status = 'failed', phase = NULL, finished_at = sqlc.arg(finished_at),
+    error_class = 'interrupted', error_code = 'interrupted',
+    side_effects_json = sqlc.arg(side_effects_json)
+WHERE id = sqlc.arg(id) AND status = 'running';
+
+-- name: InterruptedRestores :many
+SELECT * FROM restores WHERE status = 'running';
+
+-- name: InsertRestoreLog :exec
+INSERT INTO restore_logs (restore_id, seq, ts, level, message, data) VALUES (?, ?, ?, ?, ?, ?);
+
+-- name: CountRestoreLogs :one
+SELECT COUNT(*) FROM restore_logs WHERE restore_id = ?;
+
+-- name: GetRestoreLog :one
+SELECT * FROM restore_logs WHERE restore_id = ? AND seq = ?;
+
+-- name: ReplaceRestoreLog :execrows
+UPDATE restore_logs SET ts = ?, level = ?, message = ?, data = ?
+WHERE restore_id = ? AND seq = ?;
+
+-- name: RestoreLogsAfter :many
+SELECT * FROM restore_logs WHERE restore_id = ? AND seq > ? ORDER BY seq LIMIT ?;
+
+-- name: MaxRestoreLogSeq :one
+SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM restore_logs WHERE restore_id = ?;

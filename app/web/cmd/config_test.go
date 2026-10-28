@@ -83,7 +83,10 @@ func assertConfig(t *testing.T, c configuration, err error, listen, dir, level s
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := configuration{Listen: listen, MetadataDir: dir, ShutdownTimeout: timeout, TrustedProxies: proxies}
+	want := configuration{
+		Listen: listen, MetadataDir: dir, ShutdownTimeout: timeout, TrustedProxies: proxies,
+		RestoreExpansionFactor: 8,
+	}
 	want.Log.Level = level
 	want.Session = auth.DefaultSessionConfig()
 	if !reflect.DeepEqual(c, want) {
@@ -436,4 +439,126 @@ func assertProxyTerminatedListen(t *testing.T, c configuration, err error) {
 	if err != nil || !c.TLSTerminatedByProxy || len(c.TrustedProxies) != 1 || c.TrustedProxies[0] != "192.0.2.1" {
 		t.Fatalf("proxy mode: %v %+v", err, c)
 	}
+}
+
+// TestRestoreConfigKeys covers the W5 restore inputs: the flag defaults, the
+// YAML and environment bindings of every key, and the frozen export-root
+// location rules that make a misplaced root a startup error.
+func TestRestoreConfigKeys(t *testing.T) {
+	cleanConfigEnv(t)
+	c, err := loadConfig(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ExportRoot != "" || c.XbstreamPath != "" || c.MysqldPath != "" || c.RestoreUseMemory != 0 {
+		t.Fatalf("unexpected restore defaults: %+v", c)
+	}
+	if c.RestoreExpansionFactor != 8 {
+		t.Fatalf("restore_expansion_factor default = %d, want 8", c.RestoreExpansionFactor)
+	}
+	requireRestoreConfigRefused(t)
+	accepted, err := loadConfig(t, "--export-root", "/secure/export", "--xbstream-path", "/usr/bin/xbstream",
+		"--mysqld-path", "/usr/sbin/mysqld", "--restore-expansion-factor", "12", "--restore-use-memory", "1073741824")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRestoreConfig(t, accepted, "/secure/export", "/usr/bin/xbstream", "/usr/sbin/mysqld", 12, 1<<30)
+}
+
+// requireRestoreConfigRefused proves each frozen restore validation is a startup
+// error: a non-positive expansion factor, a relative path, an export root that
+// shares a volume with the metadata or work directory, and an export root that
+// contains the KEK.
+func requireRestoreConfigRefused(t *testing.T) {
+	t.Helper()
+	refusals := [][]string{
+		{"--restore-expansion-factor", "0"},
+		{"--export-root", "relative/export"},
+		{"--xbstream-path", "xbstream"},
+		{"--mysqld-path", "mysqld"},
+		{"--metadata-dir", "/var/lib/intern/metadata", "--export-root", "/var/lib/intern/metadata/export"},
+		{"--export-root", "/export", "--work-root", "/export/work"},
+		{"--export-root", "/export", "--kek-file", "/export/keys/intern.key"},
+	}
+	for _, args := range refusals {
+		if err := loadConfigError(t, args...); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
+
+// TestRestoreConfigEnvironmentAndYAML proves the restore keys bind through
+// INTERN_* and the YAML file like every other setting.
+func TestRestoreConfigEnvironmentAndYAML(t *testing.T) {
+	cleanConfigEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "web.yaml")
+	body := "metadata_dir: " + filepath.Join(dir, "metadata") + "\nexport_root: " + filepath.Join(dir, "export") +
+		"\nxbstream_path: /yaml/xbstream\nmysqld_path: /yaml/mysqld\nrestore_expansion_factor: 4\nrestore_use_memory: 1024\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("INTERN_CONFIG", path)
+	c, err := loadConfig(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRestoreConfig(t, c, filepath.Join(dir, "export"), "/yaml/xbstream", "/yaml/mysqld", 4, 1024)
+
+	t.Setenv("INTERN_XBSTREAM_PATH", "/env/xbstream")
+	t.Setenv("INTERN_RESTORE_EXPANSION_FACTOR", "6")
+	c, err = loadConfig(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRestoreConfig(t, c, filepath.Join(dir, "export"), "/env/xbstream", "/yaml/mysqld", 6, 1024)
+
+	c, err = loadConfig(t, "--xbstream-path", "/flag/xbstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRestoreConfig(t, c, filepath.Join(dir, "export"), "/flag/xbstream", "/yaml/mysqld", 6, 1024)
+}
+
+// TestPrepareExportRootCreatesDirectory proves the export root is created with
+// the frozen mode in the serve path, and that a symlink is refused.
+func TestPrepareExportRootCreatesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "export")
+	c := configuration{ExportRoot: root}
+	if err := c.prepareExportRoot(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("export root: %v, %v", info, err)
+	}
+	link := filepath.Join(dir, "link")
+	if err = os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	c = configuration{ExportRoot: link}
+	if err = c.validateExportRoot(); err == nil {
+		t.Fatal("a symlinked export_root was accepted")
+	}
+	if err = (configuration{}).prepareExportRoot(); err != nil {
+		t.Fatalf("an absent export_root must be a no-op: %v", err)
+	}
+}
+
+func assertRestoreConfig(t *testing.T, c configuration, export, xbstream, mysqld string, factor int, useMemory int64) {
+	t.Helper()
+	if c.ExportRoot != export || c.XbstreamPath != xbstream || c.MysqldPath != mysqld {
+		t.Fatalf("restore paths = %q %q %q", c.ExportRoot, c.XbstreamPath, c.MysqldPath)
+	}
+	if c.RestoreExpansionFactor != factor || c.RestoreUseMemory != useMemory {
+		t.Fatalf("restore estimate = %d / %d, want %d / %d",
+			c.RestoreExpansionFactor, c.RestoreUseMemory, factor, useMemory)
+	}
+}
+
+func loadConfigError(t *testing.T, args ...string) error {
+	t.Helper()
+	_, err := loadConfig(t, args...)
+	return err
 }

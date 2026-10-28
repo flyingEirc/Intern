@@ -93,24 +93,34 @@ const (
 	RunsTrigger   = "runs:trigger"
 	RunsCancel    = "runs:cancel"
 	ReplicasRetry = "replicas:retry"
+	// W5 additions frozen in the contract: viewers read restores, operators
+	// plan them, and only administrators execute or cancel them.
+	RestoresRead    = "restores:read"
+	RestoresPlan    = "restores:plan"
+	RestoresExecute = "restores:execute"
 )
 
-// Permissions is the frozen Stage C matrix. Administrator is a superset for the
-// source and policy resources: both roles may manage them. Only an administrator
-// may write repositories, matching the architectural role split (operator owns
-// sources and policies; admin owns repositories and restore operations).
-// Viewer is read-only and anonymous holds nothing.
+// Permissions is the frozen Stage C+D matrix. Administrator is a superset for
+// the source and policy resources: both roles may manage them. Only an
+// administrator may write repositories or execute/cancel restores, matching the
+// architectural role split (operator owns sources, policies and restore plans;
+// admin owns repositories and restore execution). Viewer is read-only and
+// anonymous holds nothing.
 func Permissions(role string) []string {
 	switch role {
 	case "admin":
 		return []string{
 			SessionSelf, UsersManage, AuditRead, RepositoriesManage, SourcesManage, PoliciesManage, ResourcesRead,
 			RunsRead, RunsTrigger, RunsCancel, ReplicasRetry,
+			RestoresRead, RestoresPlan, RestoresExecute,
 		}
 	case "operator":
-		return []string{SessionSelf, SourcesManage, PoliciesManage, ResourcesRead, RunsRead, RunsTrigger, RunsCancel, ReplicasRetry}
+		return []string{
+			SessionSelf, SourcesManage, PoliciesManage, ResourcesRead, RunsRead, RunsTrigger, RunsCancel, ReplicasRetry,
+			RestoresRead, RestoresPlan,
+		}
 	case "viewer":
-		return []string{SessionSelf, ResourcesRead, RunsRead}
+		return []string{SessionSelf, ResourcesRead, RunsRead, RestoresRead}
 	default:
 		return []string{}
 	}

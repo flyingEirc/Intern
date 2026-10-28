@@ -48,6 +48,14 @@ type Settings struct {
 	XtrabackupPath string
 	MinWorkBytes   uint64
 	MinBackupBytes uint64
+	// ExportRoot is the absolute directory a completed restore publishes its
+	// export into. XbstreamPath is the unpacking executable; MysqldPath is the
+	// rehearsal server and empty means rehearsal is unavailable.
+	ExportRoot             string
+	XbstreamPath           string
+	MysqldPath             string
+	RestoreExpansionFactor int
+	RestoreUseMemory       int64
 }
 
 // ValidateRepositoryRoot refuses a local repository directory that contains the
@@ -68,6 +76,17 @@ func (s Settings) Credentials() bool { return s.Sealer != nil }
 func (s Settings) Preflight() bool {
 	return s.Credentials() && s.WorkRoot != "" && s.XtrabackupPath != "" && s.MinWorkBytes > 0 && s.MinBackupBytes > 0
 }
+
+// Restore reports whether the restore plan and execution inputs are
+// configured. The KEK, work root, XtraBackup, xbstream and export root are the
+// frozen set: a missing one answers 503 for the plan and execute APIs.
+func (s Settings) Restore() bool {
+	return s.Credentials() && s.WorkRoot != "" && s.XtrabackupPath != "" && s.XbstreamPath != "" && s.ExportRoot != ""
+}
+
+// Rehearsal reports whether a rehearsal can run. A deployment without mysqld
+// still restores; a rehearse=true request answers 422 validation_failed.
+func (s Settings) Rehearsal() bool { return s.Restore() && s.MysqldPath != "" }
 
 // Service runs preflight and probe operations against the control-plane store.
 type Service struct {

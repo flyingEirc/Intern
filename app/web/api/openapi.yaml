@@ -29,6 +29,13 @@ info:
     terminal status, and a revoked event when the session stops being valid.
     zstd_level is stored per policy but the encoder is fixed at concurrency 1
     and the level is not applied.
+    Stage D adds isolated restores: a read-only plan endpoint behind
+    restores:plan, an execute endpoint behind restores:execute that requires
+    the administrator's password re-entry and a matching plan digest, bounded
+    restore logs, and cancellation. Restores and backup runs share one global
+    execution slot: neither queue is claimed while the other has a running row.
+    A restore publishes its export by an atomic non-overwriting rename; a
+    published export is never deleted by a cancel or by restart recovery.
 security:
   - cookieAuth: []
 paths:
@@ -1264,6 +1271,251 @@ paths:
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
+  /api/v1/restores/plan:
+    post:
+      operationId: planRestore
+      summary: Build a fresh restore plan (restores:plan, admin or operator)
+      description: >-
+        Read-only: no restore row, no file and no FTP write. The plan names the
+        target backup, every chain link with its source (local or ftp), the
+        payload and metadata sizes, the target LSN, the space estimate against
+        the work and export volumes, the planned export path, fixed risk codes,
+        the sha256 plan digest the execute request must confirm, and whether a
+        rehearsal can run. A refusal is restore_refused with the engine's fixed
+        machine code in error.detail.code: 404 backup_not_found, 422
+        matrix_unsupported, 409 for every other refusal, 503 when the restore
+        runtime is not configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestorePlanRequest'
+      responses:
+        '200':
+          description: Fresh plan; plan_digest is the confirmed digest input
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestorePlan'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/restores:
+    get:
+      operationId: listRestores
+      summary: List restores newest first (restores:read, viewer and above)
+      description: >-
+        Descending UUIDv7 id order with the shared cursor contract. Filters are
+        exact matches; status is one of queued, running, completed, failed or
+        canceled.
+      parameters:
+        - name: backup_id
+          in: query
+          description: Exact backup id match; must be a resource id.
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RestoreStatus'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Before'
+      responses:
+        '200':
+          description: Descending UUIDv7 ID order; next_before is null at the end
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestorePage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: executeRestore
+      summary: Execute a confirmed restore plan (restores:execute, admin only)
+      description: >-
+        Requires the administrator's password re-entry; a wrong password is 403
+        confirmation_failed with a denied audit row and no restore row. Password
+        confirmation is limited to 5 attempts/minute/user (429 with
+        Retry-After). plan_digest must equal a fresh plan built at request time,
+        otherwise 409 plan_changed. rehearse=true without a configured mysqld is
+        422 validation_failed. verify_sql statements are executed in a read-only
+        transaction by the rehearsal and are never written to the audit. The
+        queued restore row and its success audit commit in one transaction; an
+        audit failure rolls the row back and answers 500. An optional
+        Idempotency-Key replays the stored restore for the same request; the
+        same key with a different request is 409.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreExecuteRequest'
+      responses:
+        '202':
+          description: Restore queued, or replayed for the same idempotency key
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreAccepted'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '422':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/RetryableError'
+        '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/restores/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: getRestore
+      summary: Read one restore (restores:read, viewer and above)
+      description: >-
+        Returns the confirmed plan with every chain link and its source, phase,
+        export_path/export_bytes, verify_status/verify_result,
+        error_class/error_code and the exact side effects recovery observed.
+        idempotency_key and request_hash are never exposed.
+      responses:
+        '200':
+          description: One restore row
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restore'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/restores/{id}/logs:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: listRestoreLogs
+      summary: Read one restore's bounded event log (restores:read, viewer and above)
+      description: >-
+        Ascending seq order with at most 1000 rows per restore. When the cap was
+        reached, the final row is the truncated marker and the response sets
+        truncated=true. after_seq returns rows with a greater sequence only.
+      parameters:
+        - name: after_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+      responses:
+        '200':
+          description: Ascending seq order; next_after is the last returned seq
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreLogPage'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/restores/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    post:
+      operationId: cancelRestore
+      summary: Request restore cancellation (restores:execute, admin only)
+      description: >-
+        A queued restore becomes canceled without running. A running restore's
+        context is canceled; the published export wins, so a restore whose
+        export was already renamed into place stays completed and no cancel or
+        recovery ever deletes a published export. A terminal restore answers 409
+        conflict. The accepted body is {restore_id}.
+      responses:
+        '202':
+          description: Cancel request recorded
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreAccepted'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
 components:
   securitySchemes:
     cookieAuth:
@@ -1306,6 +1558,17 @@ components:
         hyphens is echoed. Other values are replaced with a generated UUIDv7.
       schema:
         type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >-
+        Optional 1 to 128 character key. The same key and request replay the
+        stored restore; the same key with a different request is 409.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
   headers:
     RequestID:
       description: Accepted incoming request ID or a generated UUIDv7
@@ -1422,7 +1685,7 @@ components:
       enum: [admin, operator, viewer]
     Permission:
       type: string
-      enum: ['session:self', 'users:manage', 'audit:read', 'repositories:manage', 'sources:manage', 'policies:manage', 'resources:read', 'runs:read', 'runs:trigger', 'runs:cancel', 'replicas:retry']
+      enum: ['session:self', 'users:manage', 'audit:read', 'repositories:manage', 'sources:manage', 'policies:manage', 'resources:read', 'runs:read', 'runs:trigger', 'runs:cancel', 'replicas:retry', 'restores:read', 'restores:plan', 'restores:execute']
     User:
       type: object
       additionalProperties: false
@@ -2038,6 +2301,299 @@ components:
         truncated:
           type: boolean
           description: True when the log reached its cap and ends in the truncated marker.
+    RestoreStatus:
+      type: string
+      enum: [queued, running, completed, failed, canceled]
+    RestorePhase:
+      type: string
+      description: >-
+        The engine phase of a running restore. Null outside a run.
+      enum: [fetching, authenticating, extracting, preparing, exporting, rehearsing]
+    RestoreErrorClass:
+      type: string
+      description: The closed failure-class set of a failed or canceled restore.
+      enum: [unavailable, refused, restore_failed, canceled, interrupted]
+    RestoreVerifyStatus:
+      type: string
+      description: >-
+        Rehearsal outcome, separate from the restore status. not_requested when
+        no rehearsal was asked for; a failed rehearsal never fails a published
+        restore.
+      enum: [not_requested, passed, failed]
+    RestoreSideEffects:
+      type: object
+      additionalProperties: false
+      required: [work_dir_removed, pending_export_removed, export_published]
+      properties:
+        work_dir_removed:
+          type: boolean
+        pending_export_removed:
+          type: boolean
+        export_published:
+          type: boolean
+    RestorePlanLink:
+      type: object
+      additionalProperties: false
+      required: [backup_id, seq, kind, from_lsn, to_lsn, source, repository_id, payload_size, metadata_size]
+      properties:
+        backup_id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        from_lsn:
+          type: integer
+          minimum: 0
+        to_lsn:
+          type: integer
+          minimum: 0
+        source:
+          type: string
+          enum: [local, ftp]
+        repository_id:
+          type: string
+        payload_size:
+          type: integer
+          format: int64
+          minimum: 0
+        metadata_size:
+          type: integer
+          format: int64
+          minimum: 0
+    RestorePlan:
+      type: object
+      additionalProperties: false
+      required:
+        [backup_id, chain_id, source_id, server_uuid, server_version, tool_version,
+         target_to_lsn, links, required_work_bytes, required_export_bytes,
+         available_work_bytes, available_export_bytes, export_path, risks,
+         plan_digest, rehearsal_available]
+      properties:
+        backup_id:
+          type: string
+        chain_id:
+          type: string
+        source_id:
+          type: string
+        server_uuid:
+          type: string
+        server_version:
+          type: string
+        tool_version:
+          type: string
+        target_to_lsn:
+          type: integer
+          minimum: 0
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/RestorePlanLink'
+        required_work_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        required_export_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        available_work_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        available_export_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        export_path:
+          type: string
+          description: >-
+            The planned export path. Execution publishes the rename target and
+            reports the final path on the restore row.
+        risks:
+          type: array
+          items:
+            type: string
+        plan_digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        rehearsal_available:
+          type: boolean
+    Restore:
+      type: object
+      additionalProperties: false
+      required:
+        [id, backup_id, status, phase, plan, plan_digest, rehearse, verify_sql,
+         requested_by, work_dir, export_path, export_bytes, created_at, started_at,
+         finished_at, cancel_requested, error_class, error_code, side_effects,
+         verify_status, verify_result]
+      properties:
+        id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        backup_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/RestoreStatus'
+        phase:
+          allOf:
+            - $ref: '#/components/schemas/RestorePhase'
+          nullable: true
+        plan:
+          $ref: '#/components/schemas/RestorePlan'
+        plan_digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        rehearse:
+          type: boolean
+        verify_sql:
+          type: array
+          items:
+            type: string
+        requested_by:
+          type: string
+        work_dir:
+          type: string
+          nullable: true
+        export_path:
+          type: string
+          nullable: true
+        export_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_requested:
+          type: boolean
+        error_class:
+          allOf:
+            - $ref: '#/components/schemas/RestoreErrorClass'
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+        side_effects:
+          allOf:
+            - $ref: '#/components/schemas/RestoreSideEffects'
+          nullable: true
+        verify_status:
+          $ref: '#/components/schemas/RestoreVerifyStatus'
+        verify_result:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Rehearsal detail. Null when no rehearsal ran.
+    RestorePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_before]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Restore'
+        next_before:
+          type: string
+          nullable: true
+    RestoreLog:
+      type: object
+      additionalProperties: false
+      required: [restore_id, seq, ts, level, message, data]
+      properties:
+        restore_id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        ts:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        message:
+          type: string
+        data:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: Structured event payload. Null when the row has none.
+    RestoreLogPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_after, truncated]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RestoreLog'
+        next_after:
+          type: integer
+          format: int64
+          nullable: true
+        truncated:
+          type: boolean
+          description: True when the log reached its cap and ends in the truncated marker.
+    RestorePlanRequest:
+      type: object
+      additionalProperties: false
+      required: [backup_id]
+      properties:
+        backup_id:
+          type: string
+          format: uuid
+    RestoreExecuteRequest:
+      type: object
+      additionalProperties: false
+      required: [backup_id, plan_digest, password]
+      properties:
+        backup_id:
+          type: string
+          format: uuid
+        plan_digest:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        password:
+          type: string
+          writeOnly: true
+          minLength: 1
+          maxLength: 256
+          description: Administrator password re-entry; never returned, logged or audited.
+        rehearse:
+          type: boolean
+          default: false
+        verify_sql:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 8192
+          description: >-
+            Read-only single SELECT statements executed by the rehearsal in a
+            read-only transaction. Never written to the audit.
+    RestoreAccepted:
+      type: object
+      additionalProperties: false
+      required: [restore_id]
+      properties:
+        restore_id:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
     RunLogEvent:
       type: object
       description: >-
@@ -2234,9 +2790,23 @@ components:
       properties:
         preflight:
           $ref: '#/components/schemas/PreflightResult'
+        detail:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code:
+              type: string
+              minLength: 1
+              description: >-
+                The fixed machine code of a restore_refused error, for example
+                backup_not_found, chain_broken, lsn_discontinuous,
+                source_unavailable, tool_version_mismatch, matrix_unsupported,
+                key_unavailable, insufficient_space, plan_changed or
+                unconfigured.
         code:
           type: string
-          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed, preflight_failed]
+          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed, preflight_failed, restore_refused, plan_changed, confirmation_failed]
         message:
           type: string
           minLength: 1

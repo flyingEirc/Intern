@@ -274,12 +274,20 @@ func TestOperationSecurityAndExplicitErrors(t *testing.T) {
 		"GET /api/v1/sources/{id}/protection":                      {"401", "403", "404"},
 		"GET /api/v1/replicas":                                     {"400", "401", "403"},
 		"POST /api/v1/backups/{id}/replicas/{repository_id}/retry": {"401", "403", "404"},
+
+		"POST /api/v1/restores/plan":        {"400", "401", "403", "404", "409", "415", "422", "503"},
+		"GET /api/v1/restores":              {"400", "401", "403"},
+		"POST /api/v1/restores":             {"400", "401", "403", "404", "409", "415", "422", "429", "503"},
+		"GET /api/v1/restores/{id}":         {"401", "403", "404"},
+		"GET /api/v1/restores/{id}/logs":    {"400", "401", "403", "404"},
+		"POST /api/v1/restores/{id}/cancel": {"401", "403", "404", "409"},
 	}
 	retryAfter := map[string][]string{
 		"POST /api/v1/auth/login":   {"429", "503"},
 		"PUT /api/v1/auth/password": {"429", "503"},
 		"POST /api/v1/users":        {"503"},
 		"PATCH /api/v1/users/{id}":  {"503"},
+		"POST /api/v1/restores":     {"429"},
 	}
 	seen := map[string]bool{}
 	for path, item := range doc.Paths.Map() {
@@ -424,7 +432,7 @@ func testEngineWithRuns(t *testing.T) *gin.Engine {
 	}
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(io.Discard, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: settings}, dispatcher)
+		&resources.Service{Store: f.database, Settings: settings}, dispatcher, WithRestores(dispatcher))
 	if err != nil {
 		t.Fatal(err)
 	}

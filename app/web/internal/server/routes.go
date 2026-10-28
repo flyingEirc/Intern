@@ -40,6 +40,7 @@ type EngineOption func(*engineOptions)
 
 type engineOptions struct {
 	sseHeartbeat time.Duration
+	restores     RestoreControl
 }
 
 // WithSSEHeartbeat sets the SSE comment interval. Production leaves this unset
@@ -51,6 +52,14 @@ func WithSSEHeartbeat(d time.Duration) EngineOption {
 			o.sseHeartbeat = d
 		}
 	}
+}
+
+// WithRestores attaches the restore API. Production serve always attaches the
+// dispatcher; an unconfigured deployment then answers 503 for plan and execute
+// while the read routes keep serving stored rows. Tests that do not exercise
+// restores omit the option and the routes stay absent.
+func WithRestores(control RestoreControl) EngineOption {
+	return func(o *engineOptions) { o.restores = control }
 }
 
 // NewEngineWithResources is NewEngine with explicit preflight and credential
@@ -102,6 +111,10 @@ func NewEngineWithResources(database Readiness, logger *slog.Logger, trustedProx
 	if runs != nil {
 		registerRuns(engine, authentication.Database, runs, authentication,
 			middleware.Authorization{Service: authentication}, logger, options.sseHeartbeat)
+	}
+	if options.restores != nil {
+		registerRestores(engine, authentication.Database, options.restores, authentication,
+			middleware.Authorization{Service: authentication}, logger)
 	}
 	return engine, nil
 }

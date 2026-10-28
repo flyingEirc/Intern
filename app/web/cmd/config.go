@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -41,7 +42,19 @@ type configuration struct {
 	// MinWorkBytes and MinBackupBytes are positive free-space policies.
 	MinWorkBytes   uint64 `mapstructure:"min_work_bytes"`
 	MinBackupBytes uint64 `mapstructure:"min_backup_bytes"`
-	Log            struct {
+	// Restore inputs. ExportRoot is where a completed restore publishes its
+	// export; it must sit outside the metadata directory and work root.
+	// XbstreamPath unpacks authenticated ciphertext, MysqldPath runs the
+	// rehearsal (empty disables rehearsal only). RestoreExpansionFactor is the
+	// conservative multiplied payload-space estimate (default 8), and
+	// RestoreUseMemory is the xtrabackup --use-memory value in bytes (0 omits
+	// the flag).
+	ExportRoot             string `mapstructure:"export_root"`
+	XbstreamPath           string `mapstructure:"xbstream_path"`
+	MysqldPath             string `mapstructure:"mysqld_path"`
+	RestoreExpansionFactor int    `mapstructure:"restore_expansion_factor"`
+	RestoreUseMemory       int64  `mapstructure:"restore_use_memory"`
+	Log                    struct {
 		Level string `mapstructure:"level"`
 	} `mapstructure:"log"`
 	TLS struct {
@@ -131,14 +144,36 @@ func (c configuration) validate() error {
 	return c.validateTLS()
 }
 
-// validateResources accepts every credential and preflight setting as absent,
-// and requires each supplied value to be usable on its own terms. Cross-field
-// rules belong to the operation that needs them, so a partial deployment still
-// starts and answers 503 only for the operations it cannot run.
+// validateResources accepts every credential, preflight and restore setting as
+// absent, and requires each supplied value to be usable on its own terms.
+// Cross-field rules belong to the operation that needs them, so a partial
+// deployment still starts and answers 503 only for the operations it cannot run.
 func (c configuration) validateResources() error {
-	for _, setting := range []struct{ name, value string }{
-		{"kek_file", c.KEKFile}, {"work_root", c.WorkRoot}, {"xtrabackup_path", c.XtrabackupPath},
-	} {
+	if err := c.validateAbsolutePaths(); err != nil {
+		return err
+	}
+	if err := c.validateRestoreEstimate(); err != nil {
+		return err
+	}
+	if err := c.validateExportRoot(); err != nil {
+		return err
+	}
+	return c.validateCapacityPolicy()
+}
+
+// validateAbsolutePaths requires every configured path setting to be absolute:
+// a relative one would be resolved against the listener's working directory,
+// which is never the deployment's intent.
+func (c configuration) validateAbsolutePaths() error {
+	settings := []struct{ name, value string }{
+		{"kek_file", c.KEKFile},
+		{"work_root", c.WorkRoot},
+		{"xtrabackup_path", c.XtrabackupPath},
+		{"export_root", c.ExportRoot},
+		{"xbstream_path", c.XbstreamPath},
+		{"mysqld_path", c.MysqldPath},
+	}
+	for _, setting := range settings {
 		if setting.value == "" {
 			continue
 		}
@@ -146,6 +181,22 @@ func (c configuration) validateResources() error {
 			return fmt.Errorf("%s must be an absolute path", setting.name)
 		}
 	}
+	return nil
+}
+
+// validateRestoreEstimate bounds the conservative space estimate inputs.
+func (c configuration) validateRestoreEstimate() error {
+	if c.RestoreExpansionFactor <= 0 {
+		return errors.New("restore_expansion_factor must be positive")
+	}
+	if c.RestoreUseMemory < 0 {
+		return errors.New("restore_use_memory must not be negative")
+	}
+	return nil
+}
+
+// validateCapacityPolicy keeps the two free-space floors symmetric.
+func (c configuration) validateCapacityPolicy() error {
 	if c.MinWorkBytes == 0 && c.MinBackupBytes == 0 {
 		return nil
 	}
@@ -158,13 +209,101 @@ func (c configuration) validateResources() error {
 	return nil
 }
 
-// resourceSettings resolves the credential and preflight service settings. The
-// KEK must sit outside the metadata and work directories, which is checked here
-// so a misplacement is a startup error rather than a per-request failure.
+// validateExportRoot enforces the frozen export-root location rules at startup:
+// outside the metadata and work directories, never containing the KEK, and an
+// existing path must be a real directory. A local repository root is checked by
+// the restore engine when it plans, because those rows live in the database.
+func (c configuration) validateExportRoot() error {
+	if c.ExportRoot == "" {
+		return nil
+	}
+	if err := c.validateExportRootPlacement(); err != nil {
+		return err
+	}
+	return c.validateExportRootKind()
+}
+
+// validateExportRootPlacement refuses an export root that shares a volume with
+// the metadata directory, the work root, or the KEK: a restore must never be
+// able to overwrite or reveal any of them.
+func (c configuration) validateExportRootPlacement() error {
+	protected := []struct{ name, path string }{
+		{"metadata_dir", c.MetadataDir},
+		{"work_root", c.WorkRoot},
+	}
+	for _, other := range protected {
+		if other.path == "" {
+			continue
+		}
+		if pathWithin(other.path, c.ExportRoot) {
+			return fmt.Errorf("export_root must be outside %s", other.name)
+		}
+		if pathWithin(c.ExportRoot, other.path) {
+			return fmt.Errorf("%s must be outside export_root", other.name)
+		}
+	}
+	if c.KEKFile != "" && pathWithin(c.ExportRoot, c.KEKFile) {
+		return errors.New("export_root must not contain kek_file")
+	}
+	return nil
+}
+
+// validateExportRootKind accepts a root that does not exist yet (serve creates
+// it) and rejects a symlink or a non-directory.
+func (c configuration) validateExportRootKind() error {
+	info, err := os.Lstat(c.ExportRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("cannot inspect export_root: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("export_root must be a non-symlink directory")
+	}
+	if !info.IsDir() {
+		return errors.New("export_root must be a directory")
+	}
+	return nil
+}
+
+// pathWithin reports whether child is parent itself or sits below it.
+func pathWithin(parent, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// prepareExportRoot creates the configured export root with the frozen export
+// directory mode and rechecks that the created path is a real directory.
+func (c configuration) prepareExportRoot() error {
+	if c.ExportRoot == "" {
+		return nil
+	}
+	if err := os.MkdirAll(c.ExportRoot, 0o750); err != nil {
+		return fmt.Errorf("create export_root: %w", err)
+	}
+	return c.validateExportRootKind()
+}
+
+// resourceSettings resolves the credential, preflight and restore settings.
+// The KEK must sit outside the metadata, work and export directories, which is
+// checked here so a misplacement is a startup error rather than a per-request
+// failure.
 func (c configuration) resourceSettings() (resources.Settings, error) {
+	// The export root is created here, in the serve path only: migrate and user
+	// administration never touch it, and a configured deployment must have a
+	// real directory for the restore engine to validate and publish into.
+	if err := c.prepareExportRoot(); err != nil {
+		return resources.Settings{}, err
+	}
 	settings := resources.Settings{
 		KeyFile: c.KEKFile, MetadataDir: c.MetadataDir, WorkRoot: c.WorkRoot,
 		XtrabackupPath: c.XtrabackupPath, MinWorkBytes: c.MinWorkBytes, MinBackupBytes: c.MinBackupBytes,
+		ExportRoot: c.ExportRoot, XbstreamPath: c.XbstreamPath, MysqldPath: c.MysqldPath,
+		RestoreExpansionFactor: c.RestoreExpansionFactor, RestoreUseMemory: c.RestoreUseMemory,
 	}
 	if c.KEKFile == "" {
 		return settings, nil
@@ -172,6 +311,9 @@ func (c configuration) resourceSettings() (resources.Settings, error) {
 	forbidden := []string{c.MetadataDir}
 	if c.WorkRoot != "" {
 		forbidden = append(forbidden, c.WorkRoot)
+	}
+	if c.ExportRoot != "" {
+		forbidden = append(forbidden, c.ExportRoot)
 	}
 	sealer, err := credential.Open(c.KEKFile, forbidden...)
 	if err != nil {
