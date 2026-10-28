@@ -135,3 +135,65 @@ func TestKillAcceptsSupervisorTeardownExit(t *testing.T) {
 		t.Fatalf("supervisor status = %v, want exit 125", exit)
 	}
 }
+
+// TestUnrequestedSupervisorTeardownExitStaysFailure pins the killRequested
+// guard: the very same supervisor teardown exit is a failure when this process
+// never asked for the kill. Both ways the supervisor reaches code 125 on its own
+// — the lifetime pipe closes with no kill requested, and a tool that cannot be
+// exec'd — keep the wait result an error, so a teardown nobody requested is never
+// reported clean.
+func TestUnrequestedSupervisorTeardownExitStaysFailure(t *testing.T) {
+	t.Run("lifetime pipe closed with no kill", func(t *testing.T) {
+		work := t.TempDir()
+		pidFile := filepath.Join(work, "pid")
+		tool := fakeTool(t, "printf '%s' $$ > "+shellQuote(pidFile)+"\nexec sleep 30\n")
+		process, err := startSupervisedProcess(t.Context(), processSpec{
+			binary: tool, dir: work, stdout: io.Discard, stderr: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = process.kill() })
+		waitForCondition(t, "supervised tool running", func() bool {
+			_, statErr := os.Stat(pidFile)
+			return statErr == nil
+		})
+		closePipe(process.writeEnd)
+		assertUnrequestedTeardownFailure(t, process)
+	})
+	t.Run("tool cannot exec", func(t *testing.T) {
+		work := t.TempDir()
+		process, err := startSupervisedProcess(t.Context(), processSpec{
+			binary: filepath.Join(work, "missing-mysqld"), dir: work,
+			stdout: io.Discard, stderr: io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = process.kill() })
+		assertUnrequestedTeardownFailure(t, process)
+	})
+}
+
+// assertUnrequestedTeardownFailure waits for the supervisor to exit on its own
+// and requires waitExit to still report its teardown exit, because no kill was
+// ever requested here.
+func assertUnrequestedTeardownFailure(t *testing.T, process *supervisedProcess) {
+	t.Helper()
+	select {
+	case <-process.exited():
+	case <-time.After(4 * time.Second):
+		t.Fatal("supervisor did not exit with its teardown code")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+	defer cancel()
+	err := process.waitExit(ctx)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("waitExit = %v, want the unrequested supervisor teardown exit", err)
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	if !ok || !status.Exited() || status.ExitStatus() != 125 {
+		t.Fatalf("supervisor status = %v, want exit 125", exit)
+	}
+}
