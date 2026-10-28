@@ -63,7 +63,10 @@ type MysqldProcess struct {
 }
 
 // StartMysqld starts the rehearsal server in its own supervised process group.
-// The current effective uid must not be root. The server keeps running until the
+// The current effective uid must not be root. The configured binary is validated
+// before anything is launched: the supervisor always starts /proc/self/exe, so a
+// missing or non-executable server would otherwise look like a successful start
+// and only surface later as an opaque exit. The server keeps running until the
 // caller shuts it down, the context ends, or Kill is called.
 func StartMysqld(ctx context.Context, opts MysqldOptions) (*MysqldProcess, error) {
 	if os.Geteuid() == 0 {
@@ -71,6 +74,9 @@ func StartMysqld(ctx context.Context, opts MysqldOptions) (*MysqldProcess, error
 	}
 	args, err := MysqldArgs(opts)
 	if err != nil {
+		return nil, err
+	}
+	if err = validateMysqldBinary(opts.Binary); err != nil {
 		return nil, err
 	}
 	info, err := os.Lstat(opts.DataDir)
@@ -82,6 +88,24 @@ func StartMysqld(ctx context.Context, opts MysqldOptions) (*MysqldProcess, error
 		return nil, err
 	}
 	return &MysqldProcess{process: process, binary: opts.Binary}, nil
+}
+
+// validateMysqldBinary requires the configured server to be an absolute path to
+// an existing regular file the current effective uid may execute. Every check is
+// synchronous, so an unusable server is refused before a supervisor exists and
+// the refusal is the same on every platform.
+func validateMysqldBinary(binary string) error {
+	if !filepath.IsAbs(binary) || strings.ContainsAny(binary, "\x00\r\n") {
+		return errors.New("physical: mysqld binary must be an absolute path")
+	}
+	info, err := os.Stat(binary)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("physical: mysqld binary must be an existing regular file")
+	}
+	if !executableForCurrentUser(binary, info) {
+		return errors.New("physical: mysqld binary is not executable by this user")
+	}
+	return nil
 }
 
 // PID is the supervisor process id, not the tool's.

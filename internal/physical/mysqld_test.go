@@ -85,3 +85,50 @@ func TestQuerySpace(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestStartMysqldRefusesUnusableBinary requires the configured server to be
+// refused before anything is launched. The supervisor always starts /proc/self/exe,
+// so on Linux a missing or non-executable binary would otherwise look like a
+// successful start and only surface later as an opaque exit; the refusal must be
+// the same on every platform.
+func TestStartMysqldRefusesUnusableBinary(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	notExecutable := filepath.Join(root, "mysqld-noexec")
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		binary string
+	}{
+		{"relative", "mysqld"},
+		{"missing", filepath.Join(root, "missing")},
+		{"directory", root},
+		{"not executable", notExecutable},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := StartMysqld(t.Context(), MysqldOptions{
+				Binary: test.binary, DataDir: data,
+				Socket: filepath.Join(root, "s"), PIDFile: filepath.Join(root, "p"), LogError: filepath.Join(root, "e"),
+			})
+			if err == nil {
+				t.Fatalf("StartMysqld accepted the %s binary", test.name)
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				t.Fatal("filesystem error leaked into the public error")
+			}
+		})
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = validateMysqldBinary(executable); err != nil {
+		t.Fatalf("a real executable was refused: %v", err)
+	}
+}

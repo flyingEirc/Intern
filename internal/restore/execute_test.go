@@ -242,8 +242,16 @@ func TestSucceedEmitsRehearsingOnlyWhenRequested(t *testing.T) {
 		mustNoError(t, e.publish(t.Context()))
 		result, err := e.succeed(t.Context())
 		mustNoError(t, err)
-		if result.Verify == nil || result.Verify.Status != "failed" || result.Verify.FailureCode != "not_started" {
-			t.Fatalf("verify = %+v, want a failed rehearsal that never started", result.Verify)
+		// A rehearsal that cannot start is reported as a failed verify that never
+		// started. The code names the precondition that refused it: a root process is
+		// refused before the binary is inspected at all, so that case is root_refused
+		// rather than not_started.
+		wantCode := "not_started"
+		if os.Geteuid() == 0 {
+			wantCode = "root_refused"
+		}
+		if result.Verify == nil || result.Verify.Status != "failed" || result.Verify.Started || result.Verify.FailureCode != wantCode {
+			t.Fatalf("verify = %+v, want a failed rehearsal that never started (%s)", result.Verify, wantCode)
 		}
 		if got := recorder.phases(); !slices.Equal(got, []Phase{PhaseExporting, PhaseRehearsing}) {
 			t.Fatalf("phases = %v, want [exporting rehearsing]", got)
