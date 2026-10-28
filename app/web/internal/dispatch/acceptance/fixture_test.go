@@ -66,7 +66,7 @@ const (
 )
 
 type layout struct {
-	root, metadata, kek, work, repository, local, tlsDir, cert, key string
+	root, metadata, kek, work, repository, local, tlsDir, cert, key, export string
 }
 
 type secrets struct {
@@ -152,6 +152,8 @@ func newFixture(t *testing.T) *fixture {
 	settings := resources.Settings{
 		Sealer: sealer, KeyFile: paths.kek, MetadataDir: paths.metadata, WorkRoot: paths.work,
 		XtrabackupPath: xtrabackupBin, MinWorkBytes: 1, MinBackupBytes: 1,
+		ExportRoot: paths.export, XbstreamPath: os.Getenv("INTERN_W5_XBSTREAM"),
+		MysqldPath: os.Getenv("INTERN_W5_MYSQLD"), RestoreExpansionFactor: 8,
 	}
 	svc := &resources.Service{Store: database, Settings: settings}
 	f := &fixture{
@@ -195,6 +197,15 @@ func newLayout(t *testing.T) layout {
 	paths.local = filepath.Join(paths.repository, "local")
 	paths.cert = filepath.Join(paths.tlsDir, "server.crt")
 	paths.key = filepath.Join(paths.tlsDir, "server.key")
+	// W5 restore inputs are opt-in: with no export root the deployment is
+	// unconfigured, the restore API answers 503 and every W4 behaviour stays
+	// unchanged. The harness supplies /export (a named volume it can also mount
+	// into a brand-new server); a local native run supplies any private
+	// directory that is not inside the work, metadata or repository roots.
+	paths.export = os.Getenv("INTERN_W5_EXPORT_ROOT")
+	if paths.export != "" {
+		must(t, os.MkdirAll(paths.export, 0o750))
+	}
 	for _, dir := range []string{paths.metadata, filepath.Dir(paths.kek), paths.work, paths.repository, paths.local, paths.tlsDir} {
 		must(t, os.Mkdir(dir, 0o700))
 	}
@@ -366,15 +377,28 @@ func (f *fixture) startEngine(t *testing.T, withDispatch bool) {
 	}
 	logger := slog.New(slog.NewJSONHandler(f.log, nil))
 	var dispatcher server.DispatcherControl
+	var engineOptions []server.EngineOption
 	if withDispatch {
+		// The production seam is built from the same settings the serve path
+		// uses, so an acceptance run with restore inputs exercises the real
+		// internal/restore engine; without them it stays nil and the API
+		// answers 503 like an unconfigured deployment.
+		var engine dispatch.RestoreEngine
+		if f.settings.Restore() {
+			built, buildErr := dispatch.NewRestoreEngine(f.database, f.settings, logger)
+			must(t, buildErr)
+			engine = built
+		}
 		started, err := dispatch.Start(context.Background(), dispatch.Config{
 			Database: f.database, Settings: f.settings, Logger: logger, Preflight: f.service,
+			Restore: engine,
 		})
 		must(t, err)
 		f.dispatcher = started
 		dispatcher = started
+		engineOptions = append(engineOptions, server.WithRestores(started))
 	}
-	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth, f.service, dispatcher)
+	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth, f.service, dispatcher, engineOptions...)
 	must(t, err)
 	srv := httptest.NewUnstartedServer(server.Handler(engine))
 	srv.StartTLS()
@@ -756,6 +780,12 @@ func (f *fixture) startServeChild(t *testing.T) {
 		"INTERN_W4_KEK="+f.layout.kek,
 		"INTERN_W4_WORK_ROOT="+f.layout.work,
 		"INTERN_W4_XTRABACKUP="+xtrabackupBin,
+		// The child is the same deployment: it must resolve exactly the restore
+		// inputs the parent fixture computed, or it serves an unconfigured
+		// restore API while the parent thinks otherwise.
+		"INTERN_W5_EXPORT_ROOT="+f.layout.export,
+		"INTERN_W5_XBSTREAM="+f.settings.XbstreamPath,
+		"INTERN_W5_MYSQLD="+f.settings.MysqldPath,
 	)
 	command.Stdout = logFile
 	command.Stderr = logFile

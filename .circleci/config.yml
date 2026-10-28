@@ -96,6 +96,9 @@ jobs:
           name: P4 evidence gate accept and reject cases
           command: .github/scripts/p4-gate-cases.sh
       - run:
+          name: W5 evidence gate accept and reject cases
+          command: .github/scripts/w5-gate-cases.sh
+      - run:
           name: Install pinned golangci-lint
           no_output_timeout: 20m
           command: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
@@ -316,6 +319,31 @@ jobs:
           destination: restore-p4/events.jsonl
       - save-go-caches
 
+  container-restore-api:
+    executor: native-amd64
+    steps:
+      - checkout
+      - install-go
+      - run:
+          name: Native restore API end to end
+          no_output_timeout: 55m
+          command: |
+            set -eo pipefail
+            mkdir -p .cache/quality/restore-api
+            timeout 55m go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestW5NativeContainers$' | tee .cache/quality/restore-api/events.jsonl
+      - run:
+          name: Reject incomplete or skipped restore API evidence
+          when: always
+          no_output_timeout: 55m
+          command: |
+            set -eo pipefail
+            export GITHUB_SHA="$CIRCLE_SHA1"
+            .github/scripts/verify-w5-evidence.sh .cache/quality/restore-api/events.jsonl
+      - store_artifacts:
+          path: .cache/quality/restore-api/events.jsonl
+          destination: restore-api-w5/events.jsonl
+      - save-go-caches
+
   quality-gate:
     executor: native-amd64
     steps:
@@ -377,6 +405,8 @@ workflows:
           filters: "pipeline.git.branch or pipeline.git.tag"
       - container-restore:
           filters: "pipeline.git.branch or pipeline.git.tag"
+      - container-restore-api:
+          filters: "pipeline.git.branch or pipeline.git.tag"
       - quality-gate:
           requires:
             - quality-fast
@@ -387,4 +417,5 @@ workflows:
             - container-web
             - container-dispatch
             - container-restore
+            - container-restore-api
           filters: "pipeline.git.branch or pipeline.git.tag"
