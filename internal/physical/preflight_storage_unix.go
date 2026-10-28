@@ -27,5 +27,5 @@ func inspectVolumeSpace(path string) (volumeSpace, error) {
 	if blocks <= math.MaxUint64/blockSize {
 		available = blocks * blockSize
 	}
-	return volumeSpace{Available: available, Device: uint64(stat.Dev)}, nil
+	return volumeSpace{Available: available, Device: uint64(stat.Dev), Block: blockSize}, nil
 }

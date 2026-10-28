@@ -168,14 +168,14 @@ func TestCapacityAdmissionBoundaries(t *testing.T) {
 		minWork, minBackup uint64
 		code               string
 	}{
-		{"separate_equal", volumeSpace{10, 1}, volumeSpace{20, 2}, 10, 20, ""},
-		{"work_short", volumeSpace{9, 1}, volumeSpace{20, 2}, 10, 20, "space_insufficient"},
-		{"backup_short", volumeSpace{10, 1}, volumeSpace{19, 2}, 10, 20, "space_insufficient"},
-		{"shared_equal", volumeSpace{30, 1}, volumeSpace{30, 1}, 10, 20, ""},
-		{"shared_double_count", volumeSpace{20, 1}, volumeSpace{20, 1}, 10, 20, "space_insufficient"},
-		{"shared_changed_space", volumeSpace{30, 1}, volumeSpace{29, 1}, 10, 20, "space_insufficient"},
-		{"overflow", volumeSpace{math.MaxUint64, 1}, volumeSpace{math.MaxUint64, 1}, math.MaxUint64, 1, "space_insufficient"},
-		{"zero_policy", volumeSpace{10, 1}, volumeSpace{10, 2}, 0, 1, "capacity_policy_required"},
+		{"separate_equal", volumeSpace{Available: 10, Device: 1}, volumeSpace{Available: 20, Device: 2}, 10, 20, ""},
+		{"work_short", volumeSpace{Available: 9, Device: 1}, volumeSpace{Available: 20, Device: 2}, 10, 20, "space_insufficient"},
+		{"backup_short", volumeSpace{Available: 10, Device: 1}, volumeSpace{Available: 19, Device: 2}, 10, 20, "space_insufficient"},
+		{"shared_equal", volumeSpace{Available: 30, Device: 1}, volumeSpace{Available: 30, Device: 1}, 10, 20, ""},
+		{"shared_double_count", volumeSpace{Available: 20, Device: 1}, volumeSpace{Available: 20, Device: 1}, 10, 20, "space_insufficient"},
+		{"shared_changed_space", volumeSpace{Available: 30, Device: 1}, volumeSpace{Available: 29, Device: 1}, 10, 20, "space_insufficient"},
+		{"overflow", volumeSpace{Available: math.MaxUint64, Device: 1}, volumeSpace{Available: math.MaxUint64, Device: 1}, math.MaxUint64, 1, "space_insufficient"},
+		{"zero_policy", volumeSpace{Available: 10, Device: 1}, volumeSpace{Available: 10, Device: 2}, 0, 1, "capacity_policy_required"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := admitVolumeSpace(test.work, test.backup, test.minWork, test.minBackup)

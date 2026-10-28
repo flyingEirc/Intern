@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/flyingEirc/Intern/internal/physical"
 )
 
 func requireExecCode(t *testing.T, err error, code string) *ExecError {
@@ -157,5 +159,34 @@ func TestToolFailureCode(t *testing.T) {
 	cancel()
 	if got := (&execution{}).failureCode(canceled, "", staged); got != CodeCanceled {
 		t.Fatalf("canceled failure code = %q, want %s", got, CodeCanceled)
+	}
+}
+
+// TestSpaceExhaustedUsesTheReportedBlockSize requires the exhaustion threshold to
+// be the block size the filesystem reports, never a fixed page size: a filesystem
+// with 64 KiB blocks and 63 KiB free cannot take another write, while a 4 KiB one
+// with 63 KiB free is not exhausted. An observation that reports no block size
+// only counts a measured zero, so the threshold is never invented.
+func TestSpaceExhaustedUsesTheReportedBlockSize(t *testing.T) {
+	cases := []struct {
+		name  string
+		space physical.Space
+		want  bool
+	}{
+		{"page blocks, empty", physical.Space{AvailableBytes: 0, BlockBytes: 4096}, true},
+		{"page blocks, below one block", physical.Space{AvailableBytes: 4095, BlockBytes: 4096}, true},
+		{"page blocks, exactly one block", physical.Space{AvailableBytes: 4096, BlockBytes: 4096}, false},
+		{"large blocks, below one block", physical.Space{AvailableBytes: 63 << 10, BlockBytes: 64 << 10}, true},
+		{"large blocks, exactly one block", physical.Space{AvailableBytes: 64 << 10, BlockBytes: 64 << 10}, false},
+		{"large blocks, plenty", physical.Space{AvailableBytes: 4 << 20, BlockBytes: 128 << 10}, false},
+		{"unreported block size, empty", physical.Space{AvailableBytes: 0, BlockBytes: 0}, true},
+		{"unreported block size, bytes left", physical.Space{AvailableBytes: 1, BlockBytes: 0}, false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := spaceExhausted(test.space); got != test.want {
+				t.Fatalf("exhausted = %v, want %v for %+v", got, test.want, test.space)
+			}
+		})
 	}
 }

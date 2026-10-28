@@ -175,10 +175,6 @@ func (e *execution) failureCode(ctx context.Context, code string, err error) str
 	return CodeWorkFailed
 }
 
-// workExhaustedPageBytes is one filesystem page: every write costs at least a
-// whole page, so a work root with less than that left cannot take another byte.
-const workExhaustedPageBytes = int64(1 << 12)
-
 // toolFailure classifies a failed extract or prepare step. A tool writes the
 // bytes itself, so a work filesystem that filled up under it surfaces only as a
 // nonzero exit and the parent never sees the errno: the observation of the same
@@ -198,13 +194,21 @@ func toolFailureCode(err error, exhausted bool, code string) string {
 	return code
 }
 
-// workRootExhausted reports whether the filesystem holding this restore's work
-// directory can no longer take a block for the current user. statfs counts only
-// the blocks an unprivileged write may use, and a filesystem charges a write in
-// whole pages, so anything below one page means the tool's next write is ENOSPC.
+// workRootExhausted reports whether this restore's work filesystem can no longer
+// take a write.
 func (e *execution) workRootExhausted() bool {
-	available, err := physical.AvailableBytes(e.work)
-	return err == nil && available < workExhaustedPageBytes
+	space, err := physical.QuerySpace(e.work)
+	return err == nil && spaceExhausted(space)
+}
+
+// spaceExhausted reports whether one capacity observation leaves no room for a
+// write. A filesystem charges every write in whole blocks of the size it reports
+// itself, so less than one of those blocks free is already ENOSPC for the tool,
+// whether that block is 512 bytes or 128 KiB. The threshold is therefore the
+// filesystem's own number and never a guessed page size; an observation that
+// reports no block size falls back to "nothing at all left", which is still true.
+func spaceExhausted(space physical.Space) bool {
+	return space.AvailableBytes < max(space.BlockBytes, 1)
 }
 
 func (e *execution) abort(ctx context.Context, code string, cause error) (Result, error) {
