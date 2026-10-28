@@ -287,10 +287,11 @@ jobs:
     steps:
       - checkout
       - install-go
-      # .cache/downloaded/container-<profile>/ maps onto the layout that
-      # actions/download-artifact produced for the quality-gate aggregate.
+      # persist_to_workspace uses root .cache/downloaded, so the workspace holds
+      # container-<profile>/ at its top level. Attaching at .cache/downloaded
+      # restores the actions/download-artifact layout the aggregate reads.
       - attach_workspace:
-          at: .
+          at: .cache/downloaded
       # requires blocks this job on any upstream failure, and no job is
       # optional, so the recorded outcomes are exactly success.
       - run:
