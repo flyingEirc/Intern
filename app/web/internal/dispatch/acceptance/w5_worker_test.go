@@ -1942,6 +1942,12 @@ func (f *fixture) w5UnconfiguredChildRefusal(t *testing.T, victim string, publis
 	before := f.w5Get(t, victim)
 	xbstream, mysqld := f.settings.XbstreamPath, f.settings.MysqldPath
 	f.layout.export, f.settings.XbstreamPath, f.settings.MysqldPath = "", "", ""
+	// Every input cleared for the unconfigured restart is put back on every exit
+	// path, so a case added after this one cannot inherit a deployment with no
+	// export root.
+	defer func() {
+		f.layout.export, f.settings.XbstreamPath, f.settings.MysqldPath = root, xbstream, mysqld
+	}()
 	f.startServeChild(t)
 	f.w5PlanRefusal(t, *w5.inc2.BackupID, http.StatusServiceUnavailable, render.Unavailable)
 	refused := f.admin.requestWithKey(t, http.MethodPost, "/api/v1/restores",
@@ -1959,7 +1965,6 @@ func (f *fixture) w5UnconfiguredChildRefusal(t *testing.T, victim string, publis
 	if items := f.w5List(t, "limit=200"); len(items) == 0 {
 		t.Fatal("an unconfigured deployment stopped serving restore reads")
 	}
-	f.settings.XbstreamPath, f.settings.MysqldPath = xbstream, mysqld
 	if entries := f.w5ExportListing(t, root); !w5EqualLists(entries, published) {
 		t.Fatalf("the unconfigured child changed the export root: before=%s after=%s", published, entries)
 	}
