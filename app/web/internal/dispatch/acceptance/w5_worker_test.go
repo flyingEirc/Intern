@@ -114,8 +114,12 @@ type w5State struct {
 	planFull         store.RestorePlan
 	plan1, plan2     store.RestorePlan
 	exported         []string
+	// created holds every restore id the scenario created, oldest first, so the
+	// list case can judge "newest first" against real creation order.
+	created []string
 }
 
+// w5 is the one shared chain state of this worker process.
 var w5 = &w5State{}
 
 var (
@@ -428,7 +432,21 @@ func (f *fixture) w5Execute(t *testing.T, body, key string, want int) (string, [
 	if !w5RestoreIDPattern.MatchString(created.RestoreID) {
 		t.Fatalf("restore_id %q is not 32 lowercase hex: %s", created.RestoreID, raw)
 	}
+	w5.recordCreated(created.RestoreID)
 	return created.RestoreID, raw
+}
+
+// recordCreated remembers the order the scenario created restores in, so the
+// list case can judge "newest first" against real creation order instead of
+// against the id sort the query already guarantees. An idempotent replay answers
+// an id that is already recorded, so it is not a new creation.
+func (s *w5State) recordCreated(id string) {
+	for _, existing := range s.created {
+		if existing == id {
+			return
+		}
+	}
+	s.created = append(s.created, id)
 }
 
 // w5ExecuteBody builds one confirmation body. verifySQL may be nil.
@@ -707,10 +725,15 @@ func (f *fixture) w5RequireFTPPlan(t *testing.T, backupID, label string, wantLin
 	point w5Snapshot,
 ) store.RestorePlan {
 	t.Helper()
+	// The plan reports live free space, so the readings that judge it bracket the
+	// request itself: the volumes are shared with other writers and free space
+	// moves between the engine's Statfs and any single later reading.
+	before := f.w5SpaceNow(t)
 	plan, _ := f.w5Plan(t, backupID, http.StatusOK)
+	window := w5SpaceWindow{before: before, after: f.w5SpaceNow(t)}
 	f.w5RequirePlanLinks(t, label, plan, wantLinks, backupID)
 	f.w5RequirePlanIdentity(t, label, plan)
-	f.w5RequirePlanSpace(t, label, plan)
+	f.w5RequirePlanSpace(t, label, plan, window)
 	if point.digest == "" || !w5DigestPattern.MatchString(point.digest) {
 		t.Fatalf("no source snapshot was recorded before planning %s", label)
 	}
@@ -804,10 +827,34 @@ func w5RequirePlanRisks(t *testing.T, label, risks string) {
 	}
 }
 
+// w5SpacePair is one live observation of the two volumes a plan reports on.
+type w5SpacePair struct{ work, export int64 }
+
+// w5SpaceWindow is the pair of observations that brackets one plan request.
+type w5SpaceWindow struct {
+	before, after w5SpacePair
+}
+
+// w5SpaceSlack is the drift one accepts between the engine's Statfs and the
+// test's own reading of the same volume: another writer on the shared CI volume
+// moved free space by 12 KiB between the two readings of a single plan request.
+const w5SpaceSlack = int64(1 << 20)
+
+// w5SpaceNow reads the real free space of both restore volumes.
+func (f *fixture) w5SpaceNow(t *testing.T) w5SpacePair {
+	t.Helper()
+	work, err := physical.AvailableBytes(f.layout.work)
+	must(t, err)
+	export, err := physical.AvailableBytes(f.layout.export)
+	must(t, err)
+	return w5SpacePair{work: work, export: export}
+}
+
 // w5RequirePlanSpace requires the estimate to be the recorded member sizes times
-// this deployment's expansion factor, and the availability to be what Statfs
-// reports for the real export volume.
-func (f *fixture) w5RequirePlanSpace(t *testing.T, label string, plan store.RestorePlan) {
+// this deployment's expansion factor, and both reported free-space figures to be
+// real observations of these volumes: positive, fitting the requirement, and
+// inside the Statfs window the request ran in.
+func (f *fixture) w5RequirePlanSpace(t *testing.T, label string, plan store.RestorePlan, window w5SpaceWindow) {
 	t.Helper()
 	if plan.RequiredWorkBytes <= 0 || plan.RequiredExportBytes <= 0 {
 		t.Fatalf("plan %s estimate = work %d export %d", label, plan.RequiredWorkBytes, plan.RequiredExportBytes)
@@ -816,11 +863,8 @@ func (f *fixture) w5RequirePlanSpace(t *testing.T, label string, plan store.Rest
 		t.Fatalf("plan %s does not fit: required %d/%d available %d/%d", label,
 			plan.RequiredWorkBytes, plan.RequiredExportBytes, plan.AvailableWorkBytes, plan.AvailableExportBytes)
 	}
-	available, err := physical.AvailableBytes(f.layout.export)
-	must(t, err)
-	if available < plan.AvailableExportBytes || available-plan.AvailableExportBytes > available/20 {
-		t.Fatalf("plan %s available_export = %d but Statfs says %d", label, plan.AvailableExportBytes, available)
-	}
+	w5RequirePlanCapacity(t, label, "work", plan.AvailableWorkBytes, window.before.work, window.after.work)
+	w5RequirePlanCapacity(t, label, "export", plan.AvailableExportBytes, window.before.export, window.after.export)
 	total := int64(0)
 	for _, link := range plan.Links {
 		total += link.PayloadSize
@@ -828,6 +872,25 @@ func (f *fixture) w5RequirePlanSpace(t *testing.T, label string, plan store.Rest
 	if plan.RequiredExportBytes != total*int64(f.settings.RestoreExpansionFactor) {
 		t.Fatalf("plan %s required_export = %d, want %d x %d", label,
 			plan.RequiredExportBytes, total, f.settings.RestoreExpansionFactor)
+	}
+}
+
+// w5RequirePlanCapacity requires one reported free-space figure to be an
+// observation of this volume, not a constant: it must be positive and lie within
+// the bracketed readings widened by the drift tolerance (1 MiB, or 1% of the
+// volume where that is larger, which is the tolerance the same estimate is
+// judged by on the engine side). A zero, a negative, a fabricated or a borrowed
+// value is still refused in both directions.
+func w5RequirePlanCapacity(t *testing.T, label, kind string, planned, before, after int64) {
+	t.Helper()
+	low, high := before, after
+	if low > high {
+		low, high = high, low
+	}
+	tolerance := max(w5SpaceSlack, high/100)
+	if planned <= 0 || planned < low-tolerance || planned > high+tolerance {
+		t.Fatalf("plan %s available_%s = %d, outside the live Statfs window %d..%d (tolerance %d)",
+			label, kind, planned, low, high, tolerance)
 	}
 }
 
@@ -1075,8 +1138,12 @@ func (f *fixture) w5RequireRehearsalSchema(t *testing.T, verify w5Verify, point 
 			continue
 		}
 		tables = schema.Tables
-		if schema.Rows < point.records {
-			t.Fatalf("the rehearsal counted %d rows in a schema with %d", schema.Rows, point.records)
+		// The export is an immutable snapshot, so the count is exact: the user
+		// schema holds the records rows plus the lsn_pressure rows the snapshot
+		// recorded at that restore point, nothing more and nothing less.
+		if want := point.records + point.lsnRows; schema.Rows != want {
+			t.Fatalf("the rehearsal counted %d rows, want %d (%d records + %d lsn_pressure)",
+				schema.Rows, want, point.records, point.lsnRows)
 		}
 	}
 	if tables != 2 {
@@ -1509,9 +1576,9 @@ func w5A5State(t *testing.T, f *fixture) {
 	}
 	f.assertNoSecret(t, w5RawJSON(t, logs))
 	completed := f.w5List(t, "status=completed&limit=200")
-	// The documented list order is an observed fact, not a coincidence of random
-	// bytes: the ids are time-ordered, so the page starts with the newest restore.
-	w5RequireNewestFirst(t, f.w5List(t, "limit=200"))
+	// The documented list order is judged against creation order and stored
+	// created_at, not against the id sort the query already guarantees.
+	f.w5RequireNewestFirst(t, f.w5List(t, "limit=200"))
 	t.Logf("W5-A5 state phase_seen=%s sources=ftp completed_restores=%d export_bytes=%d verify_status=%s side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite",
 		strings.Join(phaseSeen, ","), len(completed), w5ExportedBytes(t, completed), canceled.VerifyStatus)
 	w5Sigkill(t, f, publishedBefore)
@@ -1534,17 +1601,59 @@ func w5ExportedBytes(t *testing.T, completed []store.Restore) int64 {
 	return total
 }
 
-// w5RequireNewestFirst requires the restores page to descend by id. The ids are
-// UUIDv7 bytes in lowercase hex, so id order is creation order: a page that does
-// not descend would contradict the "newest first" contract the document states.
-func w5RequireNewestFirst(t *testing.T, items []store.Restore) {
+// w5RequireNewestFirst requires the restores page to be newest first in the two
+// ways the contract claims: the rows the scenario created come back in the exact
+// reverse of the order they were created in, and the stored created_at never
+// becomes newer further down the page. A list that merely descends by id would
+// pass the query's own ORDER BY and prove nothing, so both facts are checked.
+func (f *fixture) w5RequireNewestFirst(t *testing.T, items []store.Restore) {
 	t.Helper()
-	if len(items) < 3 {
-		t.Fatalf("the restores page has %d rows, want several to order", len(items))
+	if len(w5.created) < 3 {
+		t.Fatalf("the scenario created %d restores, want at least 3 to order", len(w5.created))
 	}
+	position := make(map[string]int, len(items))
+	for index, item := range items {
+		position[item.ID] = index
+	}
+	w5RequireCreationOrder(t, position)
+	w5RequireCreatedAtOrder(t, items)
+}
+
+// w5RequireCreationOrder requires every restore the scenario created to be on
+// the page, and each later-created one to be listed strictly before the one
+// created before it. That is the newest-first claim itself: the query's own
+// ORDER BY id DESC could not fail it, so creation order is what is judged.
+func w5RequireCreationOrder(t *testing.T, position map[string]int) {
+	t.Helper()
+	for index, id := range w5.created {
+		at, listed := position[id]
+		if !listed {
+			t.Fatalf("the restore this scenario created (%s) is missing from the page", id)
+		}
+		if index == 0 {
+			continue
+		}
+		if previous := position[w5.created[index-1]]; at >= previous {
+			t.Fatalf("not newest first: %s (created later than %s) is listed at %d, not before %d",
+				id, w5.created[index-1], at, previous)
+		}
+	}
+}
+
+// w5RequireCreatedAtOrder requires the stored created_at to go down the page from
+// newest to oldest, with the id as the tie-break the query documents.
+func w5RequireCreatedAtOrder(t *testing.T, items []store.Restore) {
+	t.Helper()
 	for index := 1; index < len(items); index++ {
-		if items[index-1].ID <= items[index].ID {
-			t.Fatalf("restores are not newest first: %s precedes %s", items[index-1].ID, items[index].ID)
+		first, second := items[index-1], items[index]
+		newer, older := parseStamp(t, first.CreatedAt), parseStamp(t, second.CreatedAt)
+		if older.After(newer) {
+			t.Fatalf("created_at goes backwards in the page: %s (%s) precedes %s (%s)",
+				first.ID, first.CreatedAt, second.ID, second.CreatedAt)
+		}
+		if older.Equal(newer) && first.ID < second.ID {
+			t.Fatalf("restores created in the same instant are not id-descending: %s precedes %s",
+				first.ID, second.ID)
 		}
 	}
 }
