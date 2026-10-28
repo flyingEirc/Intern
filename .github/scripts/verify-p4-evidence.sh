@@ -55,9 +55,9 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
     "P4-A1 ftp_plan_readonly", "P4-A2 rehearsal passed", "P4-A2 export_perms",
     "P4-A3 plan target=inc1", "P4-A3 local_payloads=removed",
     "P4-A5 argv shapes=full-only,full+1,full+2",
-    "P4-A6 enospc filesystem=tmpfs", "P4-A6 cancel during=extracting", "P4-A6 cancel during=preparing",
-    "P4-A6 sigkill inject=prepare",
-    "P4-A7 secrets=clean", "P4-A7 supervisor mysqld_pgid_separate=true", "P4-A7 export_root symlink=refused",
+    "P4-A6 enospc filesystem=tmpfs phase=extracting", "P4-A6 cancel during=extracting", "P4-A6 cancel during=preparing",
+    "P4-A6 sigkill inject=prepare child_pgrp=own",
+    "P4-A7 secrets=clean census=", "P4-A7 supervisor mysqld_pgid_separate=true", "P4-A7 export_root symlink=refused",
     "P4-A2 restore_count=4 exports_started=4 snapshots_match=true",
     "P4-A7 root_refusal mysqld=refused execute=rehearsal_unavailable"
   ] as $markers |
@@ -93,6 +93,19 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("prepare_checkpoints=full-prepared to_lsn=[1-9][0-9]*")) and
   ($output | test("P4-A1 matrix server=8\\.4\\.11 tool=8\\.4\\.0-7 prepare_version=8\\.4\\.0-7 key_id=[0-9a-f]{8}")) and
   ($output | test("P4-A1 space required_work=[1-9][0-9]* required_export=[1-9][0-9]* available_work=[1-9][0-9]* available_export=[1-9][0-9]* matches_statfs=true")) and
+  # A5: the prepare argv is compared exactly, so the evidence must name the
+  # restore-scoped target directory and the position of --apply-log-only.
+  ($output | test("P4-A5 argv shapes=full-only,full\\+1,full\\+2 no_defaults_first=true argv_exact=true apply_log_only=after_prepare target_dir_under=restore-[0-9a-f]{32} checked=3")) and
+  # A6: the disk-full refusal must come out of the extractor, not out of a copy;
+  # both cancels must have interrupted a live supervised tool that then died; and
+  # the SIGKILL tree must have belonged to a child in its own process group.
+  ($output | test("P4-A6 enospc filesystem=tmpfs phase=extracting tool=xbstream filled=[1-9][0-9]* code=disk_full export=none work_gone=true published_untouched=true")) and
+  ($output | test("P4-A6 cancel during=extracting tool=xbstream tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true")) and
+  ($output | test("P4-A6 cancel during=preparing tool=xtrabackup tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true")) and
+  ($output | test("P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop")) and
+  # A7: the census covers passwords, connection strings and KEK material, and
+  # every one of the four audited surfaces has a non-empty scan count.
+  ($output | test("P4-A7 secrets=clean census=[1-9][0-9]* scanned=log=[1-9][0-9]*,progress=[1-9][0-9]*,chain=[1-9][0-9]*,rehearsal=[1-9][0-9]*")) and
   # The case set is closed: a skip anywhere is already refused above.
   ($output | test("P4 candidate source=[0-9a-f]{40} source_dirty=false binary_sha256=[0-9a-f]{64} ")) and
   ($source != "" and ($output | contains("P4 candidate source=" + $source + " source_dirty=false"))) and

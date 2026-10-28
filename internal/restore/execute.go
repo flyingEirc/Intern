@@ -51,7 +51,7 @@ func validateRequest(opts Options, req Request) error {
 	if req.Rehearse && os.Geteuid() == 0 {
 		return execFailure(CodeRehearsalUnavailable, PhaseRehearsing, SideEffects{}, physical.ErrRehearsalRoot)
 	}
-	if err := validateVerifySQL(req.VerifySQL); err != nil {
+	if err := ValidateVerifySQL(req.VerifySQL); err != nil {
 		return execFailure(CodeInvalidVerifySQL, PhaseRehearsing, SideEffects{}, err)
 	}
 	return nil
@@ -173,6 +173,38 @@ func (e *execution) failureCode(ctx context.Context, code string, err error) str
 		return code
 	}
 	return CodeWorkFailed
+}
+
+// workExhaustedPageBytes is one filesystem page: every write costs at least a
+// whole page, so a work root with less than that left cannot take another byte.
+const workExhaustedPageBytes = int64(1 << 12)
+
+// toolFailure classifies a failed extract or prepare step. A tool writes the
+// bytes itself, so a work filesystem that filled up under it surfaces only as a
+// nonzero exit and the parent never sees the errno: the observation of the same
+// filesystem at that moment is what names the cause disk_full, so a run that
+// really ran out of space is never reported as extract_failed or prepare_failed.
+func (e *execution) toolFailure(code string, err error) error {
+	return stage(toolFailureCode(err, e.workRootExhausted(), code), err)
+}
+
+// toolFailureCode returns the fixed code of a failed tool step: disk_full when
+// this process or the tool ran the work filesystem dry, and the caller's own
+// stage code for every other tool failure.
+func toolFailureCode(err error, exhausted bool, code string) string {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || exhausted {
+		return CodeDiskFull
+	}
+	return code
+}
+
+// workRootExhausted reports whether the filesystem holding this restore's work
+// directory can no longer take a block for the current user. statfs counts only
+// the blocks an unprivileged write may use, and a filesystem charges a write in
+// whole pages, so anything below one page means the tool's next write is ENOSPC.
+func (e *execution) workRootExhausted() bool {
+	available, err := physical.AvailableBytes(e.work)
+	return err == nil && available < workExhaustedPageBytes
 }
 
 func (e *execution) abort(ctx context.Context, code string, cause error) (Result, error) {
@@ -453,7 +485,7 @@ func (e *execution) extractAll(ctx context.Context) error {
 		e.phase = PhaseExtracting
 		e.report(PhaseExtracting, map[string]any{"backup_id": link.BackupID, "seq": link.Seq})
 		if err := e.extract(ctx, link, dir); err != nil {
-			return stage(CodeExtractFailed, err)
+			return e.toolFailure(CodeExtractFailed, err)
 		}
 		if err := os.RemoveAll(filepath.Join(e.work, "fetch", strconv.Itoa(link.Seq))); err != nil {
 			return stage(CodeExtractFailed, err)

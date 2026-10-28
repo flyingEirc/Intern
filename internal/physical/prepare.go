@@ -23,15 +23,18 @@ type PrepareOptions struct {
 }
 
 // PrepareArgs returns the exact argv for one prepare step. The first element is
-// always --no-defaults, so callers cannot point the tool at a login path.
+// always --no-defaults, so callers cannot point the tool at a login path. The
+// frozen order is --no-defaults, --prepare, then --apply-log-only for an
+// intermediate step, then the directories and the memory bound.
 func PrepareArgs(opts PrepareOptions) ([]string, error) {
 	if err := validatePrepareOptions(opts); err != nil {
 		return nil, err
 	}
-	args := []string{"--no-defaults", "--prepare", "--target-dir=" + opts.TargetDir}
+	args := []string{"--no-defaults", "--prepare"}
 	if opts.ApplyLogOnly {
 		args = append(args, "--apply-log-only")
 	}
+	args = append(args, "--target-dir="+opts.TargetDir)
 	if opts.IncrementalDir != "" {
 		args = append(args, "--incremental-dir="+opts.IncrementalDir)
 	}

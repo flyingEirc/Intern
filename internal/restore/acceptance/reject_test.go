@@ -50,7 +50,7 @@ func assertFTPPlanReadOnly(t *testing.T, w *worker, opts restore.Options, plan r
 	t.Helper()
 	remoteBefore := w.remoteDigest(t)
 	if _, err := restore.BuildPlan(t.Context(), opts, plan.TargetBackupID); err != nil {
-		t.Fatalf("FTP plan: %v", err)
+		t.Fatalf("FTP plan: %s", withhold(err.Error()))
 	}
 	if remoteBefore != w.remoteDigest(t) {
 		t.Fatal("planning from FTP wrote the replica")
@@ -80,10 +80,12 @@ func restoreFTPResume(t *testing.T, w *worker, opts restore.Options, plan restor
 		return 64 << 10, errInjectedDisconnect
 	}
 	progress := &events{}
+	stop := w.rehearsalWatch(request.RestoreID)
+	defer stop()
 	result, err := restore.ExecuteWithFetchFault(t.Context(), opts, request, progress.report, fault)
 	if err != nil {
-		w.logf("FTP restore failed:\n%s", failureTree(err))
-		t.Fatalf("FTP restore: %v", err)
+		w.logf("FTP restore failed:\n%s", w.tree(err))
+		t.Fatalf("FTP restore: %s", withhold(err.Error()))
 	}
 	resumed := maxOffset(offsets)
 	if !injected || resumed != 64<<10 {
@@ -116,8 +118,8 @@ func restoreFTPPlain(t *testing.T, w *worker, opts restore.Options, plan restore
 	}
 	result, err := w.execute(t, opts, request, &events{})
 	if err != nil {
-		w.logf("FTP restore inc2 failed:\n%s", failureTree(err))
-		t.Fatalf("FTP restore inc2: %v", err)
+		w.logf("FTP restore inc2 failed:\n%s", w.tree(err))
+		t.Fatalf("FTP restore inc2: %s", withhold(err.Error()))
 	}
 	w.assertRestored(t, file, request, result)
 	w.assertRehearsal(t, file, result.Verify)
@@ -293,19 +295,20 @@ func rejectionCases() []rejectCase {
 	}
 }
 
-// assertRejection requires the fixed code of one refusal. When an execution
-// refusal carries the wrong code it first reports the whole withheld cause
-// chain, so a native run names the refusing sub-step instead of only the code.
+// assertRejection requires the fixed code of one refusal and audits the whole raw
+// cause chain behind it, so P4-A7 covers every native refusal, not only the ones
+// that came back with the wrong code.
 func (w *worker) assertRejection(t *testing.T, test rejectCase, err error) {
 	t.Helper()
 	if err == nil {
 		t.Fatalf("%s was accepted", test.name)
 	}
+	chain := w.tree(err)
 	if test.stage == "execute" {
 		var execErr *restore.ExecError
 		if !errors.As(err, &execErr) || execErr.Code != test.code {
-			w.logf("%s execute diagnosis:\n%s", test.name, failureTree(err))
-			t.Fatalf("%s execute code = %v, want %s", test.name, err, test.code)
+			w.logf("%s execute diagnosis:\n%s", test.name, chain)
+			t.Fatalf("%s execute code = %s, want %s", test.name, withhold(errString(err)), test.code)
 		}
 		side := execErr.SideEffects
 		if side.ExportPublished || !side.WorkDirRemoved || !side.PendingExportRemoved {
@@ -315,7 +318,8 @@ func (w *worker) assertRejection(t *testing.T, test rejectCase, err error) {
 	}
 	var refusal *restore.PlanError
 	if !errors.As(err, &refusal) || refusal.Code != test.code {
-		t.Fatalf("%s plan code = %v, want %s", test.name, err, test.code)
+		w.logf("%s plan diagnosis:\n%s", test.name, chain)
+		t.Fatalf("%s plan code = %s, want %s", test.name, withhold(errString(err)), test.code)
 	}
 }
 

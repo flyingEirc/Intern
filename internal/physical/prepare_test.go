@@ -27,7 +27,12 @@ func TestPrepareArgsFixedShape(t *testing.T) {
 		{
 			name: "apply log only",
 			opts: PrepareOptions{Binary: binary, TargetDir: target, ApplyLogOnly: true},
-			want: []string{"--no-defaults", "--prepare", "--target-dir=" + target, "--apply-log-only"},
+			want: []string{"--no-defaults", "--prepare", "--apply-log-only", "--target-dir=" + target},
+		},
+		{
+			name: "intermediate incremental",
+			opts: PrepareOptions{Binary: binary, TargetDir: target, ApplyLogOnly: true, IncrementalDir: incremental, UseMemory: 1 << 20},
+			want: []string{"--no-defaults", "--prepare", "--apply-log-only", "--target-dir=" + target, "--incremental-dir=" + incremental, "--use-memory=1048576"},
 		},
 		{
 			name: "final incremental",

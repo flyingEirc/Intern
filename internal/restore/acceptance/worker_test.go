@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +29,9 @@ import (
 )
 
 // TestP4Worker is the single native P4 entry point. Every case is required: a
-// missing fixture, a skip or an unexpected success fails the run.
+// missing fixture, a skip or an unexpected success fails the run. The cases share
+// one produced chain, so the first failure stops the rest: continuing with state
+// an earlier case never produced only turns one defect into a cascade of panics.
 func TestP4Worker(t *testing.T) {
 	w := newWorker(t)
 	w.produce()
@@ -46,19 +49,29 @@ func TestP4Worker(t *testing.T) {
 		{"a6-sigkill", a6SigKill},
 		{"a7-security", a7Security},
 	}
+	blocked := ""
 	for _, step := range steps {
-		t.Run(step.name, func(t *testing.T) { step.run(t, w) })
+		t.Run(step.name, func(t *testing.T) {
+			if blocked != "" {
+				t.Fatalf("stopped after the first failed step %s: this case reads state that step was meant to produce", blocked)
+			}
+			step.run(t, w)
+		})
+		if blocked == "" && t.Failed() {
+			blocked = step.name
+		}
 	}
 }
 
-// logf emits one evidence line after proving it contains no fixture secret.
+// logf emits one evidence line only after auditing it against the whole fixture
+// census — both passwords, the source and FTP connection strings and the KEK
+// material — and after proving it carries no key path.
 func (w *worker) logf(format string, args ...any) {
 	w.t.Helper()
 	message := fmt.Sprintf(format, args...)
-	for _, key := range []string{"INTERN_P4_PASSWORD", "INTERN_P4_FTP_PASSWORD"} {
-		if secret := os.Getenv(key); secret != "" && strings.Contains(message, secret) {
-			w.t.Fatal("evidence contained a fixture credential")
-		}
+	watch.observe("log", message)
+	if index := secretIndex(message); index >= 0 {
+		w.t.Fatalf("evidence line leaked census entry %d", index)
 	}
 	if root := os.Getenv("INTERN_P4_ROOT"); root != "" && strings.Contains(message, filepath.Join(root, "keys")) {
 		w.t.Fatal("evidence contained the KEK path")
@@ -66,18 +79,19 @@ func (w *worker) logf(format string, args ...any) {
 	w.t.Log(message)
 }
 
-// failureTree renders the whole diagnostic chain of a refused run, one withheld
-// line per cause, so a native run names the refusing sub-step — for an
-// authentication failure: record, member, payload or tool_metadata — instead of
-// only its fixed code. ExecError.Error() deliberately stops at code and phase;
-// the cause is reachable through Unwrap, carries only fixed labels, and every
-// line still passes through withhold before it is logged.
-func failureTree(err error) string {
+// tree renders the whole diagnostic chain of a refused run, one withheld line per
+// cause, so a native run names the refusing sub-step — for an authentication
+// failure: record, member, payload or tool_metadata — instead of only its fixed
+// code. Each cause is audited while it is still raw: ExecError.Error() stops at
+// code and phase, the cause is reachable through Unwrap, and P4-A7 proves no line
+// of any chain carries a credential, a connection string or a KEK byte.
+func (w *worker) tree(err error) string {
 	if err == nil {
 		return "<nil>"
 	}
 	var lines []string
 	appendCauses(err, 0, func(depth int, message string) {
+		watch.observe("chain", message)
 		lines = append(lines, strings.Repeat("  ", depth)+withhold(message))
 	})
 	return strings.Join(lines, "\n")
@@ -101,8 +115,8 @@ func (w *worker) planFor(t *testing.T, opts restore.Options, backupID string) re
 	t.Helper()
 	plan, err := restore.BuildPlan(t.Context(), opts, backupID)
 	if err != nil {
-		w.logf("plan failed: %s", withhold(err.Error()))
-		t.Fatalf("plan %s: %v", backupID, err)
+		w.logf("plan failed:\n%s", w.tree(err))
+		t.Fatalf("plan %s: %s", backupID, withhold(err.Error()))
 	}
 	return plan
 }
@@ -217,7 +231,7 @@ func (w *worker) assertPlanReadOnly(t *testing.T, opts restore.Options, plan res
 	exportBefore := strings.Join(entryNames(t, w.paths.export), ",")
 	ftpBefore := w.remoteDigest(t)
 	if _, err := restore.BuildPlan(t.Context(), opts, plan.TargetBackupID); err != nil {
-		t.Fatalf("second plan: %v", err)
+		t.Fatalf("second plan: %s", withhold(err.Error()))
 	}
 	if dbBefore != fileDigestOf(t, w.paths.db) || repoBefore != treeDigest(t, w.paths.repo) ||
 		exportBefore != strings.Join(entryNames(t, w.paths.export), ",") || ftpBefore != w.remoteDigest(t) {
@@ -261,6 +275,9 @@ type events struct {
 }
 
 func (e *events) report(phase restore.Phase, data map[string]any) {
+	// Every progress payload is audited raw before anything consumes it: the
+	// engine promises no secrets in here, and P4-A7 is the proof of that promise.
+	watch.observe("progress", renderProgress(phase, data))
 	e.mu.Lock()
 	e.phases = append(e.phases, phase)
 	callback := e.onPhase
@@ -279,9 +296,11 @@ func (e *events) report(phase restore.Phase, data map[string]any) {
 	}
 }
 
-// killProcessTree SIGKILLs the whole observed tree: the worker process group,
-// every descendant group (the supervised tool) and the descendant processes
-// themselves. It is the SIGKILL case the restore recovery must survive.
+// killProcessTree SIGKILLs the whole observed tree of the kill child: its own
+// process group, every descendant group (the supervisor and the tool it started)
+// and the descendant processes themselves. The worker's own group is never
+// signalled: this binary is the caller, and killing its group kills every case
+// that has not run yet, which is exactly how the previous candidate died.
 func killProcessTree(pid int) error {
 	pids := descendantPIDs(pid)
 	var result error
@@ -294,14 +313,18 @@ func killProcessTree(pid int) error {
 	return result
 }
 
+// processGroups collects every process group the observed tree uses, except the
+// caller's own. The kill child runs in a group of its own, so a tree kill cannot
+// reach the worker; any group equal to the worker's group is refused here too.
 func processGroups(pids []int, root int) map[int]bool {
 	groups := map[int]bool{}
+	own := syscall.Getpgrp()
 	for _, candidate := range pids {
-		if group, err := syscall.Getpgid(candidate); err == nil && group > 0 {
+		if group, err := syscall.Getpgid(candidate); err == nil && group > 0 && group != own {
 			groups[group] = true
 		}
 	}
-	if group, err := syscall.Getpgid(root); err == nil {
+	if group, err := syscall.Getpgid(root); err == nil && group != own {
 		groups[group] = true
 	}
 	return groups
@@ -400,6 +423,13 @@ func (w *worker) execute(t *testing.T, opts restore.Options, request restore.Req
 	if progress == nil {
 		progress = &events{}
 	}
+	if request.Rehearse {
+		// The rehearsal server's log lives inside the private work directory and is
+		// deleted with it the moment the restore succeeds, so this is the only chance
+		// P4-A7 gets to audit mysqld.err against the census.
+		stop := w.rehearsalWatch(request.RestoreID)
+		defer stop()
+	}
 	return restore.Execute(t.Context(), opts, request, progress.report)
 }
 
@@ -420,10 +450,13 @@ func a2Local(t *testing.T, w *worker) {
 				"SELECT MAX(id) FROM fixture.records",
 			},
 		}
+		if err := restore.ValidateVerifySQL(request.VerifySQL); err != nil {
+			t.Fatalf("the fixture verify statements are refused by the engine contract: %s", withhold(err.Error()))
+		}
 		result, err := w.execute(t, opts, request, progress)
 		if err != nil {
-			w.logf("restore %s failed:\n%s", name, failureTree(err))
-			t.Fatalf("restore %s: %v", name, err)
+			w.logf("restore %s failed:\n%s", name, w.tree(err))
+			t.Fatalf("restore %s: %s", name, withhold(err.Error()))
 		}
 		w.assertRestored(t, file, request, result)
 		w.assertRehearsal(t, file, result.Verify)
@@ -561,116 +594,155 @@ func a5Argv(t *testing.T, w *worker) {
 	w.facts.prepareArgs[request.RestoreID] = result.PrepareArgs
 	w.facts.sources[request.RestoreID] = sourcesOf(plan)
 	w.assertRestored(t, w.rejectBackup, request, result)
-	if recorded := assertRecordedShapes(t, w); recorded != 3 {
+	recorded, oneLink := assertRecordedShapes(t, w)
+	if recorded != 3 {
 		t.Fatalf("recorded argv shapes = %d, want 3", recorded)
 	}
-	w.logf("P4-A5 argv shapes=full-only,full+1,full+2 no_defaults_first=true matches=true")
+	if oneLink == "" {
+		t.Fatal("no single-step prepare was recorded")
+	}
+	w.logf("P4-A5 argv shapes=full-only,full+1,full+2 no_defaults_first=true argv_exact=true apply_log_only=after_prepare target_dir_under=restore-%s checked=%d",
+		oneLink, recorded)
 }
 
-func assertRecordedShapes(t *testing.T, w *worker) int {
+// assertRecordedShapes compares every recorded prepare sequence with the exact
+// argv the contract fixes for that restore: every step targets
+// <WorkRoot>/restore-<id>/0, --apply-log-only sits immediately after --prepare
+// on every non-final step, and each incremental names its own extracted
+// directory. Full equality, so a reordered, repeated or extra argument fails
+// instead of slipping past a substring search. It returns the number of restored
+// chains checked and the restore id of the single-step one.
+func assertRecordedShapes(t *testing.T, w *worker) (int, string) {
 	t.Helper()
-	checked := 0
-	for _, args := range w.facts.prepareArgs {
-		if len(args) == 0 || args[0][0] != "--no-defaults" {
-			t.Fatal("a recorded prepare argv does not start with --no-defaults")
+	checked, single := 0, ""
+	for id, steps := range w.facts.prepareArgs {
+		if len(steps) == 0 || steps[0][0] != "--no-defaults" {
+			t.Fatalf("restore %s prepare argv does not start with --no-defaults: %q", id, steps)
 		}
-		if !assertPrepareShape(t, w, args) {
-			t.Fatalf("unexpected prepare step count %d", len(args))
+		want := wantPrepareArgv(w.paths.work, id, len(steps))
+		if !reflect.DeepEqual(steps, want) {
+			t.Fatalf("restore %s prepare argv = %q, want exactly %q", id, steps, want)
+		}
+		if len(steps) == 1 {
+			single = id
 		}
 		checked++
 	}
-	return checked
+	return checked, single
 }
 
-func assertPrepareShape(t *testing.T, w *worker, args [][]string) bool {
-	t.Helper()
-	switch len(args) {
-	case 1:
-		return assertOneLinkShape(t, w, args[0])
-	case 2:
-		return assertTwoLinkShape(t, w, args)
-	case 3:
-		return assertThreeLinkShape(t, w, args)
-	default:
-		return false
+// wantPrepareArgv is the frozen prepare sequence of plan §1.4 for one restore.
+// UseMemory is zero in this fixture, so --use-memory never appears.
+func wantPrepareArgv(workRoot, id string, steps int) [][]string {
+	target := filepath.Join(workRoot, "restore-"+id, "0")
+	argv := make([][]string, 0, steps)
+	for index := range steps {
+		args := []string{"--no-defaults", "--prepare"}
+		if index < steps-1 {
+			args = append(args, "--apply-log-only")
+		}
+		args = append(args, "--target-dir="+target)
+		if index > 0 {
+			args = append(args, "--incremental-dir="+filepath.Join(workRoot, "restore-"+id, strconv.Itoa(index)))
+		}
+		argv = append(argv, args)
 	}
+	return argv
 }
 
-func assertOneLinkShape(t *testing.T, w *worker, args []string) bool {
-	t.Helper()
-	want := "--no-defaults --prepare --target-dir=" + filepath.Join(w.paths.work, "0")
-	if strings.Join(args, " ") != want {
-		t.Fatalf("one-link argv = %q, want %q", args, want)
-	}
-	return true
-}
-
-func assertTwoLinkShape(t *testing.T, w *worker, args [][]string) bool {
-	t.Helper()
-	first, final := strings.Join(args[0], " "), strings.Join(args[1], " ")
-	if !strings.Contains(first, "--apply-log-only") || strings.Contains(first, "--incremental-dir") {
-		t.Fatalf("two-link first argv = %q", args[0])
-	}
-	if strings.Contains(final, "--apply-log-only") || !strings.Contains(final, "--incremental-dir="+filepath.Join(w.paths.work, "1")) {
-		t.Fatalf("two-link final argv = %q", args[1])
-	}
-	return true
-}
-
-func assertThreeLinkShape(t *testing.T, w *worker, args [][]string) bool {
-	t.Helper()
-	first, middle, final := strings.Join(args[0], " "), strings.Join(args[1], " "), strings.Join(args[2], " ")
-	if !strings.Contains(first, "--apply-log-only") || !strings.Contains(middle, "--apply-log-only") || strings.Contains(final, "--apply-log-only") {
-		t.Fatalf("three-link argv = %q", args)
-	}
-	if !strings.Contains(middle, "--incremental-dir="+filepath.Join(w.paths.work, "1")) ||
-		!strings.Contains(final, "--incremental-dir="+filepath.Join(w.paths.work, "2")) {
-		t.Fatalf("three-link incremental argv = %q", args)
-	}
-	return true
-}
-
+// a6ENOSPC fills the tmpfs work root the moment extraction begins, so the tool
+// itself runs out of space while it writes the expanded datadir. Filling at the
+// fetch report would only prove that copying a member fails on a full disk: A6
+// asks for a real ENOSPC during extraction, and the refusal has to name that
+// phase and still leave nothing published or behind.
 func a6ENOSPC(t *testing.T, w *worker) {
 	opts := w.options()
 	opts.WorkRoot = w.paths.smallWork
 	opts.ExpansionFactor = 1
 	plan := w.planFor(t, opts, w.manifest.backup(t, 1).BackupID)
 	before := strings.Join(entryNames(t, w.paths.export), ",")
-	space, err := physical.QuerySpace(w.paths.smallWork)
-	must(t, err)
 	filler := filepath.Join(w.paths.smallWork, "fill")
-	progress := &events{onPhase: func(phase restore.Phase, _ map[string]any) {
-		if phase != restore.PhaseFetching {
-			return
-		}
-		if _, statErr := os.Lstat(filler); statErr == nil {
-			return
-		}
-		leave := plan.Links[0].PayloadSize / 2
-		body := make([]byte, max(int(space.AvailableBytes-leave), 0))
-		must(t, os.WriteFile(filler, body, 0o600))
-	}}
-	_, err = w.execute(t, opts, restore.Request{RestoreID: randomRestoreID(t), Plan: plan}, progress)
+	filled := int64(-1)
+	progress := &events{onPhase: fillOnExtract(t, w.paths.smallWork, filler, &filled)}
+	_, err := w.execute(t, opts, restore.Request{RestoreID: randomRestoreID(t), Plan: plan}, progress)
 	_ = os.Remove(filler)
+	execErr := requireExtractorDiskFull(t, w, progress, err, filled)
+	if before != strings.Join(entryNames(t, w.paths.export), ",") {
+		t.Fatal("ENOSPC changed the export root")
+	}
+	for _, entry := range entryNames(t, w.paths.smallWork) {
+		if strings.HasPrefix(entry, "restore-") {
+			t.Fatal("ENOSPC left a work directory")
+		}
+	}
+	w.logf("P4-A6 enospc filesystem=tmpfs phase=%s tool=xbstream filled=%d code=disk_full export=none work_gone=true published_untouched=true",
+		execErr.Phase, filled)
+}
+
+// fillOnExtract is the progress hook that fills the work root exactly once, the
+// moment the extractor starts. The payload has already been fetched and
+// authenticated at that point, so the writer that runs dry is xbstream itself:
+// it starts on a filesystem with nothing left to write into. The fill is verified
+// because the tool reports its own failure as a plain exit status, and the case
+// only proves a real ENOSPC if the filesystem really was full.
+func fillOnExtract(t *testing.T, workRoot, filler string, filled *int64) func(restore.Phase, map[string]any) {
+	t.Helper()
+	return func(phase restore.Phase, _ map[string]any) {
+		if phase != restore.PhaseExtracting {
+			return
+		}
+		if _, err := os.Lstat(filler); err == nil {
+			return
+		}
+		space, err := physical.QuerySpace(workRoot)
+		must(t, err)
+		if space.AvailableBytes <= 0 {
+			t.Fatalf("the work root was already full before the extractor started: %d bytes free", space.AvailableBytes)
+		}
+		body := make([]byte, space.AvailableBytes)
+		must(t, os.WriteFile(filler, body, 0o600))
+		left, err := physical.QuerySpace(workRoot)
+		must(t, err)
+		if left.AvailableBytes > 0 {
+			t.Fatalf("the work root still has %d bytes free after writing %d bytes of filler", left.AvailableBytes, space.AvailableBytes)
+		}
+		*filled = space.AvailableBytes
+	}
+}
+
+// requireExtractorDiskFull is the A6 verdict: the tool ran out of real space while
+// unpacking, the refusal names that phase, and the run published nothing and left
+// no work directory behind.
+func requireExtractorDiskFull(t *testing.T, w *worker, progress *events, err error, filled int64) *restore.ExecError {
+	t.Helper()
 	var execErr *restore.ExecError
 	if !errors.As(err, &execErr) || execErr.Code != restore.CodeDiskFull {
-		w.logf("enospc error:\n%s", failureTree(err))
-		t.Fatalf("ENOSPC error = %v, want disk_full", err)
+		w.logf("enospc error:\n%s", w.tree(err))
+		w.logf("enospc filled=%d phases=%s", filled, strings.Join(phaseNames(progress.history()), ","))
+		t.Fatalf("ENOSPC error = %s, want disk_full", withhold(errString(err)))
+	}
+	if filled <= 0 {
+		t.Fatalf("ENOSPC filled %d bytes of the work root: the extractor never had a full disk to write into", filled)
+	}
+	if execErr.Phase != string(restore.PhaseExtracting) {
+		t.Fatalf("ENOSPC refused during %s, want extracting", execErr.Phase)
+	}
+	if !sawPhase(progress.history(), restore.PhaseAuthenticating) {
+		t.Fatal("ENOSPC fired before the payload had been fetched and authenticated")
 	}
 	if execErr.SideEffects.ExportPublished || !execErr.SideEffects.WorkDirRemoved {
 		t.Fatalf("ENOSPC side effects = %+v", execErr.SideEffects)
 	}
-	if before != strings.Join(entryNames(t, w.paths.export), ",") {
-		t.Fatal("ENOSPC changed the export root")
+	return execErr
+}
+
+// phaseNames renders one run's reported phase history for evidence.
+func phaseNames(phases []restore.Phase) []string {
+	names := make([]string, 0, len(phases))
+	for _, phase := range phases {
+		names = append(names, string(phase))
 	}
-	entries, err := os.ReadDir(w.paths.smallWork)
-	must(t, err)
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "restore-") {
-			t.Fatal("ENOSPC left a work directory")
-		}
-	}
-	w.logf("P4-A6 enospc filesystem=tmpfs code=disk_full export=none work_gone=true published_untouched=true")
+	return names
 }
 
 func errString(err error) string {
@@ -680,24 +752,31 @@ func errString(err error) string {
 	return err.Error()
 }
 
+// a6Cancel cancels while the supervised tool is actually running: the case waits
+// for a live xbstream or xtrabackup process before it cancels, then requires the
+// tool to be gone and this restore to have left nothing behind. Cancelling inside
+// the phase report would cancel before the tool was ever started, which proves
+// nothing about terminating a live supervised tool.
 func a6Cancel(t *testing.T, w *worker) {
 	opts := w.options()
 	plan := w.planFor(t, opts, w.manifest.backup(t, 1).BackupID)
 	before := strings.Join(entryNames(t, w.paths.export), ",")
-	for _, phase := range []restore.Phase{restore.PhaseExtracting, restore.PhasePreparing} {
+	for _, step := range []struct {
+		phase restore.Phase
+		tool  string
+	}{
+		{restore.PhaseExtracting, "xbstream"},
+		{restore.PhasePreparing, "xtrabackup"},
+	} {
 		id := randomRestoreID(t)
-		ctx, cancel := context.WithCancel(t.Context())
-		progress := &events{onPhase: func(current restore.Phase, _ map[string]any) {
-			if current == phase {
-				cancel()
-			}
-		}}
-		_, err := restore.Execute(ctx, opts, restore.Request{RestoreID: id, Plan: plan}, progress.report)
-		cancel()
+		err := cancelAgainstLiveTool(t, opts, plan, id, step.phase, step.tool)
 		var execErr *restore.ExecError
 		if !errors.As(err, &execErr) || execErr.Code != restore.CodeCanceled {
-			w.logf("cancel during %s error:\n%s", phase, failureTree(err))
-			t.Fatalf("cancel during %s error = %v, want canceled", phase, err)
+			w.logf("cancel during %s error:\n%s", step.phase, w.tree(err))
+			t.Fatalf("cancel during %s error = %s, want canceled", step.phase, withhold(errString(err)))
+		}
+		if execErr.Phase != string(step.phase) {
+			t.Fatalf("cancel during %s reported phase %s", step.phase, execErr.Phase)
 		}
 		if execErr.SideEffects.ExportPublished || !execErr.SideEffects.WorkDirRemoved || !execErr.SideEffects.PendingExportRemoved {
 			t.Fatalf("cancel side effects = %+v", execErr.SideEffects)
@@ -708,8 +787,92 @@ func a6Cancel(t *testing.T, w *worker) {
 		if before != strings.Join(entryNames(t, w.paths.export), ",") {
 			t.Fatal("cancel changed the export root")
 		}
-		w.logf("P4-A6 cancel during=%s code=canceled work_gone=true pending_gone=true export_unchanged=true", phase)
+		// The supervisor tears down its own group when the lifetime pipe closes, so
+		// a canceled run must leave no tool writing into any work tree.
+		waitForNoProcess(t, step.tool, 30*time.Second)
+		w.logf("P4-A6 cancel during=%s tool=%s tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true",
+			step.phase, step.tool)
 	}
+}
+
+const (
+	cancelPhaseTimeout  = 10 * time.Minute
+	liveToolTimeout     = 10 * time.Minute
+	cancelReturnTimeout = 5 * time.Minute
+)
+
+// cancelAgainstLiveTool runs one restore, waits until the tool of the given phase
+// is a live process, cancels and returns the execution error. A run that ends
+// first, or a tool that is never observed, fails the case: then nothing running
+// was ever cancelled.
+func cancelAgainstLiveTool(t *testing.T, opts restore.Options, plan restore.Plan, id string, phase restore.Phase, tool string) error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	entered := make(chan struct{})
+	var once sync.Once
+	progress := &events{onPhase: func(current restore.Phase, _ map[string]any) {
+		if current == phase {
+			once.Do(func() { close(entered) })
+		}
+	}}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := restore.Execute(ctx, opts, restore.Request{RestoreID: id, Plan: plan}, progress.report)
+		finished <- err
+	}()
+	select {
+	case <-entered:
+	case err := <-finished:
+		t.Fatalf("cancel during %s: the run ended (%s) before the phase was reported", phase, withhold(errString(err)))
+	case <-time.After(cancelPhaseTimeout):
+		t.Fatalf("cancel during %s: the run never reached the phase", phase)
+	}
+	if !liveProcess(tool, time.Now().Add(liveToolTimeout), finished) {
+		t.Fatalf("cancel during %s: no live %s process was ever observed", phase, tool)
+	}
+	cancel()
+	select {
+	case err := <-finished:
+		return err
+	case <-time.After(cancelReturnTimeout):
+		t.Fatalf("cancel during %s: the canceled run never returned", phase)
+		return nil
+	}
+}
+
+// liveProcess reports whether a process whose command name starts with name was
+// running before the deadline. It never fails the test itself: only the caller
+// knows which of the two reasons for absence is the defect.
+func liveProcess(name string, deadline time.Time, finished <-chan error) bool {
+	for time.Now().Before(deadline) {
+		if processRunning(name) {
+			return true
+		}
+		select {
+		case <-finished:
+			return false
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// history returns the phases one run reported, in order.
+func (e *events) history() []restore.Phase {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]restore.Phase(nil), e.phases...)
+}
+
+func sawPhase(history []restore.Phase, want restore.Phase) bool {
+	for _, phase := range history {
+		if phase == want {
+			return true
+		}
+	}
+	return false
 }
 
 func a6SigKill(t *testing.T, w *worker) {
@@ -719,12 +882,29 @@ func a6SigKill(t *testing.T, w *worker) {
 	seedForeignRestore(t, w, foreign)
 	before := strings.Join(entryNames(t, w.paths.export), ",")
 	command, output := startKillChild(t, w, id, ready)
+	assertOwnProcessGroup(t, command)
 	waitForFile(t, ready, 60*time.Second)
 	waitForProcess(t, "xtrabackup", 60*time.Second)
 	killChild(t, command, output)
 	waitForNoProcess(t, "xtrabackup", 30*time.Second)
 	assertKillRecovery(t, w, id, foreign, before)
-	w.logf("P4-A6 sigkill inject=prepare process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop")
+	w.logf("P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop")
+}
+
+// assertOwnProcessGroup proves the kill child is isolated from the worker. The
+// tree kill signals every process group the child's tree uses, so a shared group
+// would SIGKILL this test binary instead of only the child and take every case
+// that has not run yet down with it.
+func assertOwnProcessGroup(t *testing.T, command *exec.Cmd) {
+	t.Helper()
+	group, err := processGroup(command.Process.Pid)
+	must(t, err)
+	if group == syscall.Getpgrp() {
+		t.Fatalf("the kill child shares the worker process group %d", group)
+	}
+	if group != command.Process.Pid {
+		t.Fatalf("the kill child runs in group %d, want a group of its own named %d", group, command.Process.Pid)
+	}
 }
 
 // seedForeignRestore creates the two durable targets and a published export of
@@ -741,11 +921,15 @@ func seedForeignRestore(t *testing.T, w *worker, foreign string) {
 	}
 }
 
+// startKillChild runs the doomed restore in a child that owns its process group:
+// the case SIGKILLs a whole process tree, and a child that inherited the worker's
+// group would take the test binary itself down with it.
 func startKillChild(t *testing.T, w *worker, id, ready string) (*exec.Cmd, *lockedBuffer) {
 	t.Helper()
 	executable, err := os.Executable()
 	must(t, err)
 	command := exec.CommandContext(t.Context(), executable, "-test.v", "-test.run=^TestP4KillChildWorker$", "-test.timeout=3m")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Env = append(os.Environ(), "INTERN_P4_KILL_ID="+id, "INTERN_P4_KILL_READY="+ready)
 	output := &lockedBuffer{}
 	command.Stdout, command.Stderr = output, output
@@ -762,7 +946,7 @@ func killChild(t *testing.T, command *exec.Cmd, output *lockedBuffer) {
 	case err := <-finished:
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			t.Fatalf("child exit = %v, want a signal; output: %s", err, output.String())
+			t.Fatalf("child exit = %v, want a signal; output: %s", err, withhold(output.String()))
 		}
 		status, ok := exit.Sys().(syscall.WaitStatus)
 		if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
@@ -814,9 +998,34 @@ func a7Security(t *testing.T, w *worker) {
 	for _, id := range w.exportRestoreIDs(t) {
 		assertExportModes(t, filepath.Join(w.paths.export, id))
 	}
-	w.logf("P4-A7 secrets=clean")
+	auditCensus(t)
+	w.logf("P4-A7 secrets=clean census=%d scanned=log=%d,progress=%d,chain=%d,rehearsal=%d",
+		len(census()), watch.count("log"), watch.count("progress"), watch.count("chain"), watch.count("rehearsal"))
 	w.logf("P4-A7 supervisor mysqld_pgid_separate=true tool_group=supervisor no_leftover_tools=true")
 	w.logf("P4-A7 export_root symlink=refused export_perms=0750/0640 owner=exact")
+}
+
+// auditCensus is the P4-A7 verdict: no fixture secret — either password, the
+// source DSN, the FTP credential pair or any form of the KEK material — appeared
+// in any emitted evidence line, any progress payload, any cause of any refusal
+// chain or any copy of the rehearsal server log. Every one of those surfaces must
+// have been scanned at least once, or a clean verdict would be an empty claim.
+func auditCensus(t *testing.T) {
+	t.Helper()
+	if secrets := census(); len(secrets) < 6 {
+		t.Fatalf("the secret census holds only %d entries: the passwords, both connection strings and the KEK material are not all covered", len(secrets))
+	}
+	for _, label := range censusPathLabels {
+		if watch.count(label) == 0 {
+			t.Fatalf("no %s text was ever audited against the census", label)
+		}
+	}
+	if violations := watch.violations(); len(violations) > 0 {
+		for _, violation := range violations {
+			t.Log(violation)
+		}
+		t.Fatal("a fixture credential, connection string or KEK byte reached worker output")
+	}
 }
 
 func assertSymlinkedExportRefused(t *testing.T, w *worker) error {
@@ -831,24 +1040,30 @@ func assertSymlinkedExportRefused(t *testing.T, w *worker) error {
 	var refusal *restore.PlanError
 	if !errors.As(err, &refusal) || refusal.Code != restore.CodeUnconfigured {
 		w.logf("symlinked export root error: %s", withhold(errString(err)))
-		t.Fatalf("symlinked export root code = %v", err)
+		t.Fatalf("symlinked export root code = %s", withhold(errString(err)))
 	}
 	return err
 }
 
-// assertNoCredentialInRefusal requires a refusal diagnostic to be free of the
-// generated credentials; the worker's own evidence lines are checked at emission.
+// assertNoCredentialInRefusal requires one observed refusal, and every cause
+// behind it, to be free of the entire census. The engine keeps tool diagnostics
+// out of its errors; this proves the promise against the real native refusal text.
 func assertNoCredentialInRefusal(t *testing.T, refusal error) {
 	t.Helper()
-	message := errString(refusal)
-	for _, key := range []string{"INTERN_P4_PASSWORD", "INTERN_P4_FTP_PASSWORD"} {
-		secret := os.Getenv(key)
-		if secret == "" {
-			t.Fatal("fixture secret missing")
+	if refusal == nil {
+		t.Fatal("no refusal observed")
+	}
+	if secrets := census(); len(secrets) < 6 {
+		t.Fatalf("the secret census holds only %d entries", len(secrets))
+	}
+	leaked := -1
+	appendCauses(refusal, 0, func(_ int, message string) {
+		if index := secretIndex(message); index >= 0 && leaked < 0 {
+			leaked = index
 		}
-		if strings.Contains(message, secret) {
-			t.Fatal("a refusal leaked a credential")
-		}
+	})
+	if leaked >= 0 {
+		t.Fatalf("a refusal leaked census entry %d", leaked)
 	}
 }
 
@@ -991,6 +1206,10 @@ func waitForNoProcess(t *testing.T, name string, timeout time.Duration) {
 	}
 }
 
+// processRunning reports whether a process whose command name starts with name is
+// live. A SIGKILLed tool that is reparented to an ancestor which never reaps it
+// stays in /proc as a zombie: it holds no descriptor, writes nothing and cannot
+// touch any work tree, so only a non-zombie counts as a surviving tool.
 func processRunning(name string) bool {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -1000,15 +1219,42 @@ func processRunning(name string) bool {
 		if !digitsOnly(entry.Name()) {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "comm"))
+		directory := filepath.Join("/proc", entry.Name())
+		raw, err := os.ReadFile(filepath.Join(directory, "comm"))
 		if err != nil {
 			continue
 		}
-		if strings.TrimSpace(string(raw)) == name || strings.HasPrefix(strings.TrimSpace(string(raw)), name) {
-			return true
+		comm := strings.TrimSpace(string(raw))
+		if comm != name && !strings.HasPrefix(comm, name) {
+			continue
 		}
+		state, known := processState(filepath.Join(directory, "stat"))
+		if !known || state == 'Z' {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+// processState reads the state field of one /proc/<pid>/stat file. The fields
+// after the closing parenthesis are state, ppid, pgrp, and the command name may
+// itself contain spaces or parentheses.
+func processState(path string) (byte, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	body := string(raw)
+	end := strings.LastIndexByte(body, ')')
+	if end < 0 || end+2 >= len(body) {
+		return 0, false
+	}
+	fields := strings.Fields(body[end+2:])
+	if len(fields) == 0 {
+		return 0, false
+	}
+	return fields[0][0], true
 }
 
 func digitsOnly(value string) bool {

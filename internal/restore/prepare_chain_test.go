@@ -30,15 +30,15 @@ func TestPrepareStepsShapes(t *testing.T) {
 		{
 			name: "full plus one incremental", links: 2,
 			want: [][]string{
-				{"--no-defaults", "--prepare", "--target-dir={work}/0", "--apply-log-only"},
+				{"--no-defaults", "--prepare", "--apply-log-only", "--target-dir={work}/0"},
 				{"--no-defaults", "--prepare", "--target-dir={work}/0", "--incremental-dir={work}/1"},
 			},
 		},
 		{
 			name: "full plus two incrementals", links: 3,
 			want: [][]string{
-				{"--no-defaults", "--prepare", "--target-dir={work}/0", "--apply-log-only"},
-				{"--no-defaults", "--prepare", "--target-dir={work}/0", "--apply-log-only", "--incremental-dir={work}/1"},
+				{"--no-defaults", "--prepare", "--apply-log-only", "--target-dir={work}/0"},
+				{"--no-defaults", "--prepare", "--apply-log-only", "--target-dir={work}/0", "--incremental-dir={work}/1"},
 				{"--no-defaults", "--prepare", "--target-dir={work}/0", "--incremental-dir={work}/2"},
 			},
 		},

@@ -40,9 +40,23 @@ var p4ResultMarkers = []string{
 	"P4-A1 ftp_plan_readonly", "P4-A2 rehearsal passed", "P4-A2 export_perms",
 	"P4-A3 plan target=inc1", "P4-A3 local_payloads=removed",
 	"P4-A5 argv shapes=full-only,full+1,full+2",
-	"P4-A6 enospc filesystem=tmpfs", "P4-A6 cancel during=extracting", "P4-A6 cancel during=preparing",
-	"P4-A6 sigkill inject=prepare",
-	"P4-A7 secrets=clean", "P4-A7 supervisor mysqld_pgid_separate=true", "P4-A7 export_root symlink=refused",
+	"P4-A6 enospc filesystem=tmpfs phase=extracting", "P4-A6 cancel during=extracting", "P4-A6 cancel during=preparing",
+	"P4-A6 sigkill inject=prepare child_pgrp=own",
+	"P4-A7 secrets=clean census=", "P4-A7 supervisor mysqld_pgid_separate=true", "P4-A7 export_root symlink=refused",
+}
+
+// p4Facts are the observed values behind the argv, interrupt and security
+// markers. The harness requires exactly the shapes the CI gate requires, so a
+// weakened worker line fails in the harness first and never reaches the gate:
+// ENOSPC must be the extractor's, a cancel must have hit a live tool, the prepare
+// argv must be exact and restore-scoped, and the secret census must be non-empty.
+var p4Facts = []string{
+	`P4-A5 argv shapes=full-only,full\+1,full\+2 no_defaults_first=true argv_exact=true apply_log_only=after_prepare target_dir_under=restore-[0-9a-f]{32} checked=3`,
+	`P4-A6 enospc filesystem=tmpfs phase=extracting tool=xbstream filled=[1-9][0-9]* code=disk_full export=none work_gone=true published_untouched=true`,
+	`P4-A6 cancel during=extracting tool=xbstream tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true`,
+	`P4-A6 cancel during=preparing tool=xtrabackup tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true`,
+	`P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop`,
+	`P4-A7 secrets=clean census=[1-9][0-9]* scanned=log=[1-9][0-9]*,progress=[1-9][0-9]*,chain=[1-9][0-9]*,rehearsal=[1-9][0-9]*`,
 }
 
 // p4Rejections are the locked P4-A4 cases. Every one must appear with its fixed
@@ -219,7 +233,11 @@ func startP4Worker(t *testing.T, ctx context.Context, root string, nw *tc.Docker
 		Networks: []string{nw.Name}, Mounts: mounts, Env: env,
 		Files: []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/restore-worker.test", FileMode: 0o755}},
 		Tmpfs: map[string]string{
-			"/small-work":   fmt.Sprintf("rw,size=16777216,mode=0700,uid=%d,gid=%d", uid, gid),
+			// 256 MiB: big enough that a real chain authenticates (its expansion
+			// guard is the measured free space), so the a6-enospc case can fill what
+			// is left and make the extractor itself run out of space. The export root
+			// stays tiny: that is what the insufficient_space refusal observes.
+			"/small-work":   fmt.Sprintf("rw,size=268435456,mode=0700,uid=%d,gid=%d", uid, gid),
 			"/small-export": fmt.Sprintf("rw,size=1048576,mode=0700,uid=%d,gid=%d", uid, gid),
 		},
 		ConfigModifier: func(config *container.Config) { config.User = fmt.Sprintf("%d:%d", uid, gid) },
@@ -314,6 +332,7 @@ func verifyP4Evidence(t *testing.T, text string) {
 	}
 	requireP4CasePasses(t, text)
 	requireP4Markers(t, text)
+	requireP4Facts(t, text)
 	requireP4Rejections(t, text)
 	if strings.Count(text, "P4-A2 restore=") != 2 || strings.Count(text, "P4-A3 restore=") != 2 {
 		t.Fatal("missing local or FTP restore evidence")
@@ -340,6 +359,17 @@ func requireP4Markers(t *testing.T, text string) {
 	for _, marker := range p4ResultMarkers {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("missing P4 evidence marker %q", marker)
+		}
+	}
+}
+
+// requireP4Facts checks the observed values behind the interrupt, argv and
+// security markers, in the same shapes the CI gate requires.
+func requireP4Facts(t *testing.T, text string) {
+	t.Helper()
+	for _, pattern := range p4Facts {
+		if !regexp.MustCompile(pattern).MatchString(text) {
+			t.Fatalf("missing or malformed P4 evidence fact %s", pattern)
 		}
 	}
 }

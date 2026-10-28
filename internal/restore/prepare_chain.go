@@ -74,7 +74,7 @@ func (e *execution) prepareChain(ctx context.Context) error {
 		e.phase = PhasePreparing
 		e.report(PhasePreparing, map[string]any{"step": index, "steps": len(steps), "argv": step.args})
 		if err = physical.Prepare(ctx, step.opts); err != nil {
-			return stage(CodePrepareFailed, err)
+			return e.toolFailure(CodePrepareFailed, err)
 		}
 		e.prepareArgs = append(e.prepareArgs, step.args)
 	}

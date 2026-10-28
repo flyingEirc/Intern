@@ -19,8 +19,16 @@ const (
 	rehearsalReadyTimeout    = 120 * time.Second
 	rehearsalShutdownTimeout = 60 * time.Second
 	rehearsalRowLimit        = 1000
-	maxVerifySQLBytes        = 4096
-	maxVerifySQLStatements   = 16
+)
+
+// The verify_sql limits belong to the engine: the API layer admits or refuses a
+// request with exactly these bounds, so a request that is accepted is always
+// admissible here. W5 reads both constants for its OpenAPI document.
+const (
+	// MaxVerifySQLStatements is the largest number of statements one restore may request.
+	MaxVerifySQLStatements = 16
+	// MaxVerifySQLBytes is the longest single statement the rehearsal will run.
+	MaxVerifySQLBytes = 4096
 )
 
 const userSchemasQuery = `SELECT schema_name FROM information_schema.schemata
@@ -31,11 +39,13 @@ const innodbTablesQuery = `SELECT table_schema, table_name FROM information_sche
 WHERE engine = 'InnoDB' AND table_schema NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
 ORDER BY table_schema, table_name`
 
-// validateVerifySQL admits only one bounded SELECT statement per entry. The
-// driver also refuses multi-statements, so the server never sees two.
-func validateVerifySQL(queries []string) error {
-	if len(queries) > maxVerifySQLStatements {
-		return errors.New("restore: too many verify statements")
+// ValidateVerifySQL admits only one bounded SELECT statement per entry. It is
+// the single authority for verify_sql: Execute refuses a request that fails it,
+// and the API layer refuses the same statements before a row is ever written.
+// The driver also refuses multi-statements, so the server never sees two.
+func ValidateVerifySQL(queries []string) error {
+	if len(queries) > MaxVerifySQLStatements {
+		return fmt.Errorf("restore: too many verify statements: %d, at most %d", len(queries), MaxVerifySQLStatements)
 	}
 	for _, query := range queries {
 		if err := validateVerifyStatement(query); err != nil {
@@ -46,8 +56,8 @@ func validateVerifySQL(queries []string) error {
 }
 
 func validateVerifyStatement(query string) error {
-	if query == "" || len(query) > maxVerifySQLBytes || strings.ContainsRune(query, 0) {
-		return errors.New("restore: invalid verify statement")
+	if query == "" || len(query) > MaxVerifySQLBytes || strings.ContainsRune(query, 0) {
+		return fmt.Errorf("restore: invalid verify statement: empty, longer than %d bytes, or containing a NUL", MaxVerifySQLBytes)
 	}
 	body := strings.TrimSuffix(strings.TrimSpace(query), ";")
 	if body == "" || strings.Contains(body, ";") {
@@ -148,6 +158,11 @@ func (e *execution) openRehearsal(ctx context.Context, process *physical.MysqldP
 	cfg.Timeout, cfg.ReadTimeout, cfg.WriteTimeout = 5*time.Second, 120*time.Second, 120*time.Second
 	cfg.MultiStatements = false
 	cfg.InterpolateParams = false
+	// The rehearsal server closes the socket while it answers SHUTDOWN, so the
+	// pooled connection reports a broken pipe on its way out. That line is noise:
+	// stopRehearsal waits for the process itself, and the connection is scoped to
+	// this config, so only the rehearsal handle loses the driver's stderr logging.
+	cfg.Logger = discardDriverLogger{}
 	connector, err := driver.NewConnector(cfg)
 	if err != nil {
 		return nil, err
@@ -159,6 +174,12 @@ func (e *execution) openRehearsal(ctx context.Context, process *physical.MysqldP
 	}
 	return db, nil
 }
+
+// discardDriverLogger is the per-connection go-sql-driver logger of the
+// rehearsal handle. It never touches the process-wide default logger.
+type discardDriverLogger struct{}
+
+func (discardDriverLogger) Print(_ ...any) {}
 
 func (e *execution) waitRehearsalSocket(ctx context.Context, process *physical.MysqldProcess) error {
 	deadline := time.Now().Add(rehearsalReadyTimeout)

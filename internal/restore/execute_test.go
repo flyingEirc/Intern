@@ -3,9 +3,11 @@ package restore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -117,4 +119,43 @@ func TestExecuteCanceledContextDoesNotPublish(t *testing.T) {
 		t.Fatalf("canceled execution code = %q", execErr.Code)
 	}
 	assertNoRestoreArtifacts(t, fixture)
+}
+
+// TestToolFailureCode covers the disk-full classification of a tool step. The
+// extractor and the preparer write the bytes themselves, so a real ENOSPC under a
+// tool never reaches the parent as an errno: the exhausted work filesystem is the
+// observation that names it, while an ordinary tool failure keeps its stage code
+// and a cancellation still wins over both.
+func TestToolFailureCode(t *testing.T) {
+	toolErr := errors.New("physical: native tool failed to start, finish, or drain its pipes")
+	cases := []struct {
+		name      string
+		err       error
+		exhausted bool
+		stageCode string
+		want      string
+	}{
+		{"parent errno", fmt.Errorf("copy member: %w", syscall.ENOSPC), false, CodeExtractFailed, CodeDiskFull},
+		{"parent quota", syscall.EDQUOT, false, CodeFetchFailed, CodeDiskFull},
+		{"exhausted extractor", toolErr, true, CodeExtractFailed, CodeDiskFull},
+		{"exhausted preparer", toolErr, true, CodePrepareFailed, CodeDiskFull},
+		{"tool failure on a free disk", toolErr, false, CodeExtractFailed, CodeExtractFailed},
+		{"prepare failure on a free disk", toolErr, false, CodePrepareFailed, CodePrepareFailed},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := toolFailureCode(test.err, test.exhausted, test.stageCode); got != test.want {
+				t.Fatalf("code = %q, want %q", got, test.want)
+			}
+		})
+	}
+	staged := stage(CodeDiskFull, toolErr)
+	if got := (&execution{}).failureCode(t.Context(), "", staged); got != CodeDiskFull {
+		t.Fatalf("failure code = %q, want %q", got, CodeDiskFull)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := (&execution{}).failureCode(canceled, "", staged); got != CodeCanceled {
+		t.Fatalf("canceled failure code = %q, want %s", got, CodeCanceled)
+	}
 }

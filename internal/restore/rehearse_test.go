@@ -9,9 +9,18 @@ import (
 )
 
 func TestValidateVerifySQL(t *testing.T) {
-	accepted := []string{"SELECT 1", "select * from fixture.records;", "SELECT (1)"}
-	if err := validateVerifySQL(accepted); err != nil {
-		t.Fatalf("valid statements refused: %v", err)
+	longest := "SELECT " + strings.Repeat("x", MaxVerifySQLBytes-len("SELECT "))
+	accepted := [][]string{
+		{"SELECT 1"},
+		{"select * from fixture.records;"},
+		{"SELECT (1)"},
+		{longest},
+		makeStatements(MaxVerifySQLStatements, "SELECT 1"),
+	}
+	for index, queries := range accepted {
+		if err := ValidateVerifySQL(queries); err != nil {
+			t.Fatalf("valid statements %d refused: %v", index, err)
+		}
 	}
 	rejected := [][]string{
 		{""},
@@ -19,14 +28,35 @@ func TestValidateVerifySQL(t *testing.T) {
 		{"SELECT 1; DROP TABLE fixture.records"},
 		{"SELECT 1\x00"},
 		{"  ;"},
-		{strings.Repeat("SELECT 1", 1000)},
-		make([]string, maxVerifySQLStatements+1),
+		{"selectx 1"},
+		{"SELECT " + strings.Repeat("x", MaxVerifySQLBytes)},
+		makeStatements(MaxVerifySQLStatements+1, "SELECT 1"),
 	}
 	for index, queries := range rejected {
-		if err := validateVerifySQL(queries); err == nil {
+		if err := ValidateVerifySQL(queries); err == nil {
 			t.Fatalf("case %d accepted an invalid verify statement", index)
 		}
 	}
+}
+
+// TestVerifySQLLimitsAreTheContract pins the limits the API layer and the
+// OpenAPI document publish: a change here must be mirrored in app/web, so a
+// silent engine-side change fails here first.
+func TestVerifySQLLimitsAreTheContract(t *testing.T) {
+	if MaxVerifySQLStatements != 16 {
+		t.Fatalf("MaxVerifySQLStatements = %d, want 16", MaxVerifySQLStatements)
+	}
+	if MaxVerifySQLBytes != 4096 {
+		t.Fatalf("MaxVerifySQLBytes = %d, want 4096", MaxVerifySQLBytes)
+	}
+}
+
+func makeStatements(count int, statement string) []string {
+	queries := make([]string, count)
+	for index := range queries {
+		queries[index] = statement
+	}
+	return queries
 }
 
 func TestQuoteIdentifier(t *testing.T) {

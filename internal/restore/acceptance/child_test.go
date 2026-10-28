@@ -54,7 +54,7 @@ func TestP4RootRefusalWorker(t *testing.T) {
 		PIDFile: filepath.Join(work, "root.pid"), LogError: filepath.Join(work, "root.err"),
 	})
 	if !errors.Is(err, physical.ErrRehearsalRoot) {
-		t.Fatalf("root rehearsal error = %v, want ErrRehearsalRoot", err)
+		t.Fatalf("root rehearsal error = %s, want ErrRehearsalRoot", withhold(err.Error()))
 	}
 	id := strings.Repeat("e", 32)
 	_, err = restore.Execute(t.Context(), restore.Options{MysqldPath: mysqldPath(t)}, restore.Request{
@@ -62,7 +62,7 @@ func TestP4RootRefusalWorker(t *testing.T) {
 	}, nil)
 	var execErr *restore.ExecError
 	if !errors.As(err, &execErr) || execErr.Code != restore.CodeRehearsalUnavailable {
-		t.Fatalf("root execute error = %v, want rehearsal_unavailable", err)
+		t.Fatalf("root execute error = %s, want rehearsal_unavailable", withhold(err.Error()))
 	}
 	t.Log("P4-A7 root_refusal mysqld=refused execute=rehearsal_unavailable")
 }

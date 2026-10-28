@@ -65,12 +65,12 @@ payload() {
 		"P4-A3 restore=inc1 source=ftp injection=disconnect rest_offset=65536 attempts=2 authenticated_eof=true export=${export3} expected_snapshot=${snap1}" \
 		"P4-A3 restore=inc2 source=ftp export=${export4} expected_snapshot=${snap2} rows=20 max_id=20" \
 		"P4-A3 local_payloads=removed replicas=3 verified=true" \
-		"P4-A5 argv shapes=full-only,full+1,full+2 no_defaults_first=true matches=true" \
-		"P4-A6 enospc filesystem=tmpfs code=disk_full export=none work_gone=true published_untouched=true" \
-		"P4-A6 cancel during=extracting code=canceled work_gone=true pending_gone=true export_unchanged=true" \
-		"P4-A6 cancel during=preparing code=canceled work_gone=true pending_gone=true export_unchanged=true" \
-		"P4-A6 sigkill inject=prepare process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop" \
-		"P4-A7 secrets=clean" \
+		"P4-A5 argv shapes=full-only,full+1,full+2 no_defaults_first=true argv_exact=true apply_log_only=after_prepare target_dir_under=restore-${export1} checked=3" \
+		"P4-A6 enospc filesystem=tmpfs phase=extracting tool=xbstream filled=7340032 code=disk_full export=none work_gone=true published_untouched=true" \
+		"P4-A6 cancel during=extracting tool=xbstream tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true" \
+		"P4-A6 cancel during=preparing tool=xtrabackup tool_live=true tool_gone=true code=canceled work_gone=true pending_gone=true export_unchanged=true" \
+		"P4-A6 sigkill inject=prepare child_pgrp=own tool=xtrabackup tool_gone=true process_tree=gone work_gone=true pending_gone=true export_unchanged=true others_untouched=true second_recover=noop" \
+		"P4-A7 secrets=clean census=9 scanned=log=64,progress=96,chain=28,rehearsal=512" \
 		"P4-A7 supervisor mysqld_pgid_separate=true tool_group=supervisor no_leftover_tools=true" \
 		"P4-A7 export_root symlink=refused export_perms=0750/0640 owner=exact" \
 		"P4-A7 root_refusal mysqld=refused execute=rehearsal_unavailable" \
@@ -158,6 +158,24 @@ reject false_match 'if has("Output") then .Output |= gsub("expected_snapshot='"$
 reject no_checkpoints 'if has("Output") then .Output |= gsub("prepare_checkpoints=full-prepared"; "prepare_checkpoints=full-backuped") else . end'
 reject missing_marker 'if has("Output") then .Output |= sub("argv shapes=[^ ]+"; "argv shapes=none") else . end'
 reject dirty_source 'if has("Output") then .Output |= sub("source_dirty=false"; "source_dirty=true") else . end'
+
+# The A5, A6 and A7 lines now carry observed values rather than a bare shape, so
+# each mutation below falsifies exactly one of them: an argv that was only matched
+# by substring, a target directory outside the restore's own tree, --apply-log-only
+# in the wrong position, a disk-full that came out of the copy instead of the
+# extractor, a cancel that never met a running tool, a tool that survived its
+# cancellation, a kill child sharing the worker's process group, an audited surface
+# that was never scanned, and a census that lost the secrets it must cover.
+reject argv_not_exact 'if has("Output") then .Output |= sub("argv_exact=true"; "argv_exact=substring") else . end'
+reject argv_target_unscoped 'if has("Output") then .Output |= sub("target_dir_under=restore-"; "target_dir_under=work-") else . end'
+reject argv_apply_log_only_position 'if has("Output") then .Output |= sub("apply_log_only=after_prepare"; "apply_log_only=after_target_dir") else . end'
+reject enospc_wrong_phase 'if has("Output") then .Output |= sub("filesystem=tmpfs phase=extracting tool=xbstream"; "filesystem=tmpfs phase=fetching tool=copy") else . end'
+reject enospc_wrong_code 'if has("Output") then .Output |= sub("filled=7340032 code=disk_full"; "filled=7340032 code=extract_failed") else . end'
+reject cancel_tool_not_live 'if has("Output") then .Output |= sub("cancel during=extracting tool=xbstream tool_live=true"; "cancel during=extracting tool=xbstream tool_live=false") else . end'
+reject cancel_tool_survived 'if has("Output") then .Output |= sub("cancel during=preparing tool=xtrabackup tool_live=true tool_gone=true"; "cancel during=preparing tool=xtrabackup tool_live=true tool_gone=false") else . end'
+reject sigkill_shared_pgrp 'if has("Output") then .Output |= sub("inject=prepare child_pgrp=own"; "inject=prepare child_pgrp=shared") else . end'
+reject secrets_unscanned 'if has("Output") then .Output |= sub("progress=96"; "progress=0") else . end'
+reject secrets_census_empty 'if has("Output") then .Output |= sub("census=9 "; "census=0 ") else . end'
 
 if run_gate "$wrong_source" "$work/accept.jsonl" "$work/sha.log"; then
 	echo 'FAIL: the gate accepted a foreign GITHUB_SHA' >&2

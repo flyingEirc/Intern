@@ -132,13 +132,13 @@ func must(t *testing.T, err error) {
 	}
 }
 
-// withhold removes every fixture credential and key path before a diagnostic is
-// printed as evidence.
+// withhold removes every fixture secret from a diagnostic before it is printed:
+// both passwords, the source and FTP connection strings, the KEK file and its key
+// material, and the key paths themselves. Every string passes through the audit in
+// secrets_test.go while it is still raw, so this is the second net, not the proof.
 func withhold(message string) string {
-	for _, key := range []string{"INTERN_P4_PASSWORD", "INTERN_P4_FTP_PASSWORD"} {
-		if secret := os.Getenv(key); secret != "" {
-			message = strings.ReplaceAll(message, secret, "[REDACTED]")
-		}
+	for _, secret := range census() {
+		message = strings.ReplaceAll(message, secret, "[REDACTED]")
 	}
 	if root := os.Getenv("INTERN_P4_ROOT"); root != "" {
 		message = strings.ReplaceAll(message, filepath.Join(root, "keys"), "[KEK]")
@@ -445,7 +445,7 @@ func serverCheckpoint(t *testing.T, ctx context.Context, db *sql.DB) uint64 {
 		} `json:"InnoDB"`
 	}
 	if err := json.Unmarshal([]byte(raw), &body); err != nil || body.InnoDB.Checkpoint == 0 {
-		t.Fatalf("cannot read the InnoDB checkpoint: %v", err)
+		t.Fatalf("cannot read the InnoDB checkpoint: %s", withhold(err.Error()))
 	}
 	return body.InnoDB.Checkpoint
 }
@@ -575,7 +575,7 @@ func (w *worker) replicate(ctx context.Context) {
 		if err != nil {
 			w.now = w.now.Add(time.Minute)
 			if attempts > 12 {
-				w.t.Fatalf("replication did not complete: %v", err)
+				w.t.Fatalf("replication did not complete: %s", withhold(err.Error()))
 			}
 			continue
 		}
@@ -629,7 +629,7 @@ func loadManifest(t *testing.T, path string) producedManifest {
 	must(t, err)
 	var manifest producedManifest
 	if err = json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatal(err)
+		t.Fatal(withhold(err.Error()))
 	}
 	if manifest.InstanceID != instanceID || len(manifest.Backups) != 3 {
 		t.Fatal("the produced manifest does not describe this instance and chain")
