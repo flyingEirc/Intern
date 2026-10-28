@@ -2075,6 +2075,10 @@ func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	f.slowPolicyID = f.createPolicy(t, "d1-throttled", 1)
 	f.enablePolicy(t, f.slowPolicyID)
 	f.seedRows(t, ctx, 64)
+	// The throttled full copies about 10 MB per second. A few hundred megabytes of
+	// fresh pages keep that run in flight for tens of seconds, so the stop lands
+	// before the chain's success point rather than racing it.
+	f.seedPressure(t, ctx, 320)
 	runID := f.triggerOn(t, f.slowPolicyID, "full", "d1-a5-sigterm")
 	f.waitRunRunning(t, runID, 5*time.Minute)
 	grace := f.stopGraceSeconds(ctx)
@@ -2245,6 +2249,19 @@ func (f *d1Fixture) seedRowsLocked(ctx context.Context, db *sql.DB, rows int) {
 		_, err = db.ExecContext(ctx,
 			"INSERT INTO "+d1Database+".lsn_pressure(payload) VALUES(REPEAT(SHA2(RAND(),256),32))")
 		require(f.t, err)
+	}
+}
+
+// seedPressure appends megabytes of page data in 1 MiB rows, so a throttled
+// backup has a long, real copy phase to interrupt.
+func (f *d1Fixture) seedPressure(t *testing.T, ctx context.Context, megabytes int) {
+	t.Helper()
+	db := f.sourceDB()
+	defer func() { require(t, db.Close()) }()
+	for range megabytes {
+		_, err := db.ExecContext(ctx,
+			"INSERT INTO "+d1Database+".lsn_pressure(payload) VALUES(REPEAT(RANDOM_BYTES(1024),1024))")
+		require(t, err)
 	}
 }
 
