@@ -2,9 +2,11 @@
 
 **为 MySQL 提供可验证的备份与隔离恢复。**
 
-Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线已调整为优先完成 Web，CLI 暂停新功能、保留必要维护。现有可运行基线仍是单机、本地文件系统、单业务库的 CLI，Web 尚未交付。
+Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线优先完成 Web：Web 后端（控制面 API、XtraBackup 物理链、FTP 副本与隔离恢复）的阶段 B、C、D 已通过真实容器 CI 原生验收并合入 `main`；CLI 暂停新功能、保留必要维护。**Web 首版仍未交付**——没有前端页面，Docker 部署形态、FTPS 与用户内网 FTP 实测还在阶段 E 实施中。
 
 ## 当前可复用的能力基线
+
+**CLI 基线：单机、本地文件系统、单业务库**
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -17,16 +19,27 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 
 已有验证记录覆盖 macOS arm64、MySQL 与官方客户端 9.7.1 下的真实原生进程备份恢复。该记录不代表所有版本、平台或生产环境已验收；详见 [路线第 14 节](docs/roadmap/数据库备份与恢复-2026-10-17.md)。真实容器矩阵和持续质量门禁现由 [收尾与验收 #1](https://github.com/flyingEirc/Intern/issues/1) 及其子任务跟踪，是否通过以对应提交与实际 CI 证据为准。
 
+**Web 后端能力（阶段 B–D 已原生验收并合入 `main`；无前端）**
+
+| 能力 | 当前行为与证据边界 |
+| --- | --- |
+| 控制面 API、会话与三角色 | `/api/v1` 契约（`app/web/api/openapi.yaml`）由测试校验实现一致；`intern_session` cookie 固定 `Secure`/`HttpOnly`/`SameSite=Lax`，`admin`/`operator`/`viewer` 权限矩阵与审计、登录与改密限速、独占迁移与状态命令。 |
+| XtraBackup 物理全量与页增量 | 真实 MySQL 8.4.11 + PXB 8.4.0-7、linux/amd64 容器 CI 完成全量 → 增量 1 → 增量 2、链管理、本地仓库发布与清理账本、进程故障与准入拒绝、SIGKILL 重启回收。 |
+| FTP 副本复制 | 发布后把密文原样复制到运维 FTP 服务器（真实 Pure-FTPd 1.0.54，明文模式）并完整回读认证，认证通过才 `verified`；FIFO 顺序、重试、`.part` 回收；未 `verified` 不会被保留判定删除。 |
+| 隔离恢复、导出与演练 | 只读恢复计划 + `plan_digest` 与管理员密码二次确认执行、按链 prepare、导出到宿主机目录并由新 MySQL 8.4.11 容器启动核对独立快照（含**仅从 FTP 副本**分别恢复增量 1 与增量 2）；拒绝全部发生在 prepare 与写导出之前；取消、SIGKILL 与 ENOSPC 精确回收；备份与恢复全局互斥。 |
+
+Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 D 的证据覆盖上述组件组合本身，**版本矩阵仍是 `candidate`（`verified: false`）**，不外推到所有版本、平台或生产环境；镜像与 Compose 部署、FTPS、内网 FTP/FTPS 实测属阶段 E，尚无验收结论。
+
 ## 目录与当前路线
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线；阶段 B 后端基础已随 [PR #26](https://github.com/flyingEirc/Intern/pull/26) 合入并闭环（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）。阶段 C 的 P2 #27、S1 #28、P3 #29、R1 #30、W3 #31 与 W4 #32 均已原生验收 ACCEPT；W4（调度、持久运行队列、手动触发/取消与鉴权 SSE）在 `feat/web-stage-c` 的 `ae5cd3a` 由 CircleCI [流水线](https://app.circleci.com/pipelines/gh/flyingEirc/Intern/3/workflows/c5a09431-89f4-4fc2-a0d8-177f5501692b) 原生验收。阶段 C 后端验收 C-A1–C-A5 通过，D（#14）交接已记录；仅从 FTP 的实际恢复与 prepare 仍属 D/P4。恢复、部署与前端 F（暂缓）未交付，Web 首版未交付，物理 PITR 未交付。CI 为 CircleCI，GitHub Actions 仅手动触发。 |
+| `app/web/` | 当前产品主线。阶段 B（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）、阶段 C（P2 #27、S1 #28、P3 #29、R1 #30、W3 #31、W4 #32，后端验收 C-A1–C-A5）与阶段 D（P4 #36、W5 #37，验收 P4-A1–A9、W5-A1–A8）均已通过固定候选的 Linux amd64 原生验收并合入 `main`；候选提交、CI 流水线与证据边界见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 E（[#15](https://github.com/flyingEirc/Intern/issues/15)：D1 #41 镜像与 Compose、S2 #42 FTPS、V1 #43 内网实测、G #44 门禁与运维说明）在 `feat/web-stage-e` 实施中，部署形态与内网实测尚无验收结论。接口以 [OpenAPI 契约](app/web/api/openapi.yaml) 为唯一契约；前端 F（暂缓）、Web 首版与物理 PITR 均未交付。CI 为 CircleCI，GitHub Actions 仅手动触发。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
 
-总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。`mise run build` 同时构建 CLI 与 Web 后端；Web 服务、迁移与管理员命令见 [开发入口](docs/guide/development.md#常用开发入口)，接口定义见 [OpenAPI 契约](app/web/api/openapi.yaml)。以下备份恢复示例仍用于现有 CLI 基线。
+总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。`mise run build` 同时构建 CLI 与 Web 后端；Web 的部署、首次管理员、TLS、KEK、备份与恢复操作、升级与排障见 [运维使用说明](docs/guide/operations.md)，开发命令见 [开发入口](docs/guide/development.md#常用开发入口)，接口定义见 [OpenAPI 契约](app/web/api/openapi.yaml)。以下备份恢复示例仍用于现有 CLI 基线；Web 后端的操作全部通过 `/api/v1`。
 
 ## 从源码开始
 
@@ -91,9 +104,9 @@ chmod 600 "$HOME/intern-secrets/source.yaml"
 
 ## 当前边界与后续路线
 
-- 当前增量是 binlog 归档；XtraBackup 物理全量/物理增量仍在路线中。
-- 当前按已封存检查点恢复；任意时间输入、实例级 PITR、跨库事务恢复尚不在已交付能力中。
-- Web、S3、自动保留清理和持续断线归档尚未交付；MySQL 其他版本、Linux、云平台、TLS/最小权限等组合须逐项提供实测证据后再列入支持矩阵。
+- CLI 当前增量是 binlog 归档（逻辑链）；Web 后端已实现并通过真实容器 CI 的是 XtraBackup 物理全量与页增量链。两者的环境、版本与验证互不覆盖。
+- 当前按已封存检查点恢复；任意时间输入、实例级 PITR、跨库事务恢复尚不在已交付能力中（N1）。
+- Web 前端（F [#19](https://github.com/flyingEirc/Intern/issues/19)）、S3、自动保留清理（N2）与持续断线归档尚未交付；Docker 单宿主机部署与用户内网 FTP/FTPS 实测仍在阶段 E，未验收前只是参考配置。MySQL 其他版本、Linux 发行版、云平台、TLS/最小权限等组合须逐项提供实测证据后再列入支持矩阵：`internal/physical/compat.json` 目前只有一条 `status: candidate`、`verified: false` 的记录（MySQL 8.4.11 + PXB 8.4.0-7 + linux/amd64）。
 - 备份和恢复会产生受保护的明文工作文件，需要受控磁盘与权限；加密备份仍依赖妥善保管历史密钥。
 
 ## 阅读与参与开发
@@ -105,6 +118,7 @@ chmod 600 "$HOME/intern-secrets/source.yaml"
 | 全部核心约束目录 | [docs/README.md](docs/README.md) |
 | 配置字段 | [app/cli/example.yaml](app/cli/example.yaml) |
 | 任务和开发进度 | [GitHub Issues](https://github.com/flyingEirc/Intern/issues)；Web 总路线 [#10](https://github.com/flyingEirc/Intern/issues/10) |
+| 如何部署、值守与排障 | [运维使用说明](docs/guide/operations.md) |
 | 如何开发与验证 | [开发规范](docs/guide/development.md)、[质量规范](docs/guide/quality.md) |
 | 如何跟踪交付和提交 PR | [Issue 流程](docs/workflow/issue.md)、[PR 流程](docs/workflow/pr.md) |
 | AI 协作阅读入口 | [AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md) |
