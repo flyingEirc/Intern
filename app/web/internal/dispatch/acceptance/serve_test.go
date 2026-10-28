@@ -44,6 +44,9 @@ func TestW4ServeChild(t *testing.T) {
 		os.Getenv("INTERN_W4_KEK"),
 		os.Getenv("INTERN_W4_WORK_ROOT"),
 		os.Getenv("INTERN_W4_XTRABACKUP"),
+		os.Getenv("INTERN_W5_EXPORT_ROOT"),
+		os.Getenv("INTERN_W5_XBSTREAM"),
+		os.Getenv("INTERN_W5_MYSQLD"),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +56,9 @@ func TestW4ServeChild(t *testing.T) {
 // server wiring, including cmd/root.go's shutdown order and error joining. The
 // dispatcher's Stop error is never dropped: a drain that outlived its bounded
 // window fails the process exactly as it fails the real command.
-func runServe(ctx context.Context, metadata, listen, cert, key, kek, work, xtrabackup string) (retErr error) {
+func runServe(ctx context.Context, metadata, listen, cert, key, kek, work, xtrabackup,
+	export, xbstream, mysqld string,
+) (retErr error) {
 	if err := requireServePaths(metadata, listen, cert, key, kek, work, xtrabackup); err != nil {
 		return err
 	}
@@ -62,7 +67,7 @@ func runServe(ctx context.Context, metadata, listen, cert, key, kek, work, xtrab
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, database.Close()) }()
-	engine, shutdown, err := serveEngine(ctx, database, kek, metadata, work, xtrabackup)
+	engine, shutdown, err := serveEngine(ctx, database, kek, metadata, work, xtrabackup, export, xbstream, mysqld)
 	if err != nil {
 		return err
 	}
@@ -90,9 +95,12 @@ func requireServePaths(paths ...string) error {
 }
 
 // serveEngine is the production serve wiring: dispatcher, session service and
-// the resource service, exactly as cmd.serve assembles them. The returned
+// the resource service, exactly as cmd.serve assembles them, plus the restore
+// engine when the deployment carries every restore input. The returned
 // shutdown closes both and joins their errors.
-func serveEngine(ctx context.Context, database *store.Store, kek, metadata, work, xtrabackup string) (*gin.Engine, func() error, error) {
+func serveEngine(ctx context.Context, database *store.Store, kek, metadata, work, xtrabackup,
+	export, xbstream, mysqld string,
+) (*gin.Engine, func() error, error) {
 	sealer, err := credential.Open(kek, metadata, work)
 	if err != nil {
 		return nil, nil, err
@@ -101,6 +109,7 @@ func serveEngine(ctx context.Context, database *store.Store, kek, metadata, work
 	settings := resources.Settings{
 		Sealer: sealer, KeyFile: kek, MetadataDir: metadata, WorkRoot: work,
 		XtrabackupPath: xtrabackup, MinWorkBytes: 1, MinBackupBytes: 1,
+		ExportRoot: export, XbstreamPath: xbstream, MysqldPath: mysqld, RestoreExpansionFactor: 8,
 	}
 	svc := &resources.Service{Store: database, Settings: settings}
 	authn, err := auth.New(database, auth.DefaultSessionConfig(), auth.DefaultPasswordParams())
@@ -108,14 +117,19 @@ func serveEngine(ctx context.Context, database *store.Store, kek, metadata, work
 		return nil, nil, err
 	}
 	stopCleanup := authn.StartCleanup(ctx, time.Minute, logger)
+	restoreEngine, err := dispatch.NewRestoreEngine(database, settings, logger)
+	if err != nil {
+		stopCleanup()
+		return nil, nil, err
+	}
 	dispatcher, err := dispatch.Start(ctx, dispatch.Config{
-		Database: database, Settings: settings, Logger: logger, Preflight: svc,
+		Database: database, Settings: settings, Logger: logger, Preflight: svc, Restore: restoreEngine,
 	})
 	if err != nil {
 		stopCleanup()
 		return nil, nil, err
 	}
-	engine, err := server.NewEngineWithResources(database, logger, nil, authn, svc, dispatcher)
+	engine, err := server.NewEngineWithResources(database, logger, nil, authn, svc, dispatcher, server.WithRestores(dispatcher))
 	if err != nil {
 		stopErr := dispatcher.Stop()
 		stopCleanup()

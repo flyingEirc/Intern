@@ -71,6 +71,10 @@ type Config struct {
 	Now func() time.Time
 	// Preflight is the resources service the fresh per-run preflight uses.
 	Preflight PreflightRunner
+	// Restore is the restore execution engine. Production builds it from the
+	// restore settings; a test injects a fake. nil makes the restore API
+	// answer 503 and a queued restore fail visibly as unavailable.
+	Restore RestoreEngine
 }
 
 // Dispatcher owns the run queue for one serve process.
@@ -86,12 +90,15 @@ type Dispatcher struct {
 	mu sync.Mutex
 	// runningCancel holds the context cancel of the current backup, so a
 	// cancel request reaches the in-flight chain.Run. runningRunID identifies
-	// the run that cancel belongs to.
-	runningCancel context.CancelFunc
-	runningRunID  string
-	replicas      []replicaHandle
-	replicaCursor int
-	closers       []func() error
+	// the run that cancel belongs to. runningRestoreCancel is the same
+	// registration for the restore queue, which shares the execution slot.
+	runningCancel        context.CancelFunc
+	runningRunID         string
+	runningRestoreCancel context.CancelFunc
+	runningRestoreID     string
+	replicas             []replicaHandle
+	replicaCursor        int
+	closers              []func() error
 	// replicatorFailed records (local, replica) pairs whose last lazy open
 	// failed, so the replication worker retries them on the next step.
 	replicatorFailed map[string]struct{}
@@ -167,11 +174,15 @@ func Start(ctx context.Context, config Config) (*Dispatcher, error) {
 }
 
 // recover implements the frozen startup order: interrupted control-plane runs
-// fail first, then the physical chain recovery runs for each local repository
-// with no active runs, then each FTP repository's replication recovery. It all
-// happens before the dispatcher loops start.
+// fail first, then interrupted restores are failed after their exact targets
+// are reclaimed, then the physical chain recovery runs for each local
+// repository with no active runs, then each FTP repository's replication
+// recovery. It all happens before the dispatcher loops start.
 func (d *Dispatcher) recover(ctx context.Context) error {
 	if err := d.failInterruptedRuns(ctx); err != nil {
+		return err
+	}
+	if err := d.failInterruptedRestores(ctx); err != nil {
 		return err
 	}
 	recovered, err := d.openRepositories(ctx)
@@ -632,12 +643,14 @@ func (r recoveredRepository) close() {
 	}
 }
 
-// loop runs the scheduler, backup worker and replication worker until ctx is
-// canceled. One goroutine per channel, concurrency frozen by the contract.
+// loop runs the scheduler, backup worker, restore worker and replication
+// worker until ctx is canceled. One goroutine per channel, concurrency frozen
+// by the contract: the run queue and the restore queue share one execution
+// slot, so their workers never execute at the same time.
 func (d *Dispatcher) loop(ctx context.Context) {
 	defer close(d.done)
 	var workers sync.WaitGroup
-	workers.Add(3)
+	workers.Add(4)
 	go func() {
 		defer workers.Done()
 		d.scheduler(ctx)
@@ -645,6 +658,10 @@ func (d *Dispatcher) loop(ctx context.Context) {
 	go func() {
 		defer workers.Done()
 		d.backupWorker(ctx)
+	}()
+	go func() {
+		defer workers.Done()
+		d.restoreWorker(ctx)
 	}()
 	go func() {
 		defer workers.Done()

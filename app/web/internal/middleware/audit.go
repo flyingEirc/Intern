@@ -50,6 +50,10 @@ var auditActions = map[string]string{
 	"POST /api/v1/policies/:id/runs":                         "runs.trigger",
 	"POST /api/v1/runs/:id/cancel":                           "runs.cancel",
 	"POST /api/v1/backups/:id/replicas/:repository_id/retry": "replicas.retry",
+
+	"POST /api/v1/restores/plan":       "restores.plan",
+	"POST /api/v1/restores":            "restores.execute",
+	"POST /api/v1/restores/:id/cancel": "restores.cancel",
 }
 
 const auditContextKey = "intern.audit"

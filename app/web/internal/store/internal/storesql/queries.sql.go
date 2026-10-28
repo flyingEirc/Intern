@@ -10,6 +10,30 @@ import (
 	"database/sql"
 )
 
+const cancelQueuedRestore = `-- name: CancelQueuedRestore :execrows
+UPDATE restores SET status = 'canceled', phase = NULL, finished_at = ?1,
+    side_effects_json = ?2,
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
+WHERE id = ?3 AND status = 'queued' AND cancel_requested = 0
+`
+
+type CancelQueuedRestoreParams struct {
+	FinishedAt      sql.NullString
+	SideEffectsJson sql.NullString
+	ID              string
+}
+
+// Every terminal restore row carries the explicit side-effect observation: a
+// queued cancel never started the engine, so all three targets are recorded as
+// absent for this restore id.
+func (q *Queries) CancelQueuedRestore(ctx context.Context, arg CancelQueuedRestoreParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cancelQueuedRestore, arg.FinishedAt, arg.SideEffectsJson, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const cancelQueuedRun = `-- name: CancelQueuedRun :execrows
 UPDATE runs SET status = 'canceled', finished_at = ?1
 WHERE id = ?2 AND status = 'queued' AND cancel_requested = 0
@@ -22,6 +46,41 @@ type CancelQueuedRunParams struct {
 
 func (q *Queries) CancelQueuedRun(ctx context.Context, arg CancelQueuedRunParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, cancelQueuedRun, arg.FinishedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const cancelRunningRestore = `-- name: CancelRunningRestore :execrows
+UPDATE restores SET
+    status = 'canceled', phase = NULL, finished_at = ?1,
+    error_class = ?2, error_code = ?3,
+    side_effects_json = ?4,
+    verify_status = ?5, verify_result_json = ?6
+WHERE id = ?7 AND status = 'running'
+`
+
+type CancelRunningRestoreParams struct {
+	FinishedAt       sql.NullString
+	ErrorClass       sql.NullString
+	ErrorCode        sql.NullString
+	SideEffectsJson  sql.NullString
+	VerifyStatus     string
+	VerifyResultJson sql.NullString
+	ID               string
+}
+
+func (q *Queries) CancelRunningRestore(ctx context.Context, arg CancelRunningRestoreParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, cancelRunningRestore,
+		arg.FinishedAt,
+		arg.ErrorClass,
+		arg.ErrorCode,
+		arg.SideEffectsJson,
+		arg.VerifyStatus,
+		arg.VerifyResultJson,
+		arg.ID,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -79,6 +138,51 @@ func (q *Queries) ChangePassword(ctx context.Context, arg ChangePasswordParams) 
 	return i, err
 }
 
+const claimNextRestore = `-- name: ClaimNextRestore :one
+UPDATE restores SET status = 'running', started_at = ?1, phase = NULL
+WHERE id = (
+    SELECT id FROM restores WHERE status = 'queued' AND cancel_requested = 0
+    ORDER BY created_at, id LIMIT 1
+) AND status = 'queued'
+AND NOT EXISTS (SELECT 1 FROM restores WHERE status = 'running')
+AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
+RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
+`
+
+// Restore queue (W5). The claim mirrors ClaimNextRun: a queued restore is
+// claimed only when no run and no other restore is running, so the two queues
+// share one global execution slot. The oldest queued row wins.
+func (q *Queries) ClaimNextRestore(ctx context.Context, startedAt sql.NullString) (Restore, error) {
+	row := q.db.QueryRowContext(ctx, claimNextRestore, startedAt)
+	var i Restore
+	err := row.Scan(
+		&i.ID,
+		&i.BackupID,
+		&i.Status,
+		&i.Phase,
+		&i.PlanJson,
+		&i.PlanDigest,
+		&i.Rehearse,
+		&i.VerifySqlJson,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.RequestedBy,
+		&i.WorkDir,
+		&i.ExportPath,
+		&i.ExportBytes,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CancelRequested,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.SideEffectsJson,
+		&i.VerifyStatus,
+		&i.VerifyResultJson,
+	)
+	return i, err
+}
+
 const claimNextRun = `-- name: ClaimNextRun :one
 UPDATE runs SET
     status = 'running',
@@ -90,6 +194,7 @@ WHERE id = (
     ORDER BY kind = 'full' DESC, scheduled_at, id LIMIT 1
 ) AND status = 'queued'
 AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
+AND NOT EXISTS (SELECT 1 FROM restores WHERE status = 'running')
 RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
 `
 
@@ -97,6 +202,11 @@ RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_ha
 // already running. That is also per-source exclusion. One claimant at a time
 // holds the database write lock, so the loser's statement runs after the
 // winner's commit and no longer matches. No result means no claimable run.
+//
+// The restore queue shares the same global slot, so a queued run is also
+// refused while any restore is running. Both claims read both tables inside
+// one write statement, which SQLite serializes: the two queues can never run
+// a backup chain and a restore at the same time.
 //
 // The claim also snapshots the policy's (local, replica) pair onto the row, in
 // the same statement that reads the policy, so the run and its replication
@@ -144,6 +254,41 @@ type CommitSessionParams struct {
 func (q *Queries) CommitSession(ctx context.Context, arg CommitSessionParams) error {
 	_, err := q.db.ExecContext(ctx, commitSession, arg.Token, arg.Data, arg.Expiry)
 	return err
+}
+
+const completeRestore = `-- name: CompleteRestore :execrows
+UPDATE restores SET
+    status = 'completed', phase = NULL, finished_at = ?1,
+    export_path = ?2, export_bytes = ?3,
+    side_effects_json = ?4,
+    verify_status = ?5, verify_result_json = ?6
+WHERE id = ?7 AND status = 'running'
+`
+
+type CompleteRestoreParams struct {
+	FinishedAt       sql.NullString
+	ExportPath       sql.NullString
+	ExportBytes      sql.NullInt64
+	SideEffectsJson  sql.NullString
+	VerifyStatus     string
+	VerifyResultJson sql.NullString
+	ID               string
+}
+
+func (q *Queries) CompleteRestore(ctx context.Context, arg CompleteRestoreParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeRestore,
+		arg.FinishedAt,
+		arg.ExportPath,
+		arg.ExportBytes,
+		arg.SideEffectsJson,
+		arg.VerifyStatus,
+		arg.VerifyResultJson,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const completeRun = `-- name: CompleteRun :execrows
@@ -244,6 +389,17 @@ SELECT COUNT(*) FROM policies WHERE source_id = ?
 
 func (q *Queries) CountPoliciesBySource(ctx context.Context, sourceID string) (int64, error) {
 	row := q.db.QueryRowContext(ctx, countPoliciesBySource, sourceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countRestoreLogs = `-- name: CountRestoreLogs :one
+SELECT COUNT(*) FROM restore_logs WHERE restore_id = ?
+`
+
+func (q *Queries) CountRestoreLogs(ctx context.Context, restoreID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRestoreLogs, restoreID)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -607,6 +763,64 @@ func (q *Queries) EnabledPolicies(ctx context.Context) ([]Policy, error) {
 	return items, nil
 }
 
+const failInterruptedRestore = `-- name: FailInterruptedRestore :execrows
+UPDATE restores SET
+    status = 'failed', phase = NULL, finished_at = ?1,
+    error_class = 'interrupted', error_code = 'interrupted',
+    side_effects_json = ?2,
+    verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
+WHERE id = ?3 AND status = 'running'
+`
+
+type FailInterruptedRestoreParams struct {
+	FinishedAt      sql.NullString
+	SideEffectsJson sql.NullString
+	ID              string
+}
+
+func (q *Queries) FailInterruptedRestore(ctx context.Context, arg FailInterruptedRestoreParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failInterruptedRestore, arg.FinishedAt, arg.SideEffectsJson, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const failRestore = `-- name: FailRestore :execrows
+UPDATE restores SET
+    status = 'failed', phase = NULL, finished_at = ?1,
+    error_class = ?2, error_code = ?3,
+    side_effects_json = ?4,
+    verify_status = ?5, verify_result_json = ?6
+WHERE id = ?7 AND status = 'running'
+`
+
+type FailRestoreParams struct {
+	FinishedAt       sql.NullString
+	ErrorClass       sql.NullString
+	ErrorCode        sql.NullString
+	SideEffectsJson  sql.NullString
+	VerifyStatus     string
+	VerifyResultJson sql.NullString
+	ID               string
+}
+
+func (q *Queries) FailRestore(ctx context.Context, arg FailRestoreParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failRestore,
+		arg.FinishedAt,
+		arg.ErrorClass,
+		arg.ErrorCode,
+		arg.SideEffectsJson,
+		arg.VerifyStatus,
+		arg.VerifyResultJson,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const failRun = `-- name: FailRun :execrows
 UPDATE runs SET
     status = 'failed', finished_at = ?1,
@@ -729,6 +943,99 @@ func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, err
 		&i.TlsMode,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getRestore = `-- name: GetRestore :one
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE id = ?
+`
+
+func (q *Queries) GetRestore(ctx context.Context, id string) (Restore, error) {
+	row := q.db.QueryRowContext(ctx, getRestore, id)
+	var i Restore
+	err := row.Scan(
+		&i.ID,
+		&i.BackupID,
+		&i.Status,
+		&i.Phase,
+		&i.PlanJson,
+		&i.PlanDigest,
+		&i.Rehearse,
+		&i.VerifySqlJson,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.RequestedBy,
+		&i.WorkDir,
+		&i.ExportPath,
+		&i.ExportBytes,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CancelRequested,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.SideEffectsJson,
+		&i.VerifyStatus,
+		&i.VerifyResultJson,
+	)
+	return i, err
+}
+
+const getRestoreByIdempotencyKey = `-- name: GetRestoreByIdempotencyKey :one
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE idempotency_key = ?
+`
+
+func (q *Queries) GetRestoreByIdempotencyKey(ctx context.Context, idempotencyKey sql.NullString) (Restore, error) {
+	row := q.db.QueryRowContext(ctx, getRestoreByIdempotencyKey, idempotencyKey)
+	var i Restore
+	err := row.Scan(
+		&i.ID,
+		&i.BackupID,
+		&i.Status,
+		&i.Phase,
+		&i.PlanJson,
+		&i.PlanDigest,
+		&i.Rehearse,
+		&i.VerifySqlJson,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.RequestedBy,
+		&i.WorkDir,
+		&i.ExportPath,
+		&i.ExportBytes,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CancelRequested,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.SideEffectsJson,
+		&i.VerifyStatus,
+		&i.VerifyResultJson,
+	)
+	return i, err
+}
+
+const getRestoreLog = `-- name: GetRestoreLog :one
+SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = ? AND seq = ?
+`
+
+type GetRestoreLogParams struct {
+	RestoreID string
+	Seq       int64
+}
+
+func (q *Queries) GetRestoreLog(ctx context.Context, arg GetRestoreLogParams) (RestoreLog, error) {
+	row := q.db.QueryRowContext(ctx, getRestoreLog, arg.RestoreID, arg.Seq)
+	var i RestoreLog
+	err := row.Scan(
+		&i.RestoreID,
+		&i.Seq,
+		&i.Ts,
+		&i.Level,
+		&i.Message,
+		&i.Data,
 	)
 	return i, err
 }
@@ -951,6 +1258,95 @@ func (q *Queries) InsertInstance(ctx context.Context, arg InsertInstanceParams) 
 	return err
 }
 
+const insertRestore = `-- name: InsertRestore :one
+INSERT INTO restores (
+    id, backup_id, status, plan_json, plan_digest, rehearse, verify_sql_json,
+    idempotency_key, request_hash, requested_by, created_at, verify_status
+) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
+`
+
+type InsertRestoreParams struct {
+	ID             string
+	BackupID       string
+	PlanJson       string
+	PlanDigest     string
+	Rehearse       int64
+	VerifySqlJson  sql.NullString
+	IdempotencyKey sql.NullString
+	RequestHash    sql.NullString
+	RequestedBy    string
+	CreatedAt      string
+	VerifyStatus   string
+}
+
+func (q *Queries) InsertRestore(ctx context.Context, arg InsertRestoreParams) (Restore, error) {
+	row := q.db.QueryRowContext(ctx, insertRestore,
+		arg.ID,
+		arg.BackupID,
+		arg.PlanJson,
+		arg.PlanDigest,
+		arg.Rehearse,
+		arg.VerifySqlJson,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+		arg.RequestedBy,
+		arg.CreatedAt,
+		arg.VerifyStatus,
+	)
+	var i Restore
+	err := row.Scan(
+		&i.ID,
+		&i.BackupID,
+		&i.Status,
+		&i.Phase,
+		&i.PlanJson,
+		&i.PlanDigest,
+		&i.Rehearse,
+		&i.VerifySqlJson,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.RequestedBy,
+		&i.WorkDir,
+		&i.ExportPath,
+		&i.ExportBytes,
+		&i.CreatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.CancelRequested,
+		&i.ErrorClass,
+		&i.ErrorCode,
+		&i.SideEffectsJson,
+		&i.VerifyStatus,
+		&i.VerifyResultJson,
+	)
+	return i, err
+}
+
+const insertRestoreLog = `-- name: InsertRestoreLog :exec
+INSERT INTO restore_logs (restore_id, seq, ts, level, message, data) VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type InsertRestoreLogParams struct {
+	RestoreID string
+	Seq       int64
+	Ts        string
+	Level     string
+	Message   string
+	Data      sql.NullString
+}
+
+func (q *Queries) InsertRestoreLog(ctx context.Context, arg InsertRestoreLogParams) error {
+	_, err := q.db.ExecContext(ctx, insertRestoreLog,
+		arg.RestoreID,
+		arg.Seq,
+		arg.Ts,
+		arg.Level,
+		arg.Message,
+		arg.Data,
+	)
+	return err
+}
+
 const insertRun = `-- name: InsertRun :one
 INSERT INTO runs (
     id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash,
@@ -1036,6 +1432,57 @@ func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) erro
 		arg.Data,
 	)
 	return err
+}
+
+const interruptedRestores = `-- name: InterruptedRestores :many
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE status = 'running'
+`
+
+func (q *Queries) InterruptedRestores(ctx context.Context) ([]Restore, error) {
+	rows, err := q.db.QueryContext(ctx, interruptedRestores)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Restore{}
+	for rows.Next() {
+		var i Restore
+		if err := rows.Scan(
+			&i.ID,
+			&i.BackupID,
+			&i.Status,
+			&i.Phase,
+			&i.PlanJson,
+			&i.PlanDigest,
+			&i.Rehearse,
+			&i.VerifySqlJson,
+			&i.IdempotencyKey,
+			&i.RequestHash,
+			&i.RequestedBy,
+			&i.WorkDir,
+			&i.ExportPath,
+			&i.ExportBytes,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CancelRequested,
+			&i.ErrorClass,
+			&i.ErrorCode,
+			&i.SideEffectsJson,
+			&i.VerifyStatus,
+			&i.VerifyResultJson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const interruptedRuns = `-- name: InterruptedRuns :many
@@ -1228,6 +1675,73 @@ func (q *Queries) ListRepositories(ctx context.Context, arg ListRepositoriesPara
 	return items, nil
 }
 
+const listRestores = `-- name: ListRestores :many
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores
+WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
+    AND (CAST(?2 AS TEXT) = '' OR status = CAST(?2 AS TEXT))
+    AND (CAST(?3 AS TEXT) = '' OR backup_id = CAST(?3 AS TEXT))
+ORDER BY id DESC LIMIT ?4
+`
+
+type ListRestoresParams struct {
+	Before   string
+	Status   string
+	BackupID string
+	RowLimit int64
+}
+
+func (q *Queries) ListRestores(ctx context.Context, arg ListRestoresParams) ([]Restore, error) {
+	rows, err := q.db.QueryContext(ctx, listRestores,
+		arg.Before,
+		arg.Status,
+		arg.BackupID,
+		arg.RowLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Restore{}
+	for rows.Next() {
+		var i Restore
+		if err := rows.Scan(
+			&i.ID,
+			&i.BackupID,
+			&i.Status,
+			&i.Phase,
+			&i.PlanJson,
+			&i.PlanDigest,
+			&i.Rehearse,
+			&i.VerifySqlJson,
+			&i.IdempotencyKey,
+			&i.RequestHash,
+			&i.RequestedBy,
+			&i.WorkDir,
+			&i.ExportPath,
+			&i.ExportBytes,
+			&i.CreatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.CancelRequested,
+			&i.ErrorClass,
+			&i.ErrorCode,
+			&i.SideEffectsJson,
+			&i.VerifyStatus,
+			&i.VerifyResultJson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRuns = `-- name: ListRuns :many
 SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs
 WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
@@ -1377,6 +1891,17 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const maxRestoreLogSeq = `-- name: MaxRestoreLogSeq :one
+SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM restore_logs WHERE restore_id = ?
+`
+
+func (q *Queries) MaxRestoreLogSeq(ctx context.Context, restoreID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, maxRestoreLogSeq, restoreID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const maxRunLogSeq = `-- name: MaxRunLogSeq :one
 SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM run_logs WHERE run_id = ?
 `
@@ -1471,6 +1996,35 @@ func (q *Queries) RecordSourcePreflight(ctx context.Context, arg RecordSourcePre
 	return i, err
 }
 
+const replaceRestoreLog = `-- name: ReplaceRestoreLog :execrows
+UPDATE restore_logs SET ts = ?, level = ?, message = ?, data = ?
+WHERE restore_id = ? AND seq = ?
+`
+
+type ReplaceRestoreLogParams struct {
+	Ts        string
+	Level     string
+	Message   string
+	Data      sql.NullString
+	RestoreID string
+	Seq       int64
+}
+
+func (q *Queries) ReplaceRestoreLog(ctx context.Context, arg ReplaceRestoreLogParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, replaceRestoreLog,
+		arg.Ts,
+		arg.Level,
+		arg.Message,
+		arg.Data,
+		arg.RestoreID,
+		arg.Seq,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const replaceRunLog = `-- name: ReplaceRunLog :execrows
 UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?, data = ?
 WHERE run_id = ? AND seq = ?
@@ -1513,6 +2067,58 @@ func (q *Queries) RequestCancel(ctx context.Context, id string) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const requestRestoreCancel = `-- name: RequestRestoreCancel :execrows
+UPDATE restores SET cancel_requested = 1 WHERE id = ? AND status IN ('queued', 'running')
+`
+
+func (q *Queries) RequestRestoreCancel(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requestRestoreCancel, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const restoreLogsAfter = `-- name: RestoreLogsAfter :many
+SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = ? AND seq > ? ORDER BY seq LIMIT ?
+`
+
+type RestoreLogsAfterParams struct {
+	RestoreID string
+	Seq       int64
+	Limit     int64
+}
+
+func (q *Queries) RestoreLogsAfter(ctx context.Context, arg RestoreLogsAfterParams) ([]RestoreLog, error) {
+	rows, err := q.db.QueryContext(ctx, restoreLogsAfter, arg.RestoreID, arg.Seq, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RestoreLog{}
+	for rows.Next() {
+		var i RestoreLog
+		if err := rows.Scan(
+			&i.RestoreID,
+			&i.Seq,
+			&i.Ts,
+			&i.Level,
+			&i.Message,
+			&i.Data,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const revokeUserSessions = `-- name: RevokeUserSessions :one
@@ -1694,6 +2300,20 @@ func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicySchedulePa
 	return i, err
 }
 
+const setRestoreWorkDir = `-- name: SetRestoreWorkDir :exec
+UPDATE restores SET work_dir = ? WHERE id = ? AND status = 'running'
+`
+
+type SetRestoreWorkDirParams struct {
+	WorkDir sql.NullString
+	ID      string
+}
+
+func (q *Queries) SetRestoreWorkDir(ctx context.Context, arg SetRestoreWorkDirParams) error {
+	_, err := q.db.ExecContext(ctx, setRestoreWorkDir, arg.WorkDir, arg.ID)
+	return err
+}
+
 const tombstoneActive = `-- name: TombstoneActive :one
 SELECT expiry FROM session_tombstones WHERE token = ? AND expiry > ?
 `
@@ -1832,6 +2452,20 @@ func (q *Queries) UpdateRepository(ctx context.Context, arg UpdateRepositoryPara
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const updateRestorePhase = `-- name: UpdateRestorePhase :exec
+UPDATE restores SET phase = ? WHERE id = ? AND status = 'running'
+`
+
+type UpdateRestorePhaseParams struct {
+	Phase sql.NullString
+	ID    string
+}
+
+func (q *Queries) UpdateRestorePhase(ctx context.Context, arg UpdateRestorePhaseParams) error {
+	_, err := q.db.ExecContext(ctx, updateRestorePhase, arg.Phase, arg.ID)
+	return err
 }
 
 const updateSource = `-- name: UpdateSource :one

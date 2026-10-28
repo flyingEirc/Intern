@@ -66,6 +66,12 @@ jobs:
       # reject cases, including an empty GITHUB_SHA, run here too.
       - name: W4 evidence gate accept and reject cases
         run: .github/scripts/w4-gate-cases.sh
+      # Same gate self-test as the CircleCI quality-fast job, for the P4 gate.
+      - name: P4 evidence gate accept and reject cases
+        run: .github/scripts/p4-gate-cases.sh
+      # Same gate self-test as the CircleCI quality-fast job, for the W5 gate.
+      - name: W5 evidence gate accept and reject cases
+        run: .github/scripts/w5-gate-cases.sh
       - name: Install pinned golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
       - name: Lint including integration code
@@ -287,9 +293,75 @@ jobs:
           include-hidden-files: true
           path: .cache/quality/dispatch/events.jsonl
 
+  container-restore:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native isolated restore acceptance
+        run: |
+          mkdir -p .cache/quality/restore
+          go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestP4NativeContainers$' | tee .cache/quality/restore/events.jsonl
+      - name: Reject incomplete or skipped restore evidence
+        if: always()
+        run: .github/scripts/verify-p4-evidence.sh .cache/quality/restore/events.jsonl
+      - name: Retain allowlisted restore evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: restore-p4-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/restore/events.jsonl
+
+  container-restore-api:
+    needs: scope
+    if: needs.scope.outputs.required == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache-dependency-path: |
+            internal/go.sum
+            app/web/go.sum
+            go.work.sum
+      - name: Native restore API end to end
+        run: |
+          mkdir -p .cache/quality/restore-api
+          go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestW5NativeContainers$' | tee .cache/quality/restore-api/events.jsonl
+      - name: Reject incomplete or skipped restore API evidence
+        if: always()
+        run: .github/scripts/verify-w5-evidence.sh .cache/quality/restore-api/events.jsonl
+      - name: Retain allowlisted restore API evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: restore-api-w5-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/restore-api/events.jsonl
+
   quality-gate:
     name: quality-gate
-    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch]
+    needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch, container-restore, container-restore-api]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -305,12 +377,14 @@ jobs:
           REPLICATION: ${{ needs.container-replication.result }}
           WEB: ${{ needs.container-web.result }}
           DISPATCH: ${{ needs.container-dispatch.result }}
+          RESTORE: ${{ needs.container-restore.result }}
+          RESTORE_API: ${{ needs.container-restore-api.result }}
         working-directory: .
         run: |
           test "$SCOPE" = success
           case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success; test "$WEB" = success; test "$DISPATCH" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success; test "$WEB" = success; test "$DISPATCH" = success; test "$RESTORE" = success; test "$RESTORE_API" = success ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; test "$RESTORE" = skipped; test "$RESTORE_API" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

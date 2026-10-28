@@ -98,8 +98,9 @@ func (d *Dispatcher) logReplicationStep(ctx context.Context, slot replicaHandle,
 	})
 }
 
-// stop closes the repository handles the workers opened. The database itself
-// stays owned by the Store; serve closes it after Stop returns.
+// stop closes the repository handles the workers opened and the restore
+// engine's cached local repositories. The database itself stays owned by the
+// Store; serve closes it after Stop returns.
 func (d *Dispatcher) stop() {
 	d.mu.Lock()
 	closers := d.closers
@@ -110,6 +111,11 @@ func (d *Dispatcher) stop() {
 	for _, closer := range closers {
 		if err := closer(); err != nil {
 			d.logger.Error("cannot close replication repository", "error", err)
+		}
+	}
+	if closer, ok := d.config.Restore.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			d.logger.Error("cannot close the restore locator", "error", err)
 		}
 	}
 }

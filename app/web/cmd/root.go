@@ -103,7 +103,7 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 		}
 	}()
 	engine, err := server.NewEngineWithResources(database, logger, c.TrustedProxies, authentication,
-		&resources.Service{Store: database, Settings: settings}, dispatcher)
+		&resources.Service{Store: database, Settings: settings}, dispatcher, server.WithRestores(dispatcher))
 	if err != nil {
 		return err
 	}
@@ -129,13 +129,22 @@ func logStart(logger *slog.Logger, c *configuration, database *store.Store) {
 	}
 }
 
-// startDispatcher launches the run queue with the process capabilities. It owns
-// its own context so Stop can drain the workers even when the command context is
-// already canceled.
+// startDispatcher launches the run queue and the restore worker with the
+// process capabilities. It owns its own context so Stop can drain the workers
+// even when the command context is already canceled.
 func startDispatcher(ctx context.Context, database *store.Store, settings resources.Settings, logger *slog.Logger) (*dispatch.Dispatcher, error) {
+	// A deployment without the restore inputs yields a nil engine: serve still
+	// starts, the restore API answers 503 and a queued restore fails visibly as
+	// unavailable. A configured deployment whose export root violates the frozen
+	// location rules is a startup error, not a per-request failure.
+	restores, err := dispatch.NewRestoreEngine(database, settings, logger)
+	if err != nil {
+		return nil, err
+	}
 	return dispatch.Start(ctx, dispatch.Config{
 		Database: database, Settings: settings, Logger: logger,
 		Preflight: &resources.Service{Store: database, Settings: settings},
+		Restore:   restores,
 	})
 }
 

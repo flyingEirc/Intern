@@ -39,6 +39,11 @@ func newConfigLoader(root *cobra.Command) *configLoader {
 	flags.String("xtrabackup-path", "", "Absolute path to the XtraBackup executable the preflight probes")
 	flags.Uint64("min-work-bytes", 0, "Minimum free bytes required on the work volume (positive when set)")
 	flags.Uint64("min-backup-bytes", 0, "Minimum free bytes required on the local repository volume (positive when set)")
+	flags.String("export-root", "", "Absolute directory a completed restore publishes its export into (outside metadata_dir and work_root)")
+	flags.String("xbstream-path", "", "Absolute path to the xbstream executable restores unpack authenticated ciphertext with")
+	flags.String("mysqld-path", "", "Absolute path to the mysqld executable used for restore rehearsal (empty disables rehearsal only)")
+	flags.Int("restore-expansion-factor", 8, "Conservative payload expansion factor of the restore space estimate (positive)")
+	flags.Int64("restore-use-memory", 0, "xtrabackup --use-memory bytes during restore prepare (0 omits the flag)")
 	loader := &configLoader{v: v, flags: flags}
 	for flag, key := range flagBindings {
 		loader.initErr = errors.Join(loader.initErr, v.BindPFlag(key, flags.Lookup(flag)))
@@ -54,4 +59,6 @@ var flagBindings = map[string]string{
 	"session-idle-timeout":    "session.idle_timeout", "session-lifetime": "session.lifetime",
 	"kek-file": "kek_file", "work-root": "work_root", "xtrabackup-path": "xtrabackup_path",
 	"min-work-bytes": "min_work_bytes", "min-backup-bytes": "min_backup_bytes",
+	"export-root": "export_root", "xbstream-path": "xbstream_path", "mysqld-path": "mysqld_path",
+	"restore-expansion-factor": "restore_expansion_factor", "restore-use-memory": "restore_use_memory",
 }

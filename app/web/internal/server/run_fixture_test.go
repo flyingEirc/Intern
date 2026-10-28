@@ -57,7 +57,7 @@ func newRunHarness(t *testing.T, opts ...EngineOption) *runHarness {
 	}
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: settings}, dispatcher, opts...)
+		&resources.Service{Store: f.database, Settings: settings}, dispatcher, append(opts, WithRestores(dispatcher))...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func newUnconfiguredRunHarness(t *testing.T) *runHarness {
 	}
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: resources.Settings{}}, dispatcher)
+		&resources.Service{Store: f.database, Settings: resources.Settings{}}, dispatcher, WithRestores(dispatcher))
 	if err != nil {
 		t.Fatal(err)
 	}

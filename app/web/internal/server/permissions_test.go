@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/flyingEirc/Intern/app/web/internal/dispatch"
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
@@ -37,6 +39,16 @@ const (
 		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","max_chain_length":3,` +
 		`"parallel":2,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`
 	bodyRunTrigger = `{"kind":"full"}`
+	// W5 restore bodies. The runtime is unconfigured, so an allowed plan or
+	// execute answers 503 before any engine work; the fixed digest is a valid
+	// 64-hex value so validation passes and the permission decision is what
+	// the status measures.
+	bodyRestorePlan = `{"backup_id":"00000000-0000-7000-8000-000000000000"}`
+	// The password is the administrator's real login password: the fixture
+	// runtime is unconfigured, so the allowed execute answers 503 only after
+	// the confirmation succeeds.
+	bodyRestoreExecute = `{"backup_id":"00000000-0000-7000-8000-000000000000","plan_digest":"` + restoreDigest + `","password":"` + testPassword + `","rehearse":false}`
+	restoreDigest      = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 // Every registered route must appear explicitly. Adding a route without deciding
@@ -96,6 +108,16 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 		"GET /api/v1/sources/:id/protection":                     {"", 200, 200, 200, 401},
 		"GET /api/v1/replicas":                                   {"", 200, 200, 200, 401},
 		"POST /api/v1/backups/:id/replicas/:repository_id/retry": {"", 404, 404, 403, 401},
+
+		// W5: viewers read restores, operators plan, and only admin executes or
+		// cancels. The fixture runtime is unconfigured, so plan and execute
+		// answer 503 for the roles allowed to call them.
+		"POST /api/v1/restores/plan":       {bodyRestorePlan, 503, 503, 403, 401},
+		"GET /api/v1/restores":             {"", 200, 200, 200, 401},
+		"POST /api/v1/restores":            {bodyRestoreExecute, 503, 403, 403, 401},
+		"GET /api/v1/restores/:id":         {"", 200, 200, 200, 401},
+		"GET /api/v1/restores/:id/logs":    {"", 200, 200, 200, 401},
+		"POST /api/v1/restores/:id/cancel": {"", 202, 403, 403, 401},
 	}
 	// Routes that require the Idempotency-Key header get one here, so the
 	// request body is validated rather than rejected for a missing parameter.
@@ -166,6 +188,9 @@ func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target
 	if strings.HasPrefix(path, "/api/v1/runs") {
 		seeded.runID = f.createRunRow(t, seeded.policyID, seeded.freeSource)
 	}
+	if strings.HasPrefix(path, "/api/v1/restores/") && strings.Contains(path, ":id") {
+		seeded.restoreID = f.createRestoreRow(t, target.ID)
+	}
 	if path == "/api/v1/policies/:id/runs" {
 		// Enable directly: this fixture cannot run the preflight the API path
 		// requires, and an enabled policy is what reaches the runtime check.
@@ -229,7 +254,7 @@ func newAuthFixtureWithRuns(t *testing.T) *authFixture {
 	}
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
-		&resources.Service{Store: f.database, Settings: settings}, dispatcher)
+		&resources.Service{Store: f.database, Settings: settings}, dispatcher, WithRestores(dispatcher))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,62 +271,92 @@ func (f *authFixture) seedHashed(t *testing.T, username, role, hash string) stor
 	return user
 }
 
+// resetResources deletes every resource row the previous case left. The whole
+// sweep runs in one write transaction: the backup worker may claim a queued run
+// at any instant, and a run_log it inserts must never land between the child
+// delete and its parent delete, because that is a FOREIGN KEY constraint failure
+// on the sweep rather than anything the case tested.
 func (f *authFixture) resetResources(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
+	tx, err := f.database.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, stmt := range []string{
+		`DELETE FROM restore_logs`,
+		`DELETE FROM restores`,
 		`DELETE FROM run_logs`,
 		`DELETE FROM runs`,
 		`DELETE FROM policies`,
 		`DELETE FROM sources`,
 		`DELETE FROM repositories`,
 	} {
-		if _, err := f.database.DB().ExecContext(ctx, stmt); err != nil {
+		if _, err = tx.ExecContext(ctx, stmt); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }
 
-// drainRuns stops queued runs and waits out a running one, so every matrix
-// case starts with no dispatcher activity from the previous case.
+// drainRuns cancels queued work and waits out anything the dispatcher is
+// executing, so every matrix case starts with no dispatcher activity from the
+// previous case. It only returns once one full pass found nothing running and
+// nothing left to cancel.
 func (f *authFixture) drainRuns(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
-	deadline := time.Now().Add(5 * time.Second)
-	for f.drainOnce(t, ctx) {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		busy, pending := f.drainOnce(t, ctx)
+		if !busy && !pending {
+			return
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("runs still running")
+			t.Fatalf("the dispatcher never quiesced: busy=%t work still queued", busy)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// drainOnce cancels every queued row and reports whether a run is still
-// running, so the next pass waits for the dispatcher to finish it.
-func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) bool {
+// drainOnce cancels every queued row and reports whether the dispatcher is
+// executing something. A queued row whose cancel changed nothing was claimed
+// between the read and the cancel: that run is now executing, so the pass must
+// report it busy and wait, instead of declaring the queue quiet and having the
+// next sweep delete a run the worker is still logging.
+func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) (busy, pending bool) {
 	t.Helper()
 	runs, err := f.database.Runs(ctx, store.RunsFilter{Limit: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
-	busy := false
 	for _, run := range runs {
 		switch run.Status {
 		case store.RunStatusQueued:
-			f.cancelQueued(t, ctx, run.ID)
+			if !f.cancelQueued(t, ctx, run.ID) {
+				busy = true
+			}
+			pending = true
 		case store.RunStatusRunning:
 			busy = true
 		}
 	}
-	return busy
+	return busy, pending
 }
 
-func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) {
+// cancelQueued cancels one queued run and reports whether the row was still
+// cancellable; false means the claim won the race.
+func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) bool {
 	t.Helper()
-	if _, err := f.database.CancelQueuedRun(ctx, runID,
-		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil); err != nil {
+	changed, err := f.database.CancelQueuedRun(ctx, runID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return changed
 }
 
 func (f *authFixture) restoreTarget(t *testing.T, target store.User, hash string) {
@@ -337,6 +392,7 @@ type seededResources struct {
 	policySource     string
 	policyRepository string
 	runID            string
+	restoreID        string
 }
 
 func (f *authFixture) seedResources(t *testing.T) seededResources {
@@ -376,6 +432,32 @@ func (f *authFixture) createRunRow(t *testing.T, policyID, sourceID string) stri
 		t.Fatal(err)
 	}
 	return run.ID
+}
+
+// createRestoreRow inserts one queued restore for the matrix's restore-route
+// cases. The row carries a cancel request, so the running dispatcher's restore
+// worker never claims it (its claim skips requested cancellations) and the row
+// stays queued: the detail, log and cancel cases then always reach the handler
+// instead of racing a worker that would fail an unconfigured execution.
+func (f *authFixture) createRestoreRow(t *testing.T, userID string) string {
+	t.Helper()
+	id := strings.ReplaceAll(uuid.NewString(), "-", "")
+	backupID := uuid.Must(uuid.NewV7()).String()
+	plan := store.RestorePlan{
+		BackupID: backupID, ChainID: uuid.Must(uuid.NewV7()).String(), SourceID: uuid.Must(uuid.NewV7()).String(),
+		ToolVersion: "8.4.0-7", Links: []store.RestorePlanLink{}, Risks: []string{}, Digest: restoreDigest,
+	}
+	if _, err := f.database.CreateRestore(t.Context(), store.RestoreInput{
+		ID: id, BackupID: backupID, Plan: plan, PlanDigest: plan.Digest, RequestedBy: userID,
+		Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.database.DB().ExecContext(t.Context(),
+		`UPDATE restores SET cancel_requested = 1 WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func (f *authFixture) createRepositoryRow(t *testing.T, ctx context.Context, name, root string, sealed store.SecretSealer) string {
@@ -434,6 +516,8 @@ func (r seededResources) targetID(path, userID string) string {
 		return r.policyID
 	case strings.HasPrefix(path, "/api/v1/runs"):
 		return r.runID
+	case strings.HasPrefix(path, "/api/v1/restores"):
+		return r.restoreID
 	default:
 		return userID
 	}

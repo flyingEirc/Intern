@@ -1,0 +1,547 @@
+package restore
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/flyingEirc/Intern/internal/fsutil"
+	"github.com/flyingEirc/Intern/internal/physical"
+)
+
+var restoreIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// Execute re-plans the restore point, refuses when the request does not match
+// that fresh plan, and only then touches the filesystem. Any failure before the
+// export is published removes exactly this restore's work directory and pending
+// export. A rehearsal failure after publication is reported in Result.Verify and
+// does not remove the export.
+func Execute(ctx context.Context, opts Options, req Request, progress Progress) (Result, error) {
+	if err := validateRequest(opts, req); err != nil {
+		return Result{}, err
+	}
+	fresh, err := BuildPlan(ctx, opts, req.Plan.TargetBackupID)
+	if err != nil {
+		return Result{}, err
+	}
+	if fresh.Digest != req.Plan.Digest {
+		return Result{}, planRefusal(CodePlanChanged, req.Plan.TargetBackupID)
+	}
+	execution := &execution{
+		opts: opts, plan: fresh, req: req, progress: progress,
+		work:    filepath.Join(opts.WorkRoot, "restore-"+req.RestoreID),
+		pending: filepath.Join(opts.ExportRoot, ".pending-"+req.RestoreID),
+		export:  filepath.Join(opts.ExportRoot, req.RestoreID),
+	}
+	return execution.run(ctx)
+}
+
+func validateRequest(opts Options, req Request) error {
+	if !restoreIDPattern.MatchString(req.RestoreID) || req.Plan.TargetBackupID == "" {
+		return execFailure(CodeInvalidRequest, PhaseFetching, SideEffects{}, errors.New("restore: invalid restore id or target"))
+	}
+	if req.Rehearse && opts.MysqldPath == "" {
+		return execFailure(CodeRehearsalUnavailable, PhaseRehearsing, SideEffects{}, errors.New("restore: rehearsal requires a mysqld binary"))
+	}
+	if req.Rehearse && os.Geteuid() == 0 {
+		return execFailure(CodeRehearsalUnavailable, PhaseRehearsing, SideEffects{}, physical.ErrRehearsalRoot)
+	}
+	if err := ValidateVerifySQL(req.VerifySQL); err != nil {
+		return execFailure(CodeInvalidVerifySQL, PhaseRehearsing, SideEffects{}, err)
+	}
+	return nil
+}
+
+type stageError struct {
+	code string
+	err  error
+}
+
+func (e *stageError) Error() string { return e.err.Error() }
+func (e *stageError) Unwrap() error { return e.err }
+
+func stage(code string, err error) error { return &stageError{code: code, err: err} }
+
+type execution struct {
+	opts     Options
+	plan     Plan
+	req      Request
+	progress Progress
+
+	work    string
+	pending string
+	export  string
+
+	phase       Phase
+	side        SideEffects
+	result      Result
+	prepareArgs [][]string
+	exportBytes int64
+
+	// rehearsalReady shortens the readiness bound for tests only. Production leaves
+	// it zero and uses the frozen rehearsalReadyTimeout.
+	rehearsalReady time.Duration
+}
+
+func (e *execution) run(ctx context.Context) (Result, error) {
+	if err := e.createRoots(); err != nil {
+		return Result{}, execFailure(e.failureCode(ctx, CodeWorkFailed, err), PhaseFetching, e.side, err)
+	}
+	for _, step := range []struct {
+		code string
+		fn   func(context.Context) error
+	}{
+		{"", e.fetchAndAuthenticate},
+		{"", e.extractAll},
+		{"", e.prepareChain},
+		{CodePrepareFailed, func(context.Context) error { return e.renamePrepared() }},
+		{"", e.publish},
+	} {
+		if err := step.fn(ctx); err != nil {
+			return e.abort(ctx, step.code, err)
+		}
+	}
+	return e.succeed(ctx)
+}
+
+func (e *execution) succeed(ctx context.Context) (Result, error) {
+	// The pending path no longer exists once publish renamed it, so both the
+	// publication and the absence of a pending entry are reported here.
+	e.side.ExportPublished = true
+	e.side.PendingExportRemoved = true
+	e.result = Result{
+		ExportPath: e.export, ExportBytes: e.exportBytes,
+		PreparedToLSN: e.plan.TargetToLSN, PrepareArgs: e.prepareArgs,
+	}
+	// rehearse() enters the rehearsing phase itself, and only when a rehearsal was
+	// requested: a restore without one ends at exporting.
+	e.result.Verify = e.rehearse(ctx)
+	e.cleanupWork()
+	return e.result, nil
+}
+
+func (e *execution) enter(phase Phase) {
+	e.phase = phase
+	if e.progress != nil {
+		e.progress(phase, map[string]any{"phase": string(phase)})
+	}
+}
+
+func (e *execution) report(phase Phase, data map[string]any) {
+	if e.progress != nil {
+		e.progress(phase, data)
+	}
+}
+
+func (e *execution) createRoots() error {
+	if err := validatePrivateWorkRoot(e.opts.WorkRoot); err != nil {
+		return err
+	}
+	if err := CheckExportRoot(e.opts.ExportRoot, append([]string{e.opts.WorkRoot}, e.opts.RestrictedRoots...)...); err != nil {
+		return err
+	}
+	if err := validateKeyOutsideExport(e.opts.KeyFile, e.opts.ExportRoot); err != nil {
+		return err
+	}
+	for _, path := range []string{e.work, e.pending, e.export} {
+		if _, err := os.Lstat(path); err == nil {
+			return errors.New("restore: a restore-owned path already exists")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("restore: cannot inspect restore-owned paths")
+		}
+	}
+	if err := os.Mkdir(e.work, 0o700); err != nil {
+		return errors.New("restore: cannot create the private work directory")
+	}
+	return nil
+}
+
+// failureCode prefers cancellation and real ENOSPC over the stage code, so a
+// canceled or out-of-space run is never reported as a generic stage failure.
+func (e *execution) failureCode(ctx context.Context, code string, err error) string {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return CodeCanceled
+	}
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return CodeDiskFull
+	}
+	var staged *stageError
+	if errors.As(err, &staged) {
+		return staged.code
+	}
+	if code != "" {
+		return code
+	}
+	return CodeWorkFailed
+}
+
+// toolFailure classifies a failed extract or prepare step. A tool writes the
+// bytes itself, so a work filesystem that filled up under it surfaces only as a
+// nonzero exit and the parent never sees the errno: the observation of the same
+// filesystem at that moment is what names the cause disk_full, so a run that
+// really ran out of space is never reported as extract_failed or prepare_failed.
+func (e *execution) toolFailure(code string, err error) error {
+	return stage(toolFailureCode(err, e.workRootExhausted(), code), err)
+}
+
+// toolFailureCode returns the fixed code of a failed tool step: disk_full when
+// this process or the tool ran the work filesystem dry, and the caller's own
+// stage code for every other tool failure.
+func toolFailureCode(err error, exhausted bool, code string) string {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || exhausted {
+		return CodeDiskFull
+	}
+	return code
+}
+
+// workRootExhausted reports whether this restore's work filesystem can no longer
+// take a write.
+func (e *execution) workRootExhausted() bool {
+	space, err := physical.QuerySpace(e.work)
+	return err == nil && spaceExhausted(space)
+}
+
+// spaceExhausted reports whether one capacity observation leaves no room for a
+// write. A filesystem charges every write in whole blocks of the size it reports
+// itself, so less than one of those blocks free is already ENOSPC for the tool,
+// whether that block is 512 bytes or 128 KiB. The threshold is therefore the
+// filesystem's own number and never a guessed page size; an observation that
+// reports no block size falls back to "nothing at all left", which is still true.
+func spaceExhausted(space physical.Space) bool {
+	return space.AvailableBytes < max(space.BlockBytes, 1)
+}
+
+func (e *execution) abort(ctx context.Context, code string, cause error) (Result, error) {
+	cleanupErr := e.cleanupFailure()
+	if cleanupErr != nil {
+		code = CodeCleanupFailed
+	}
+	return Result{}, execFailure(e.failureCode(ctx, code, cause), e.phase, e.side, errors.Join(cause, cleanupErr))
+}
+
+// cleanupFailure removes exactly this restore's work directory and pending
+// export. It never scans a prefix and never touches a published export.
+func (e *execution) cleanupFailure() error {
+	workErr := removeExactDirectory(e.work, e.opts.WorkRoot)
+	e.side.WorkDirRemoved = workErr == nil
+	pendingErr := removeExactDirectory(e.pending, e.opts.ExportRoot)
+	e.side.PendingExportRemoved = pendingErr == nil
+	return errors.Join(workErr, pendingErr)
+}
+
+func (e *execution) cleanupWork() {
+	if err := removeExactDirectory(e.work, e.opts.WorkRoot); err != nil {
+		return
+	}
+	e.side.WorkDirRemoved = true
+}
+
+// removeExactDirectory removes one restore-owned directory entry by exact name
+// and syncs its parent. The inspection and the removal both run against the
+// pinned parent directory descriptor with no-follow semantics, so an entry that
+// is replaced by a symlink between them cannot redirect this call to a tree
+// outside the parent: os.Root refuses to traverse outside it and never follows
+// the link itself. An absent entry is still synced so a retried recovery is
+// durable.
+func removeExactDirectory(path, parent string) (retErr error) {
+	name, err := restoreEntryName(path, parent)
+	if err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, root.Close()) }()
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return syncRoot(root)
+	}
+	if err != nil {
+		return err
+	}
+	if !ownedDirectory(info) {
+		return errors.New("restore: refusing to remove a non-directory restore target")
+	}
+	if err = root.RemoveAll(name); err != nil {
+		return err
+	}
+	return syncRoot(root)
+}
+
+// restoreEntryName returns the entry name of a path that is a direct child of
+// parent, refusing anything else.
+func restoreEntryName(path, parent string) (string, error) {
+	name := filepath.Base(path)
+	if filepath.Dir(path) != parent || name == "." || name == ".." || name == string(filepath.Separator) {
+		return "", errors.New("restore: refusing to remove a target outside its own root")
+	}
+	return name, nil
+}
+
+// ownedDirectory reports a real directory, never a symlink.
+func ownedDirectory(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+// syncRoot durably records the entries of an already pinned directory.
+func syncRoot(root *os.Root) (retErr error) {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, dir)
+	return dir.Sync()
+}
+
+func syncDirectory(path string) (retErr error) {
+	dir, err := os.Open(path) // #nosec G304 -- path is a validated private restore or export root.
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, dir)
+	return dir.Sync()
+}
+
+func (e *execution) fetchAndAuthenticate(ctx context.Context) error {
+	for _, link := range e.plan.Links {
+		dir := filepath.Join(e.work, "fetch", strconv.Itoa(link.Seq))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return stage(CodeFetchFailed, err)
+		}
+		if err := e.fetchLink(ctx, link, dir); err != nil {
+			return err
+		}
+		if err := e.authenticateLink(ctx, link, dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *execution) fetchLink(ctx context.Context, link PlanLink, dir string) error {
+	e.phase = PhaseFetching
+	e.report(PhaseFetching, map[string]any{"backup_id": link.BackupID, "seq": link.Seq, "source": link.Source})
+	var err error
+	switch link.Source {
+	case "local":
+		err = e.copyLocal(ctx, link, dir)
+	case "ftp":
+		err = e.download(ctx, link, dir)
+	default:
+		err = errors.New("restore: plan link has no source")
+	}
+	if err != nil {
+		return stage(CodeFetchFailed, err)
+	}
+	return nil
+}
+
+func (e *execution) authenticateLink(ctx context.Context, link PlanLink, dir string) error {
+	e.phase = PhaseAuthenticating
+	e.report(PhaseAuthenticating, map[string]any{"backup_id": link.BackupID, "seq": link.Seq})
+	if err := e.authenticate(ctx, link, dir); err != nil {
+		return stage(CodeAuthenticationFailed, err)
+	}
+	return nil
+}
+
+func (e *execution) copyLocal(ctx context.Context, link PlanLink, dir string) error {
+	repository, err := e.opts.Locator.Local(ctx, link.BackupID)
+	if err != nil {
+		return err
+	}
+	if repository == nil {
+		return errors.New("restore: the local repository is no longer available")
+	}
+	for _, member := range memberOrder {
+		reader, err := repository.Open(link.objectPath + "/" + member)
+		if err != nil {
+			return errors.New("restore: a local member disappeared")
+		}
+		copyErr := writeFetched(filepath.Join(dir, member), reader)
+		closeErr := reader.Close()
+		if err = errors.Join(copyErr, closeErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeFetched(path string, reader io.Reader) (retErr error) {
+	file, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, file)
+	if _, err = io.Copy(file, reader); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func (e *execution) download(ctx context.Context, link PlanLink, dir string) (retErr error) {
+	ref, err := e.findReplica(ctx, link)
+	if err != nil {
+		return err
+	}
+	remote, err := openReplica(ctx, e.opts, ref)
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, remote)
+	record, err := e.opts.Replication.Replica(ctx, link.BackupID, ref.RepositoryID)
+	if err != nil {
+		return errors.New("restore: the verified replica row disappeared")
+	}
+	if record.Status != "verified" {
+		return errors.New("restore: the replica is no longer verified")
+	}
+	for _, member := range memberOrder {
+		recorded, ok := record.ReplicaMemberByName(member)
+		if !ok || recorded.Size <= 0 {
+			return errors.New("restore: a replica member is not recorded")
+		}
+		if err = e.downloadMember(ctx, remote, link, member, filepath.Join(dir, member), recorded.Size); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *execution) findReplica(ctx context.Context, link PlanLink) (ReplicaRef, error) {
+	refs, err := e.opts.Locator.Replicas(ctx, link.BackupID)
+	if err != nil {
+		return ReplicaRef{}, err
+	}
+	for _, ref := range refs {
+		if ref.RepositoryID == link.RepositoryID {
+			return ref, nil
+		}
+	}
+	return ReplicaRef{}, errors.New("restore: the planned replica is no longer available")
+}
+
+const maxFetchAttempts = 5
+
+// downloadMember resumes one immutable ciphertext at its current offset. Every
+// attempt opens a new session and asks the server for that byte offset; a short
+// read is never success, and the artifact authentication is still required.
+func (e *execution) downloadMember(ctx context.Context, remote remoteReader, link PlanLink, member, path string, expected int64) (retErr error) {
+	file, err := fsutil.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer fsutil.Close(&retErr, file)
+	key := link.objectPath + "/" + member
+	var offset int64
+	for attempt := 1; attempt <= maxFetchAttempts; attempt++ {
+		written, attemptErr := e.fetchAttempt(ctx, remote, file, key, attempt, offset, expected)
+		offset += written
+		if offset > expected {
+			return errors.New("restore: fetched member exceeds its recorded size")
+		}
+		if attemptErr == nil && offset == expected {
+			return file.Sync()
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		e.report(PhaseFetching, map[string]any{"backup_id": link.BackupID, "member": member, "attempt": attempt})
+	}
+	return errors.New("restore: a replica member did not download completely")
+}
+
+// fetchAttempt copies one bounded attempt into the open file and reports how many
+// bytes it added. A nil error means the attempt consumed to the recorded size.
+func (e *execution) fetchAttempt(ctx context.Context, remote remoteReader, file *os.File, key string, attempt int, offset, expected int64) (int64, error) {
+	reader, err := remote.Open(ctx, key, offset)
+	if err != nil {
+		return 0, err
+	}
+	source, injected := e.faultedSource(attempt, key, offset, reader)
+	written, copyErr := io.Copy(file, io.LimitReader(source, expected-offset+1))
+	closeErr := reader.Close()
+	err = errors.Join(copyErr, closeErr, injected)
+	if err == nil && offset+written != expected {
+		return written, errors.New("restore: the replica sent fewer bytes than recorded")
+	}
+	return written, err
+}
+
+func (e *execution) faultedSource(attempt int, key string, offset int64, reader io.Reader) (io.Reader, error) {
+	if e.opts.fetchFault == nil {
+		return reader, nil
+	}
+	after, faultErr := e.opts.fetchFault(attempt, key, offset)
+	if faultErr == nil || after <= 0 {
+		return reader, nil
+	}
+	return io.LimitReader(reader, after), faultErr
+}
+
+func (e *execution) extractAll(ctx context.Context) error {
+	for index, link := range e.plan.Links {
+		dir := filepath.Join(e.work, strconv.Itoa(index))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			return stage(CodeExtractFailed, err)
+		}
+		e.phase = PhaseExtracting
+		e.report(PhaseExtracting, map[string]any{"backup_id": link.BackupID, "seq": link.Seq})
+		if err := e.extract(ctx, link, dir); err != nil {
+			return e.toolFailure(CodeExtractFailed, err)
+		}
+		if err := os.RemoveAll(filepath.Join(e.work, "fetch", strconv.Itoa(link.Seq))); err != nil {
+			return stage(CodeExtractFailed, err)
+		}
+	}
+	return nil
+}
+
+func (e *execution) extract(ctx context.Context, link PlanLink, dir string) error {
+	fetched := filepath.Join(e.work, "fetch", strconv.Itoa(link.Seq))
+	reader, writer := io.Pipe()
+	authErr := make(chan error, 1)
+	go func() {
+		_, err := artifactRead(ctx, e.opts, fetched, writer, e.expandLimit(), true)
+		authErr <- errors.Join(err, writer.CloseWithError(err))
+	}()
+	extractErr := physical.ExtractInto(ctx, physical.ExtractIntoOptions{
+		Binary: e.opts.XbstreamPath, Directory: dir, Parallel: e.opts.Parallel,
+	}, reader)
+	var closeErr error
+	if extractErr != nil {
+		closeErr = reader.CloseWithError(extractErr)
+	} else {
+		closeErr = reader.Close()
+	}
+	if err := <-authErr; err != nil || closeErr != nil {
+		return errors.Join(err, closeErr)
+	}
+	return extractErr
+}
+
+// expandLimit bounds how many plaintext bytes one authenticated artifact may
+// decode into. The ciphertext is verified to EOF before a single byte is
+// decoded, so this is a resource guard, not a trust boundary, and it must never
+// refuse a real backup: a MySQL datadir compresses by an order of magnitude, so
+// a bound derived from the recorded ciphertext size is meaningless for the
+// expanded stream. Every decoded byte is destined for the private work root
+// (io.Discard during authentication, then xbstream during extraction), so the
+// honest ceiling is the free space this restore measured there when it planned
+// itself; a stream that would not fit there is refused instead of being written
+// and failing with ENOSPC half way through. The floor keeps the tiny tool
+// metadata artifact readable on a small or already full work root.
+func (e *execution) expandLimit() int64 {
+	const floor = int64(64 << 20)
+	if e.plan.AvailableWorkBytes > floor {
+		return e.plan.AvailableWorkBytes
+	}
+	return floor
+}

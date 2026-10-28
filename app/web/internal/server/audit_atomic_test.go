@@ -336,7 +336,8 @@ func setSuccessAuditAbort(t *testing.T, dir, action string) {
 	case "", "users.create", "users.update", "auth.password", "users.revoke_sessions", "auth.logout", "auth.login",
 		"repositories.create", "repositories.update", "repositories.delete",
 		"sources.create", "sources.update", "sources.delete", "sources.preflight",
-		"policies.create", "policies.update", "policies.delete", "policies.enable", "policies.disable":
+		"policies.create", "policies.update", "policies.delete", "policies.enable", "policies.disable",
+		"restores.execute":
 	default:
 		t.Fatalf("refusing audit trigger for %q", action)
 	}

@@ -66,7 +66,7 @@ const (
 )
 
 type layout struct {
-	root, metadata, kek, work, repository, local, tlsDir, cert, key string
+	root, metadata, kek, work, repository, local, tlsDir, cert, key, export string
 }
 
 type secrets struct {
@@ -152,6 +152,8 @@ func newFixture(t *testing.T) *fixture {
 	settings := resources.Settings{
 		Sealer: sealer, KeyFile: paths.kek, MetadataDir: paths.metadata, WorkRoot: paths.work,
 		XtrabackupPath: xtrabackupBin, MinWorkBytes: 1, MinBackupBytes: 1,
+		ExportRoot: paths.export, XbstreamPath: os.Getenv("INTERN_W5_XBSTREAM"),
+		MysqldPath: os.Getenv("INTERN_W5_MYSQLD"), RestoreExpansionFactor: 8,
 	}
 	svc := &resources.Service{Store: database, Settings: settings}
 	f := &fixture{
@@ -195,6 +197,15 @@ func newLayout(t *testing.T) layout {
 	paths.local = filepath.Join(paths.repository, "local")
 	paths.cert = filepath.Join(paths.tlsDir, "server.crt")
 	paths.key = filepath.Join(paths.tlsDir, "server.key")
+	// W5 restore inputs are opt-in: with no export root the deployment is
+	// unconfigured, the restore API answers 503 and every W4 behaviour stays
+	// unchanged. The harness supplies /export (a named volume it can also mount
+	// into a brand-new server); a local native run supplies any private
+	// directory that is not inside the work, metadata or repository roots.
+	paths.export = os.Getenv("INTERN_W5_EXPORT_ROOT")
+	if paths.export != "" {
+		must(t, os.MkdirAll(paths.export, 0o750))
+	}
 	for _, dir := range []string{paths.metadata, filepath.Dir(paths.kek), paths.work, paths.repository, paths.local, paths.tlsDir} {
 		must(t, os.Mkdir(dir, 0o700))
 	}
@@ -366,15 +377,28 @@ func (f *fixture) startEngine(t *testing.T, withDispatch bool) {
 	}
 	logger := slog.New(slog.NewJSONHandler(f.log, nil))
 	var dispatcher server.DispatcherControl
+	var engineOptions []server.EngineOption
 	if withDispatch {
+		// The production seam is built from the same settings the serve path
+		// uses, so an acceptance run with restore inputs exercises the real
+		// internal/restore engine; without them it stays nil and the API
+		// answers 503 like an unconfigured deployment.
+		var engine dispatch.RestoreEngine
+		if f.settings.Restore() {
+			built, buildErr := dispatch.NewRestoreEngine(f.database, f.settings, logger)
+			must(t, buildErr)
+			engine = built
+		}
 		started, err := dispatch.Start(context.Background(), dispatch.Config{
 			Database: f.database, Settings: f.settings, Logger: logger, Preflight: f.service,
+			Restore: engine,
 		})
 		must(t, err)
 		f.dispatcher = started
 		dispatcher = started
+		engineOptions = append(engineOptions, server.WithRestores(started))
 	}
-	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth, f.service, dispatcher)
+	engine, err := server.NewEngineWithResources(f.database, logger, nil, f.auth, f.service, dispatcher, engineOptions...)
 	must(t, err)
 	srv := httptest.NewUnstartedServer(server.Handler(engine))
 	srv.StartTLS()
@@ -458,6 +482,9 @@ func (f *fixture) decodeID(t *testing.T, raw []byte) string {
 func (f *fixture) trigger(t *testing.T, policyID, kind, key string, want int) []byte {
 	t.Helper()
 	body := fmt.Sprintf(`{"kind":%q}`, kind)
+	if key != "" {
+		w5RequireDeclaredHeader(t, http.MethodPost, "/api/v1/policies/{id}/runs", "Idempotency-Key")
+	}
 	return f.operator.requestWithKey(t, http.MethodPost, "/api/v1/policies/"+policyID+"/runs", body, key, want)
 }
 
@@ -488,6 +515,9 @@ func (f *fixture) listRuns(t *testing.T, query string) []store.Run {
 	t.Helper()
 	path := "/api/v1/runs"
 	if query != "" {
+		values, err := url.ParseQuery(query)
+		must(t, err)
+		w5RequireDeclaredQuery(t, http.MethodGet, path, values)
 		path += "?" + query
 	}
 	var page runsPage
@@ -756,6 +786,12 @@ func (f *fixture) startServeChild(t *testing.T) {
 		"INTERN_W4_KEK="+f.layout.kek,
 		"INTERN_W4_WORK_ROOT="+f.layout.work,
 		"INTERN_W4_XTRABACKUP="+xtrabackupBin,
+		// The child is the same deployment: it must resolve exactly the restore
+		// inputs the parent fixture computed, or it serves an unconfigured
+		// restore API while the parent thinks otherwise.
+		"INTERN_W5_EXPORT_ROOT="+f.layout.export,
+		"INTERN_W5_XBSTREAM="+f.settings.XbstreamPath,
+		"INTERN_W5_MYSQLD="+f.settings.MysqldPath,
 	)
 	command.Stdout = logFile
 	command.Stderr = logFile
@@ -1003,8 +1039,12 @@ const (
 	diagnosticLines       = 1200
 	diagnosticReplicaRows = 100
 	diagnosticRunRows     = 6
-	diagnosticRunLogLines = 50
-	diagnosticChildLines  = 200
+	// diagnosticRestoreRows and diagnosticRestoreLogRows bound the restore
+	// sections: every restore row plus the newest log rows of each one.
+	diagnosticRestoreRows    = 20
+	diagnosticRestoreLogRows = 200
+	diagnosticRunLogLines    = 50
+	diagnosticChildLines     = 200
 	// diagnosticChildBudget reserves room for the child log tails in the total
 	// dump budget, so the replica table and the run logs cannot crowd them out.
 	diagnosticChildBudget  = 4 * (diagnosticChildLines + 1)
@@ -1035,7 +1075,7 @@ func (f *fixture) dumpDiagnostics(t *testing.T) {
 	}
 	remaining := max(diagnosticLines-len(children)-2, 0)
 	lines := []string{fmt.Sprintf("W4 diagnostics: begin (bounded to %d lines)", diagnosticLines)}
-	for _, section := range [][]string{f.diagnosticReplicas(), f.diagnosticRuns()} {
+	for _, section := range [][]string{f.diagnosticReplicas(), f.diagnosticRuns(), f.diagnosticRestores(), f.diagnosticRestoreLogs()} {
 		if len(section) > remaining {
 			section = append(section[:remaining], "W4 diagnostics: further lines of this section omitted")
 		}
@@ -2062,3 +2102,157 @@ func ptrString(value *string) string {
 func errorClass(run store.Run) string { return ptrString(run.ErrorClass) }
 
 func errorCode(run store.Run) string { return ptrString(run.ErrorCode) }
+
+// diagnosticRestores prints every restore row with the fields a stuck or
+// mis-classified restore is diagnosed from: its status, its live phase, whether
+// it asked for a rehearsal, the verify status, the failure class and code, the
+// export size and the side-effect observation. Nothing on the row is a secret.
+func (f *fixture) diagnosticRestores() []string {
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore rows unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT id, backup_id, status, COALESCE(phase, ''), rehearse, verify_status,
+COALESCE(error_class, ''), COALESCE(error_code, ''), COALESCE(export_bytes, -1),
+COALESCE(side_effects_json, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
+FROM restores ORDER BY created_at, id LIMIT ?`, diagnosticRestoreRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore rows unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: restore rows"}
+	for rows.Next() {
+		var id, backup, status, phase, verify, class, code, effects, created, started, finished string
+		var rehearse, exportBytes int64
+		if err = rows.Scan(&id, &backup, &status, &phase, &rehearse, &verify, &class, &code,
+			&exportBytes, &effects, &created, &started, &finished); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: restore row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf(
+			"W4 diagnostics: restore %s backup=%s status=%s phase=%q rehearse=%t verify_status=%s error_class=%q error_code=%q export_bytes=%d side_effects=%s created_at=%s started_at=%q finished_at=%q",
+			id, backup, status, phase, rehearse != 0, verify, class, code, exportBytes, effects, created, started, finished))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore rows unreadable: %v", err))
+	}
+	return out
+}
+
+// diagnosticRestoreLogs prints the newest restore log rows. The engine's own
+// phase record lives only there once a restore is terminal, so a phase
+// assertion is diagnosed from these lines.
+func (f *fixture) diagnosticRestoreLogs() []string {
+	db, err := f.analysisView()
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore logs unavailable: %v", err)}
+	}
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT restore_id, seq, ts, level, message FROM restore_logs
+ORDER BY ts DESC, seq DESC LIMIT ?`, diagnosticRestoreLogRows)
+	if err != nil {
+		return []string{fmt.Sprintf("W4 diagnostics: restore logs unavailable: %v", err)}
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{"W4 diagnostics: restore logs (newest first)"}
+	for rows.Next() {
+		var restoreID, ts, level, message string
+		var seq int64
+		if err = rows.Scan(&restoreID, &seq, &ts, &level, &message); err != nil {
+			return append(out, fmt.Sprintf("W4 diagnostics: restore log row unreadable: %v", err))
+		}
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore_log %s seq=%d ts=%s level=%s message=%q",
+			restoreID, seq, ts, level, message))
+	}
+	if err = rows.Err(); err != nil {
+		out = append(out, fmt.Sprintf("W4 diagnostics: restore logs unreadable: %v", err))
+	}
+	return out
+}
+
+// restorePrepare is one matched `xtrabackup --prepare` of a restore.
+type restorePrepare struct {
+	pid int
+	// target is the matched --target-dir: it proves the process belongs to this
+	// restore's own work directory.
+	target string
+}
+
+// alive reports whether the matched prepare is still running the same argv.
+func (p restorePrepare) alive() bool {
+	argv, ok := processArgv(p.pid)
+	return ok && hasArgument(argv, "--prepare")
+}
+
+// waitRestorePrepare waits for the live prepare tool of one restore. The engine
+// reports the preparing phase before it starts the tool, but a single prepare
+// step is short, so the phase poll alone can miss it; the process is the proof
+// that the stage is really open at the instant the fault is injected.
+func (f *fixture) waitRestorePrepare(t *testing.T, restoreID string) restorePrepare {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		// The row is queued until the worker's one-second poll claims it, so only a
+		// terminal status means the prepare window can never open.
+		switch restore := f.w5Get(t, restoreID); restore.Status {
+		case store.RestoreStatusQueued, store.RestoreStatusRunning:
+		default:
+			t.Fatalf("restore %s ended as %s before a prepare process was observed", restoreID, restore.Status)
+		}
+		if prepare, ok := f.xtrabackupPrepare(restoreID); ok {
+			return prepare
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("no live xtrabackup --prepare process appeared while the restore was live")
+	return restorePrepare{}
+}
+
+// requirePrepareAlive rechecks the matched prepare immediately before the fault,
+// so a marker can only claim injection during a prepare that was still running.
+func requirePrepareAlive(t *testing.T, prepare restorePrepare) {
+	t.Helper()
+	if !prepare.alive() {
+		t.Fatalf("the matched prepare %d exited before the fault was injected; the injection would not be during a prepare", prepare.pid)
+	}
+}
+
+// xtrabackupPrepare finds the live prepare process whose --target-dir is inside
+// this restore's own work directory.
+func (f *fixture) xtrabackupPrepare(restoreID string) (restorePrepare, bool) {
+	want, err := filepath.EvalSymlinks(xtrabackupBin)
+	if err != nil {
+		return restorePrepare{}, false
+	}
+	roots := f.processRoots()
+	marker := "restore-" + restoreID
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return restorePrepare{}, false
+	}
+	for _, entry := range entries {
+		pid, ok := procPID(entry.Name())
+		if !ok || !executableIs(pid, want) || !descendsFrom(pid, roots) {
+			continue
+		}
+		if prepare, matched := prepareOfProcess(pid, marker); matched {
+			return prepare, true
+		}
+	}
+	return restorePrepare{}, false
+}
+
+// prepareOfProcess reports whether one process is a live prepare of the restore
+// whose work directory contains marker.
+func prepareOfProcess(pid int, marker string) (restorePrepare, bool) {
+	argv, ok := processArgv(pid)
+	if !ok || !hasArgument(argv, "--prepare") {
+		return restorePrepare{}, false
+	}
+	for _, arg := range argv {
+		if strings.HasPrefix(arg, "--target-dir=") && strings.Contains(arg, marker) {
+			return restorePrepare{pid: pid, target: strings.TrimPrefix(arg, "--target-dir=")}, true
+		}
+	}
+	return restorePrepare{}, false
+}

@@ -63,6 +63,41 @@ type Repository struct {
 	UpdatedAt        string
 }
 
+type Restore struct {
+	ID               string
+	BackupID         string
+	Status           string
+	Phase            sql.NullString
+	PlanJson         string
+	PlanDigest       string
+	Rehearse         int64
+	VerifySqlJson    sql.NullString
+	IdempotencyKey   sql.NullString
+	RequestHash      sql.NullString
+	RequestedBy      string
+	WorkDir          sql.NullString
+	ExportPath       sql.NullString
+	ExportBytes      sql.NullInt64
+	CreatedAt        string
+	StartedAt        sql.NullString
+	FinishedAt       sql.NullString
+	CancelRequested  int64
+	ErrorClass       sql.NullString
+	ErrorCode        sql.NullString
+	SideEffectsJson  sql.NullString
+	VerifyStatus     string
+	VerifyResultJson sql.NullString
+}
+
+type RestoreLog struct {
+	RestoreID string
+	Seq       int64
+	Ts        string
+	Level     string
+	Message   string
+	Data      sql.NullString
+}
+
 type Run struct {
 	ID                  string
 	PolicyID            string

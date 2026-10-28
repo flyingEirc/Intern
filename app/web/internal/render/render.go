@@ -28,13 +28,26 @@ const (
 	Conflict             = "conflict"
 	ValidationFailed     = "validation_failed"
 	PreflightFailed      = "preflight_failed"
+	// W5 restore codes. restore_refused carries the restore engine's fixed
+	// machine code in error.detail.code; plan_changed is a digest mismatch;
+	// confirmation_failed is a failed password re-entry.
+	RestoreRefused     = "restore_refused"
+	PlanChanged        = "plan_changed"
+	ConfirmationFailed = "confirmation_failed"
 )
 
+// ErrorRefusal is the machine-readable cause of a refused operation. It is
+// rendered as error.detail and never carries free-form engine text.
+type ErrorRefusal struct {
+	Code string `json:"code"`
+}
+
 type ErrorDetail struct {
-	Code      string     `json:"code"`
-	Message   string     `json:"message"`
-	RequestID string     `json:"request_id"`
-	Preflight *Preflight `json:"preflight,omitempty"`
+	Code      string        `json:"code"`
+	Message   string        `json:"message"`
+	RequestID string        `json:"request_id"`
+	Preflight *Preflight    `json:"preflight,omitempty"`
+	Detail    *ErrorRefusal `json:"detail,omitempty"`
 }
 
 // Preflight is the structured, secret-safe outcome of one preflight run. It is
@@ -82,6 +95,11 @@ func Error(c *gin.Context, status int, code, message string) {
 // ErrorPreflight renders a preflight_failed error with its structured outcome.
 func ErrorPreflight(c *gin.Context, status int, message string, preflight Preflight) {
 	errorWith(c, status, ErrorDetail{Code: PreflightFailed, Message: message, Preflight: &preflight})
+}
+
+// ErrorRefused renders a refusal with its machine-readable detail code.
+func ErrorRefused(c *gin.Context, status int, code, message, refusal string) {
+	errorWith(c, status, ErrorDetail{Code: code, Message: message, Detail: &ErrorRefusal{Code: refusal}})
 }
 
 func errorWith(c *gin.Context, status int, detail ErrorDetail) {

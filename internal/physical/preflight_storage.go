@@ -72,9 +72,14 @@ func probeStorageWrite(ctx context.Context, root string) (retErr error) {
 	return nil
 }
 
+// volumeSpace is one capacity observation. Available is the bytes an
+// unprivileged write may still use, Device identifies the filesystem, and Block
+// is the block size the filesystem charges every write in, so a caller can tell
+// "less than one block left" from "plenty of space".
 type volumeSpace struct {
 	Available uint64
 	Device    uint64
+	Block     uint64
 }
 
 func admitVolumeSpace(work, backup volumeSpace, minWork, minBackup uint64) error {
