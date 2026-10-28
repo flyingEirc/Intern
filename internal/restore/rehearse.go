@@ -103,14 +103,38 @@ func (e *execution) rehearse(ctx context.Context) *VerifyResult {
 	e.report(PhaseRehearsing, map[string]any{"step": "started", "pid": process.PID()})
 	db, err := e.openRehearsal(ctx, process)
 	if err != nil {
-		result.FailureCode = "not_ready"
-		if killErr := e.killRehearsal(process); killErr != nil {
-			result.FailureCode = "shutdown_failed"
-		}
+		// A server that already exited during startup is not_ready whatever its
+		// teardown then reports: killing and reaping an exited process is the
+		// teardown of a server that never ran, not a shutdown failure.
+		result.FailureCode = rehearsalFailureCode(processExited(process), e.killRehearsal(process))
 		return result
 	}
 	e.verify(ctx, db, process, result)
 	return result
+}
+
+// processExited reports whether the supervised server has already exited, without
+// waiting for it.
+func processExited(process *physical.MysqldProcess) bool {
+	select {
+	case <-process.Exited():
+		return true
+	default:
+		return false
+	}
+}
+
+// rehearsalFailureCode classifies a rehearsal that never became ready. An early
+// exit stays not_ready even when tearing the dead process down reports an error; a
+// server that is still alive and cannot be torn down is a shutdown failure.
+func rehearsalFailureCode(exited bool, teardown error) string {
+	if exited {
+		return "not_ready"
+	}
+	if teardown != nil {
+		return "shutdown_failed"
+	}
+	return "not_ready"
 }
 
 func startFailureCode(err error) string {

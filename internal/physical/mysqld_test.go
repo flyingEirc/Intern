@@ -56,10 +56,17 @@ func TestMysqldArgsRejectsRelativePaths(t *testing.T) {
 	}
 }
 
+// TestStartMysqldRefusesMissingDatadir requires the datadir check to be the one
+// that refuses: the configured binary is a real executable, so the earlier binary
+// validation passes and a missing datadir is what stops the launch.
 func TestStartMysqldRefusesMissingDatadir(t *testing.T) {
 	root := t.TempDir()
-	_, err := StartMysqld(t.Context(), MysqldOptions{
-		Binary: filepath.Join(root, "mysqld"), DataDir: filepath.Join(root, "missing"),
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = StartMysqld(t.Context(), MysqldOptions{
+		Binary: executable, DataDir: filepath.Join(root, "missing"),
 		Socket: filepath.Join(root, "s"), PIDFile: filepath.Join(root, "p"), LogError: filepath.Join(root, "e"),
 	})
 	if err == nil {

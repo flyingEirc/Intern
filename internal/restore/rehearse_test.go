@@ -133,3 +133,29 @@ func TestRenameNoReplace(t *testing.T) {
 		t.Fatal("a refused rename removed the source")
 	}
 }
+
+// TestRehearsalFailureCode pins the classification of a rehearsal that never
+// became ready: an early exit is not_ready even when tearing the dead process down
+// reports an error, while a server that is still alive and cannot be torn down is
+// a shutdown failure.
+func TestRehearsalFailureCode(t *testing.T) {
+	teardown := errors.New("physical: native tool failed to start, finish, or drain its pipes")
+	cases := []struct {
+		name     string
+		exited   bool
+		teardown error
+		want     string
+	}{
+		{"early exit, teardown error", true, teardown, "not_ready"},
+		{"early exit, clean teardown", true, nil, "not_ready"},
+		{"alive, teardown error", false, teardown, "shutdown_failed"},
+		{"alive, clean teardown", false, nil, "not_ready"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := rehearsalFailureCode(test.exited, test.teardown); got != test.want {
+				t.Fatalf("code = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

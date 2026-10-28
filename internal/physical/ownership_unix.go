@@ -16,11 +16,12 @@ func ownedByCurrentUser(info os.FileInfo) bool {
 }
 
 // executableForCurrentUser reports whether this effective uid may execute path.
-// The kernel decides it, so the check follows the same owner/group/other class the
-// exec will, including supplementary groups and ACLs.
+// Faccessat with AT_EACCESS asks the kernel about the effective credentials — the
+// same ones the exec will use — while a plain Access call consults the real
+// uid/gid, which differ whenever a setuid or setgid program runs.
 func executableForCurrentUser(path string, info os.FileInfo) bool {
 	if !info.Mode().IsRegular() {
 		return false
 	}
-	return unix.Access(path, unix.X_OK) == nil
+	return unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS) == nil
 }
