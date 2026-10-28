@@ -62,7 +62,7 @@ payload() {
 		"D1-A1 runtime_downloads=0 added_commands=11 network_none=true tools=xtrabackup,xbstream,mysqld,intern-web" \
 		"D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999 entrypoint=[\"/usr/local/bin/intern-web\"]" \
 		"D1-A1 versions mysqld=8.4.11 xtrabackup=8.4.0-7 xbstream=8.4.0-7 matrix_server=8.4.11 matrix_tool=8.4.0-7 match=true" \
-		"D1-A1 gpl files=5 notice=true offer=true versions=true mysql_gpl=18 pxb_gpl=6 source_sha_bound=true matrix=8.4.11,8.4.0-7" \
+		"D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=18 pxb_gpl=6 source_sha_bound=true procps_lgpl=9 procps_named=3 go_modules=182 go_license_texts=182 copied_objects=89 matrix=8.4.11,8.4.0-7" \
 		"D1-A1 compose_pins=true compose=app/web/deploy/compose.yaml env_example=app/web/deploy/.env.example dockerfile=app/web/deploy/Dockerfile matrix_images=2" \
 		"D1-A2 identity daemon=linux/amd64 platform=linux/amd64 compose=2.35.1 project=$project" \
 		"D1-A2 stack=healthy compose_file=app/web/deploy/compose.yaml project=$project mysql=$mysql_container intern=$intern_container api=https://127.0.0.1:49153 mysql_port=49154 healthcheck=intern-web" \
@@ -118,7 +118,7 @@ run_gate() {
 	GITHUB_SHA="$sha" bash "$gate" "$file" >"$log" 2>&1
 }
 
-payload >"$work/payload.txt"
+payload | sed 's/^/    d1_test.go:600: /' >"$work/payload.txt"
 stream "$work/payload.txt" >"$work/accept.jsonl"
 
 if run_gate "$source" "$work/accept.jsonl" "$work/accept.log"; then
@@ -135,6 +135,12 @@ fi
 reject() {
 	local name=$1 filter=$2
 	jq -c --arg pkg "$package" "$filter" "$work/accept.jsonl" >"$work/reject-$name.jsonl"
+	# A mutation whose search text has drifted away would be a silent no-op, so the
+	# case would prove nothing; require the stream to have actually changed.
+	if cmp -s "$work/accept.jsonl" "$work/reject-$name.jsonl"; then
+		echo "FAIL: the $name mutation did not change the stream (its target text drifted)" >&2
+		exit 1
+	fi
 	if run_gate "$source" "$work/reject-$name.jsonl" "$work/reject-$name.log"; then
 		echo "FAIL: the gate accepted the $name case" >&2
 		exit 1
@@ -168,9 +174,12 @@ reject network_required 'if has("Output") then .Output |= sub("network_none=true
 reject root_image_user 'if has("Output") then .Output |= sub("image_user=999:999 container_uid=999"; "image_user=0:0 container_uid=0") else . end'
 reject versions_mismatch 'if has("Output") then .Output |= sub("matrix_server=8.4.11 matrix_tool=8.4.0-7"; "matrix_server=8.0.44 matrix_tool=8.0.4") else . end'
 reject xbstream_version 'if has("Output") then .Output |= sub("xbstream=8.4.0-7 matrix_server"; "xbstream=8.4.0-6 matrix_server") else . end'
-reject gpl_matrix_mismatch 'if has("Output") then .Output |= sub("source_sha_bound=true matrix=8.4.11,8.4.0-7"; "source_sha_bound=true matrix=8.4.11,8.4.0-6") else . end'
-reject missing_gpl_file 'if has("Output") then .Output |= sub("D1-A1 gpl files=5"; "D1-A1 gpl files=4") else . end'
+reject gpl_matrix_mismatch 'if has("Output") then .Output |= sub("copied_objects=89 matrix=8.4.11,8.4.0-7"; "copied_objects=89 matrix=8.4.11,8.4.0-6") else . end'
+reject missing_gpl_file 'if has("Output") then .Output |= sub("D1-A1 gpl files=8"; "D1-A1 gpl files=7") else . end'
 reject empty_license 'if has("Output") then .Output |= sub("mysql_gpl=18"; "mysql_gpl=0") else . end'
+reject no_procps_license 'if has("Output") then .Output |= sub("procps_lgpl=9 procps_named=3"; "procps_lgpl=0 procps_named=0") else . end'
+reject module_license_gap 'if has("Output") then .Output |= sub("go_modules=182 go_license_texts=182"; "go_modules=182 go_license_texts=179") else . end'
+reject no_copied_provenance 'if has("Output") then .Output |= sub("copied_objects=89"; "copied_objects=0") else . end'
 reject emulated 'if has("Output") then .Output |= sub("daemon=linux/amd64"; "daemon=linux/arm64") else . end'
 reject foreign_project 'if has("Output") then .Output |= sub("compose=2.35.1 project=d18f3a2b4c"; "compose=2.35.1 project=d19999") else . end'
 reject unhealthy_stack 'if has("Output") then .Output |= sub("stack=healthy"; "stack=unhealthy") else . end'

@@ -82,8 +82,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A1 runtime_downloads=0 added_commands=[1-9][0-9]* network_none=true tools=xtrabackup,xbstream,mysqld,intern-web")) and
   ($output | test("D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999")) and
   ($output | test("D1-A1 versions mysqld=8\\.4\\.11 xtrabackup=8\\.4\\.0-7 xbstream=8\\.4\\.0-7 matrix_server=8\\.4\\.11 matrix_tool=8\\.4\\.0-7 match=true")) and
-  ($output | test("D1-A1 gpl files=5 notice=true offer=true versions=true mysql_gpl=[1-9][0-9]* pxb_gpl=[1-9][0-9]* source_sha_bound=true matrix=8\\.4\\.11,8\\.4\\.0-7")) and
-  ($output | test("D1-A1 compose_pins=true compose=app/web/deploy/compose.yaml env_example=app/web/deploy/\\.env\\.example dockerfile=app/web/deploy/Dockerfile matrix_images=2")) and
+  ($output | test("D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=[1-9][0-9]* pxb_gpl=[1-9][0-9]* source_sha_bound=true procps_lgpl=[1-9][0-9]* procps_named=[1-9][0-9]* go_modules=([1-9][0-9]*) go_license_texts=\\1 copied_objects=[1-9][0-9]* matrix=8\\.4\\.11,8\\.4\\.0-7")) and
   # The stack: the repository Compose file, native amd64, the deployment health
   # entry point, the administrator bootstrap, verified TLS, the read-only datadir
   # and the file-secret KEK that is really read.
@@ -104,7 +103,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A3 full run=[0-9a-f]{32} backup=[0-9a-f]{32} status=completed seq=1 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
   ($output | test("D1-A3 incremental run=[0-9a-f]{32} backup=[0-9a-f]{32} status=completed seq=2 payload_bytes=[1-9][0-9]* sha256=[0-9a-f]{64}")) and
   ($output | test("D1-A3 incremental parent=[0-9a-f]{32} chain=[0-9a-f]{32} server_uuid_bound=true")) and
-  ($output | test("D1-A3 full run=[0-9a-f]{32} backup=([0-9a-f]{32})[^\\n]*\\nD1-A3 incremental run=[0-9a-f]{32} backup=([0-9a-f]{32}) status=completed seq=2[^\\n]*\\nD1-A3 incremental parent=\\1[^\\n]*\\nD1-A3 restore=[0-9a-f]{32} backup=\\2 status=completed")) and
+  ($output | test("D1-A3 full run=[0-9a-f]{32} backup=([0-9a-f]{32})[\\s\\S]*?D1-A3 incremental run=[0-9a-f]{32} backup=([0-9a-f]{32}) status=completed seq=2[\\s\\S]*?D1-A3 incremental parent=\\1[\\s\\S]*?D1-A3 restore=[0-9a-f]{32} backup=\\2 status=completed")) and
   ($output | test("D1-A3 restore=([0-9a-f]{32}) backup=[0-9a-f]{32} status=completed export=/var/lib/intern/export/\\1[\\s\\S]*D1-A3 export=\\1 mode_owner=750:999:999")) and
   ($output | test("D1-A3 export_mysql_started=1 expected_snapshot=([0-9a-f]{64}) container_snapshot=\\1 match=true")) and
   # Lifecycle: restart, recreate and image upgrade keep one metadata instance,

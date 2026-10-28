@@ -1,0 +1,84 @@
+Intern Web deployment image — third-party notice
+=================================================
+
+This file is the notice of the image built by `app/web/deploy/Dockerfile`
+(Intern Web control plane + pinned Percona XtraBackup + pinned MySQL server).
+The repository-wide `THIRD_PARTY_NOTICES` file describes the CLI verification
+runtime and is not the notice of this image.
+
+`/usr/share/licenses/intern/VERSIONS.txt` in this image records, for the exact
+build you are looking at: the source commit, the three base image digests, the
+version string of every shipped binary, and the size plus SHA-256 of every file
+that was copied in from another image and therefore belongs to no package of
+this image.
+
+1. Intern
+
+  Copyright of the Intern sources is held by the repository authors.
+  Repository: https://github.com/flyingEirc/Intern
+  Source commit of this build: recorded as `intern_source_sha` in VERSIONS.txt.
+
+2. MySQL Community Server (client and server binaries, shared layout)
+
+  Base image: mysql:8.4.11, referenced by digest; the digest is recorded in
+  VERSIONS.txt and in the image labels.
+  License: GNU GPL version 2, with additional permissions as published by
+  Oracle. License text as shipped by that image:
+  /usr/share/licenses/intern/mysql-community-server/LICENSE
+  Upstream license and source information:
+  https://dev.mysql.com/doc/mysql-license-index/8.4/mysql-license-index_en.html
+  https://github.com/mysql/mysql-server
+  https://downloads.mysql.com/archives/community/
+
+3. Percona XtraBackup and the libraries copied with it
+
+  Base image for the tool layer: percona/percona-xtrabackup:8.4.0-7, referenced
+  by digest; the digest is recorded in VERSIONS.txt and in the image labels.
+  `xtrabackup` and `xbstream` are copied unmodified, together with
+  `/usr/lib/private` (their RPATH is `$ORIGIN/../lib/private`) and
+  `/usr/lib64/libprocps.so.8*`, which the MySQL base image does not provide.
+  License text of XtraBackup as shipped by that image:
+  /usr/share/licenses/intern/percona-xtrabackup/COPYING
+  Upstream source of the exact release:
+  https://github.com/percona/percona-xtrabackup/tree/8.4.0-7
+  https://docs.percona.com/percona-xtrabackup/8.4/index.html
+
+  The private library directory contains third-party work distributed by
+  Percona's build (for example protobuf, Abseil, ICU data, lz4). Each file is
+  listed with its digest in VERSIONS.txt; their license terms are the ones
+  published by their upstream projects, and the corresponding source is the
+  upstream project release that Percona's 8.4.0-7 build ships, obtainable from
+  the URLs above.
+
+  libprocps.so.8 comes from procps-ng. Both license texts, copied unmodified from
+  the pinned image, are included:
+  /usr/share/licenses/intern/procps-ng/COPYING
+  /usr/share/licenses/intern/procps-ng/COPYING.LIB
+  `COPYING.LIB` is the GNU Library General Public License, version 2, exactly as
+  that image ships it; procps-ng's upstream metadata describes the package as
+  LGPL-2.0-or-later / LGPL-2.1-or-later, so the later version may also be
+  followed.
+  Upstream: https://sourceforge.net/projects/procps-ng/
+
+4. Go modules linked into `intern-web`
+
+  `intern-web` is a static Go binary built with the Go toolchain pinned by
+  digest in VERSIONS.txt. Every module actually linked into it, with its version
+  and license file name, is listed in:
+  /usr/share/licenses/intern/go-internals/GO-MODULES.txt
+  and the license text of each of those modules is copied unmodified next to the
+  manifest, under:
+  /usr/share/licenses/intern/go-internals/go/<module>/
+  The corresponding source of each module is the published module version named
+  in the manifest (proxy.golang.org, or the project repository it states).
+
+5. What this notice does not claim
+
+  CI builds private candidate images for acceptance testing only. Nothing in this
+  repository publishes an image, and nothing here is presented as a completed
+  GPL source-provision arrangement for external distribution. Before Intern is
+  distributed to anyone outside the operating team, the distributor must provide
+  the corresponding source for the GPL components under the terms of their
+  licenses (see `GPL-SOURCE-OFFER.txt` in this directory for the arrangement
+  recorded so far) and re-check this notice against the exact base digests of the
+  build being distributed.

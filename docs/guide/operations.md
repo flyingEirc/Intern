@@ -17,7 +17,7 @@
 - V1 用户内网 FTP 实测：BLOCKED，等待用户提供运维 FTP 服务器信息（地址/端口/账号/可写目录/是否 FTPS）。第 12 节给出实测要记录的字段。
 - 前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）：暂缓，无 UI；本文所有操作都是命令行与 API。
 - binlog 归档与完整物理 PITR（N1）、镜像仓库公开发布、自动保留策略（N2）、K8s / Helm 与执行 agent（N3）、FTPS 的内网实测。
-- 公开镜像发布：CI 只构建私有候选制品，`app/web/deploy/Dockerfile` 与 `THIRD_PARTY_NOTICES` 明确外部分发前需完成 GPL 源码提供安排。
+- 公开镜像发布：CI 只构建私有候选制品；镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt` 与 `GPL-SOURCE-OFFER.txt` 都明确：外部分发前必须完成对应源码提供安排，本仓库未宣称已完成。
 
 ## 1. 前置条件
 
@@ -60,7 +60,7 @@
 | `/run/secrets/intern_kek` | Compose file secret | 只读 | KEK |
 | `/run/secrets/intern_tls_cert`、`/run/secrets/intern_tls_key` | Compose file secret | 只读 | HTTPS 证书与私钥 |
 | `/usr/bin/xtrabackup`、`/usr/bin/xbstream`、`/usr/sbin/mysqld` | 镜像内置 | 只读 | 备份、解包、恢复演练 |
-| `/usr/share/licenses/intern/` | 镜像内置 | 只读 | `NOTICE`、`VERSIONS.txt`、`GPL-SOURCE-OFFER.txt`、两份许可证文本 |
+| `/usr/share/licenses/intern/` | 镜像内置 | 只读 | `NOTICE-WEB.txt`（本镜像的第三方声明）、`VERSIONS.txt`（构建期生成的来源与逐项摘要留痕）、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本、`procps-ng/` 两份文本、`go-internals/`（`GO-MODULES.txt` 清单与所链接模块的许可证文本） |
 
 默认路径以 `INTERN_*` 环境变量或配置文件给出；`app/web/deploy/compose.yaml` 显式写死了上表全部路径，也仍可覆盖。这些默认与 `intern-web` 自身的 flag 默认并不相同：`--metadata-dir` 的 flag 默认是 `/var/lib/intern/metadata`，其余（`--work-root`、`--export-root`、`--kek-file`、三个工具路径、两个下限）默认空/0，未配置时服务照常启动，只是相关操作回答 503（第 11 节）。
 
@@ -162,10 +162,10 @@ curl --cacert "$CA" -c "$JAR" -sS -X POST "$API/api/v1/auth/login" \
 
 两种受支持的形态，二选一。
 
-
 **最低 TLS 版本**：控制面监听器固定 `MinVersion = TLS 1.2`（`app/web/internal/server/server.go`），没有下调开关；FTP 副本的 FTPS 会话同样最低 TLS 1.2 并要求控制与数据通道都加密（第 13 节）。
 
 **证书从哪里来**：仓库里没有面向运维的证书签发入口——`intern-web` 只有 `serve`/`migrate`/`user`/`healthcheck` 四个子命令，`app/web/deploy/` 也没有签发脚本；`app/cli/internal/testenv/tls.go` 里的 CA 与服务器证书生成带 `//go:build integration`，只服务验收 fixture，不能当部署工具用。因此证书必须由你自己的 PKI 或既有内部 CA 签发，并要求对**客户端实际使用的主机名**有效（例如 `localhost` 或内网 DNS 名）；监听器在启动时就用 `tls.LoadX509KeyPair` 校验证书与私钥成对且可解析，不匹配即拒绝启动。
+
 **内置 TLS（参考部署采用）**
 
 ```sh
@@ -173,7 +173,6 @@ intern-web serve --tls-cert-file /run/secrets/intern_tls_cert --tls-key-file /ru
 ```
 
 - 两个 flag 必须成对给出，否则启动失败：`tls.cert_file and tls.key_file must be supplied together`；证书与私钥加载不了时报 `cannot load TLS certificate and private key: …`。YAML 对应 `tls.cert_file` / `tls.key_file`，环境变量对应 `INTERN_TLS_CERT_FILE` / `INTERN_TLS_KEY_FILE`。
-- 服务端 TLS 最低 1.2。
 - **非回环明文监听被直接拒绝**：`non-loopback HTTP requires TLS certificates or tls_terminated_by_proxy`。`--listen` 默认 `127.0.0.1:8080`；参考部署用 `INTERN_LISTEN=0.0.0.0:8443` + 内置证书，宿主机只把 `127.0.0.1:8443` 发布出来。
 
 **代理终止 TLS**
@@ -400,7 +399,7 @@ V1-A1 的最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复�
 - **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约在本分支实现中，最低 TLS 1.2、控制与数据通道都加密、拒绝降级、校验不受信任 CA/主机名/过期并在发送凭据前失败。**真实 Pure-FTPd TLS 验收与内网 FTPS 实测尚未完成（未验证）**，CI 里也还没有 `container-ftps` job；本节的可用性描述不等于已验收。
 - **明文 FTP**：凭据明文过网，响应里 `plaintext_credentials: true` 常驻标注；只在受控内网按 V1 计划使用。
 - **磁盘与明文工作文件**：备份与恢复会在受控目录产生受保护的明文工作文件（`work`、`.pending-*` 导出、解包目录），需要独立磁盘权限治理；恢复认证暂存由清理账本负责，不承诺完全无明文落盘。
-- **镜像许可**：镜像携带 MySQL 与 PXB 二进制属于 GPLv2 分发行为；CI 只构建私有候选，未公开发布，外部分发前必须完成源码提供安排（`app/web/deploy/Dockerfile` 与 `THIRD_PARTY_NOTICES` 已注明）。
+- **镜像许可**：镜像携带 MySQL 与 PXB 二进制属于 GPLv2 分发行为，另含 PXB 私有库目录与 `libprocps.so.8`（LGPL）以及 `intern-web` 静态链接的 Go 模块；CI 只构建私有候选、未公开发布，外部分发前必须完成对应源码提供安排。逐项文本与来源见镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt`、`VERSIONS.txt` 与 `go-internals/GO-MODULES.txt`（`app/web/deploy/licenses/`）。
 
 ## 14. 入口
 

@@ -75,18 +75,76 @@ const (
 // else.
 var d1Cases = []string{"a1-image", "a2-compose", "a3-business", "a4-lifecycle", "a5-guardrails"}
 
+// Each D1 evidence line begins with one of these keys, and the locked list below
+// is built from the very same constants the emit sites use. A marker therefore
+// cannot drift from the text that is printed: adding a case without a key, or
+// rewording a line away from its key, fails compilation or the harness' own
+// marker cross-check instead of silently losing evidence.
+const (
+	d1KeyCase      = "D1-CASE "
+	d1KeyBuilt     = "D1-A1 built "
+	d1KeyRepeat    = "D1-A1 repeatable="
+	d1KeyBases     = "D1-A1 bases_pinned="
+	d1KeyDownloads = "D1-A1 runtime_downloads="
+	d1KeyUser      = "D1-A1 non_root="
+	d1KeyVersions  = "D1-A1 versions "
+	d1KeyGPL       = "D1-A1 gpl "
+	d1KeyPins      = "D1-A1 compose_pins="
+	d1KeyIdentity  = "D1-A2 identity "
+	d1KeyStack     = "D1-A2 stack="
+	d1KeyAdmin     = "D1-A2 create_admin="
+	d1KeyTLS       = "D1-A2 https="
+	d1KeyDataDir   = "D1-A2 datadir_ro="
+	d1KeyKEK       = "D1-A2 kek "
+	d1KeySocket    = "D1-A2 socket="
+	d1KeyTopo      = "D1-A3 topology="
+	d1KeyFull      = "D1-A3 full "
+	d1KeyInc       = "D1-A3 incremental "
+	d1KeyRestore   = "D1-A3 restore="
+	d1KeyExport    = "D1-A3 export="
+	d1KeyNewMySQL  = "D1-A3 export_mysql_started="
+	d1KeyRestart   = "D1-A4 restart "
+	d1KeyRecreate  = "D1-A4 recreate "
+	d1KeyUpgrade   = "D1-A4 upgrade "
+	d1KeyKEKKeep   = "D1-A4 kek="
+	d1KeyFlock     = "D1-A5 second_container="
+	d1KeyKEKRefuse = "D1-A5 kek_refusal="
+	d1KeyStop      = "D1-A5 sigterm "
+	d1KeyNoFalse   = "D1-A5 no_false_completed="
+	d1KeyArtifact  = "D1-ARTIFACT "
+)
+
+// d1RunKey is the marker key of one completed run line.
+func d1RunKey(kind string) string {
+	if kind == "incremental" {
+		return d1KeyInc
+	}
+	return d1KeyFull
+}
+
+// d1LifecycleKey is the marker key of one lifecycle retention line.
+func d1LifecycleKey(label string) string {
+	switch label {
+	case "recreate":
+		return d1KeyRecreate
+	case "upgrade":
+		return d1KeyUpgrade
+	default:
+		return d1KeyRestart
+	}
+}
+
 // d1ResultMarkers are the fixed facts every D1 run must report. A marker is
-// recorded only after the assertions on the read-back state it names have
-// passed, and every one of them is printed by this harness, not by a worker.
+// recorded only after the assertions on the read-back state it names have passed,
+// and every one of them is printed by this harness, not by a worker.
 var d1ResultMarkers = []string{
-	"D1-A1 built tag=", "D1-A1 repeatable=true", "D1-A1 runtime_downloads=0", "D1-A1 versions ",
-	"D1-A1 non_root=true", "D1-A1 gpl=", "D1-A1 compose_pins=true",
-	"D1-A2 identity ", "D1-A2 stack=healthy", "D1-A2 create_admin=created", "D1-A2 https=", "D1-A2 datadir_ro=refused",
-	"D1-A2 socket=preflight_passed", "D1-A2 kek=",
-	"D1-A3 topology=", "D1-A3 full=", "D1-A3 incremental=", "D1-A3 restore=", "D1-A3 export_mysql_started=1",
-	"D1-A4 restart=", "D1-A4 recreate=", "D1-A4 upgrade=", "D1-A4 kek=preserved",
-	"D1-A5 second_container=refused", "D1-A5 kek_refusal=", "D1-A5 sigterm=", "D1-A5 no_false_completed=true",
-	"D1-ARTIFACT file=",
+	d1KeyBuilt, d1KeyRepeat, d1KeyBases, d1KeyDownloads, d1KeyUser, d1KeyVersions,
+	d1KeyGPL, d1KeyPins,
+	d1KeyIdentity, d1KeyStack, d1KeyAdmin, d1KeyTLS, d1KeyDataDir, d1KeyKEK, d1KeySocket,
+	d1KeyTopo, d1KeyFull, d1KeyInc, d1KeyRestore, d1KeyExport, d1KeyNewMySQL,
+	d1KeyRestart, d1KeyRecreate, d1KeyUpgrade, d1KeyKEKKeep,
+	d1KeyFlock, d1KeyKEKRefuse, d1KeyStop, d1KeyNoFalse,
+	d1KeyArtifact,
 }
 
 var (
@@ -106,6 +164,7 @@ type d1Fixture struct {
 	t             *testing.T
 	root          string
 	dir           string
+	hostDir       string
 	secrets       string
 	probes        string
 	exports       string
@@ -207,6 +266,10 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 	fixture.upgrade = strings.ReplaceAll(fixture.candidate, "-mysql8.4", "-upgrade-mysql8.4")
 	fixture.composeFile = filepath.Join(root, d1ComposePath)
 	fixture.dir = t.TempDir()
+	// The Compose override is host-only: the ownership preparation chowns the
+	// mounted tree to the container user, and a 0600 file inside it would then be
+	// unreadable by the very process that has to pass it to `docker compose`.
+	fixture.hostDir = t.TempDir()
 	fixture.secrets = filepath.Join(fixture.dir, "secrets")
 	fixture.probes = filepath.Join(fixture.dir, "probes")
 	fixture.exports = filepath.Join(fixture.dir, "exports")
@@ -289,7 +352,7 @@ func (f *d1Fixture) writeOverride() error {
 		`      - "` + f.probes + `:/d1-secrets:ro"`,
 		"",
 	}, "\n")
-	f.override = filepath.Join(f.dir, "override.yaml")
+	f.override = filepath.Join(f.hostDir, "override.yaml")
 	return os.WriteFile(f.override, []byte(body), 0o600)
 }
 
@@ -305,6 +368,24 @@ func (f *d1Fixture) teardown(ctx context.Context) {
 	if len(ids) > 0 {
 		args := append([]string{"rm", "-f"}, ids...)
 		f.dockerAllow(ctx, args...)
+	}
+	f.restoreOwnership(ctx)
+}
+
+// restoreOwnership hands the mounted fixture paths back to the host user, so the
+// temporary directories the test registered can be removed even after the export
+// tree was filled by uid 999 from inside the container. Failures are logged, not
+// fatal: the acceptance outcome is already decided by the cases.
+func (f *d1Fixture) restoreOwnership(ctx context.Context) {
+	if f.dir == "" {
+		return
+	}
+	mysqlImage, _ := candidateImages(f.t)
+	script := "chown -R " + strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid()) + " /d1"
+	_, stderr, code := f.run(ctx, "docker", "run", "--rm", "--platform", "linux/amd64", "--user", "0:0",
+		"--volume", f.dir+":/d1:rw", "--entrypoint", "/bin/sh", mysqlImage, "-c", script)
+	if code != 0 {
+		f.t.Log("restoring fixture ownership failed: " + strings.TrimSpace(stderr))
 	}
 }
 
@@ -452,7 +533,7 @@ func (f *d1Fixture) requireCaseSet(t *testing.T) {
 	t.Helper()
 	seen := map[string]int{}
 	for _, line := range f.mark {
-		if !strings.HasPrefix(line, "D1-CASE ") {
+		if !strings.HasPrefix(line, d1KeyCase) {
 			continue
 		}
 		name := strings.TrimSpace(strings.TrimPrefix(line, "D1-CASE"))
@@ -535,7 +616,10 @@ func (f *d1Fixture) prepareOwnership(ctx context.Context) {
 	f.t.Helper()
 	mysqlImage, _ := candidateImages(f.t)
 	script := strings.Join([]string{
-		"chown -R 999:999 /d1 &&",
+		// Only the paths the stack actually mounts are handed to uid 999. The
+		// fixture root itself stays owned by the host user, so a failure here can
+		// never lock the test process out of its own files.
+		"chown -R 999:999 /d1/secrets /d1/probes /d1/exports &&",
 		"chmod 0700 /d1/secrets /d1/probes &&",
 		"chmod 0600 /d1/secrets/intern_kek /d1/secrets/intern_tls_key &&",
 		"chmod 0644 /d1/secrets/intern_tls_cert /d1/secrets/d1-ca.pem &&",
@@ -558,7 +642,7 @@ func (f *d1Fixture) prepareOwnership(ctx context.Context) {
 func (f *d1Fixture) caseImage(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
-	defer func() { f.report("D1-CASE %s", d1Cases[0]) }()
+	defer func() { f.report(d1KeyCase+"%s", d1Cases[0]) }()
 	entry := d1Compatibility(t)
 	mysqlImage, pxbImage := candidateImages(t)
 	f.candidateID = f.buildImage(ctx, f.candidate, f.source)
@@ -573,9 +657,9 @@ func (f *d1Fixture) caseImage(t *testing.T, ctx context.Context) {
 	if strings.Join(layers, " ") != strings.Join(repeatLayers, " ") {
 		f.fatal("the two candidate builds produced different image layers: %d vs %d", len(layers), len(repeatLayers))
 	}
-	f.report("D1-A1 built tag=%s image_id=%s repeat_image_id=%s source_sha=%s source_dirty=%t mysql_image=%s pxb_image=%s",
+	f.report(d1KeyBuilt+"tag=%s image_id=%s repeat_image_id=%s source_sha=%s source_dirty=%t mysql_image=%s pxb_image=%s",
 		f.candidate, f.candidateID, repeat, f.source, f.dirty, mysqlImage, pxbImage)
-	f.report("D1-A1 repeatable=true layers_equal=true layer_count=%d intern_web_sha256=%s", len(layers), f.webDigest)
+	f.report(d1KeyRepeat+"true layers_equal=true layer_count=%d intern_web_sha256=%s", len(layers), f.webDigest)
 	f.checkPinnedBases(ctx, f.candidateID, mysqlImage, pxbImage)
 	f.checkRuntimeDownloads(ctx)
 	f.checkDefaultUser(ctx, f.candidateID)
@@ -668,7 +752,7 @@ func (f *d1Fixture) checkPinnedBases(ctx context.Context, image, mysqlImage, pxb
 	if labels["org.opencontainers.image.revision"] != f.source {
 		f.fatal("revision label %q is not the candidate source %q", labels["org.opencontainers.image.revision"], f.source)
 	}
-	f.report("D1-A1 bases_pinned=true go_image=%s licenses_label=%s revision=%s",
+	f.report(d1KeyBases+"true go_image=%s licenses_label=%s revision=%s",
 		goImage, labels["io.github.flyingeirc.intern.licenses"], f.source)
 }
 
@@ -700,7 +784,7 @@ func (f *d1Fixture) checkRuntimeDownloads(ctx context.Context) {
 	if !strings.Contains(f.runOffline(ctx, script), "offline-ok") {
 		f.fatal("the image needs the network to run its own tools")
 	}
-	f.report("D1-A1 runtime_downloads=0 added_commands=%d network_none=true tools=xtrabackup,xbstream,mysqld,intern-web",
+	f.report(d1KeyDownloads+"0 added_commands=%d network_none=true tools=xtrabackup,xbstream,mysqld,intern-web",
 		len(ours))
 }
 
@@ -709,6 +793,14 @@ func (f *d1Fixture) checkRuntimeDownloads(ctx context.Context) {
 func (f *d1Fixture) ownHistory(ctx context.Context) []string {
 	f.t.Helper()
 	mysqlImage, _ := candidateImages(f.t)
+	// BuildKit keeps the pinned base in its own cache, so the daemon store may not
+	// have it; `docker history` then fails on CI even though the build succeeded.
+	// Pull the exact digest first, and require it to be the same digest the matrix
+	// pins, so the history comparison below is against the base we claim to use.
+	pulled := f.docker(ctx, "pull", "--platform", "linux/amd64", mysqlImage)
+	if !strings.Contains(pulled, mysqlImage) {
+		f.fatal("pulling the pinned MySQL base %s did not confirm the digest:\n%s", mysqlImage, pulled)
+	}
 	final := f.historyLines(ctx, f.candidateID)
 	base := f.historyLines(ctx, mysqlImage)
 	if len(base) == 0 {
@@ -761,7 +853,7 @@ func (f *d1Fixture) checkDefaultUser(ctx context.Context, image string) {
 	if !strings.Contains(entry, d1WebBinary) || strings.Contains(entry, "/bin/sh") {
 		f.fatal("the ENTRYPOINT is not the binary itself: %s", entry)
 	}
-	f.report("D1-A1 non_root=true image_user=%s container_uid=999 container_gid=999 entrypoint=%s",
+	f.report(d1KeyUser+"true image_user=%s container_uid=999 container_gid=999 entrypoint=%s",
 		configured, entry)
 }
 
@@ -795,18 +887,20 @@ func (f *d1Fixture) checkToolVersions(versions map[string]string, entry physical
 			f.fatal("%s %s, want the matrix tool %s", tool, versions[tool], entry.ToolVersion)
 		}
 	}
-	f.report("D1-A1 versions mysqld=%s xtrabackup=%s xbstream=%s matrix_server=%s matrix_tool=%s match=true",
+	f.report(d1KeyVersions+"mysqld=%s xtrabackup=%s xbstream=%s matrix_server=%s matrix_tool=%s match=true",
 		versions["mysqld"], versions["xtrabackup"], versions["xbstream"], entry.ServerVersion, entry.ToolVersion)
 }
 
-// d1LicenseFiles is the locked GPL material set the image must carry.
+// d1LicenseFiles is the locked license material set the image must carry: the
+// Web notice, the source-provision statement, the build-time provenance record,
+// the license text of every redistributed component, the procps-ng texts for the
+// copied libprocps, and the manifest of Go modules linked into intern-web.
 var d1LicenseFiles = []string{
-	"NOTICE", "GPL-SOURCE-OFFER.txt", "VERSIONS.txt",
+	"NOTICE-WEB.txt", "GPL-SOURCE-OFFER.txt", "VERSIONS.txt",
 	"mysql-community-server/LICENSE", "percona-xtrabackup/COPYING",
+	"procps-ng/COPYING", "procps-ng/COPYING.LIB", "go-internals/GO-MODULES.txt",
 }
 
-// checkGPLMaterials requires every license text, the provenance record bound to
-// this exact source revision, and the source-provision statement.
 func (f *d1Fixture) checkGPLMaterials(ctx context.Context, entry physical.CompatibilityEntry) {
 	f.t.Helper()
 	checks := make([]string, 0, len(d1LicenseFiles)+4)
@@ -818,6 +912,17 @@ func (f *d1Fixture) checkGPLMaterials(ctx context.Context, entry physical.Compat
 		"grep -ci 'gnu general public license' "+d1LicenseDirectory+"/percona-xtrabackup/COPYING",
 		"grep -ci 'source' "+d1LicenseDirectory+"/GPL-SOURCE-OFFER.txt",
 		"grep -c 'intern_source_sha="+f.source+"' "+d1LicenseDirectory+"/VERSIONS.txt",
+		// libprocps.so.8 ships without belonging to a package here, so its own
+		// license texts must be present and named by the Web notice. The pinned
+		// image carries the GNU Library General Public License v2 text.
+		"grep -ci 'library general public license' "+d1LicenseDirectory+"/procps-ng/COPYING.LIB",
+		"grep -ci 'libprocps' "+d1LicenseDirectory+"/NOTICE-WEB.txt",
+		// The manifest lists one line per linked module, and the shipped tree must
+		// carry a license text for each of them (counted, not reconstructed).
+		"awk 'NF>=3 {n++} END {print n+0}' "+d1LicenseDirectory+"/go-internals/GO-MODULES.txt",
+		"find "+d1LicenseDirectory+"/go-internals/go -mindepth 2 -type f | wc -l",
+		// The provenance record enumerates each copied shared object with a digest.
+		"grep -c '^copied /usr/lib' "+d1LicenseDirectory+"/VERSIONS.txt",
 	)
 	out := f.runOffline(ctx, strings.Join(checks, " && "))
 	counts := strings.Fields(out)
@@ -831,8 +936,10 @@ func (f *d1Fixture) checkGPLMaterials(ctx context.Context, entry physical.Compat
 			f.fatal("GPL material check %d found nothing", index)
 		}
 	}
-	f.report("D1-A1 gpl files=%d notice=true offer=true versions=true mysql_gpl=%s pxb_gpl=%s source_sha_bound=true matrix=%s,%s",
+	f.report(d1KeyGPL+"files=%d notice=true offer=true versions=true mysql_gpl=%s pxb_gpl=%s source_sha_bound=true procps_lgpl=%s procps_named=%s go_modules=%s go_license_texts=%s copied_objects=%s matrix=%s,%s",
 		len(d1LicenseFiles), counts[len(d1LicenseFiles)], counts[len(d1LicenseFiles)+1],
+		counts[len(d1LicenseFiles)+4], counts[len(d1LicenseFiles)+5],
+		counts[len(d1LicenseFiles)+6], counts[len(d1LicenseFiles)+7], counts[len(d1LicenseFiles)+8],
 		entry.ServerVersion, entry.ToolVersion)
 }
 
@@ -858,7 +965,7 @@ func (f *d1Fixture) checkComposePins(mysqlImage, pxbImage string) {
 	if !strings.Contains(compose, "stop_grace_period") || !strings.Contains(compose, "blkio_config") {
 		f.fatal("%s lost the stop window or the I/O isolation the design requires", d1ComposePath)
 	}
-	f.report("D1-A1 compose_pins=true compose=%s env_example=%s dockerfile=%s matrix_images=2",
+	f.report(d1KeyPins+"true compose=%s env_example=%s dockerfile=%s matrix_images=2",
 		d1ComposePath, d1EnvExamplePath, d1DockerfilePath)
 }
 
@@ -915,6 +1022,9 @@ func (f *d1Fixture) newAPIClient() {
 // idempotency header the contract declares.
 func (f *d1Fixture) apiIssue(method, path, body, idempotency string) (int, string, string) {
 	f.t.Helper()
+	if f.http == nil {
+		f.fatal("the API client was not created before %s %s; the case that starts the stack must call newAPIClient first", method, path)
+	}
 	request, err := http.NewRequestWithContext(context.Background(), method, f.apiBase+path, strings.NewReader(body))
 	require(f.t, err)
 	if body != "" {
@@ -1140,7 +1250,7 @@ func d1Certificate(t *testing.T, directory string) []byte {
 func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
-	defer func() { f.report("D1-CASE %s", d1Cases[1]) }()
+	defer func() { f.report(d1KeyCase+"%s", d1Cases[1]) }()
 	f.prepareOwnership(ctx)
 	f.composeOK(ctx, "up", "--detach")
 	mysqlID := f.waitHealthy(ctx, "mysql", 4*time.Minute)
@@ -1157,9 +1267,9 @@ func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	f.requireReadOnlyDataDir(t, ctx)
 	f.requireSecretsRead(t, ctx, mysqlID, internID)
 	f.requireSocketAndKEK(t, ctx)
-	f.report("D1-A2 identity daemon=%s platform=linux/amd64 compose=%s project=%s",
+	f.report(d1KeyIdentity+"daemon=%s platform=linux/amd64 compose=%s project=%s",
 		f.daemonPlatform(ctx), f.composeVersion(ctx), f.project)
-	f.report("D1-A2 stack=healthy compose_file=%s project=%s mysql=%s intern=%s api=%s mysql_port=%d healthcheck=intern-web",
+	f.report(d1KeyStack+"healthy compose_file=%s project=%s mysql=%s intern=%s api=%s mysql_port=%d healthcheck=intern-web",
 		d1ComposePath, f.project, mysqlID, internID, f.apiBase, f.mysqlPort)
 }
 
@@ -1195,7 +1305,7 @@ func (f *d1Fixture) createUser(t *testing.T, ctx context.Context) {
 	if version != "1.3" && version != "1.2" {
 		f.fatal("the administrator session did not negotiate TLS: %q", version)
 	}
-	f.report("D1-A2 create_admin=created user=%s login=200 negotiated=%s stdin=true", d1AdminUsername, version)
+	f.report(d1KeyAdmin+"created user=%s login=200 negotiated=%s stdin=true", d1AdminUsername, version)
 }
 
 // requireTransportFacts proves the listener really terminates TLS: a client that
@@ -1218,7 +1328,7 @@ func (f *d1Fixture) requireTransportFacts(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "certificate") {
 		f.fatal("an untrusted certificate was accepted: %v", err)
 	}
-	f.report("D1-A2 https=verified plaintext=refused untrusted_ca=refused")
+	f.report(d1KeyTLS + "verified plaintext=refused untrusted_ca=refused")
 }
 
 // requireReadOnlyDataDir attempts the write the design forbids: xtrabackup must
@@ -1233,7 +1343,7 @@ func (f *d1Fixture) requireReadOnlyDataDir(t *testing.T, ctx context.Context) {
 	if code != 0 || !strings.HasPrefix(strings.TrimSpace(out), "700 999 999") {
 		f.fatal("the metadata volume is not a private directory owned by the deployment user: %s", out)
 	}
-	f.report("D1-A2 datadir_ro=refused metadata_dir=0700 owner=999:999")
+	f.report(d1KeyDataDir + "refused metadata_dir=0700 owner=999:999")
 }
 
 // requireSecretsRead proves the Compose file secrets really are the files the
@@ -1264,7 +1374,7 @@ func (f *d1Fixture) requireSecretsRead(t *testing.T, ctx context.Context, mysqlI
 	if user != "999:999" {
 		f.fatal("the deployed container runs as %q, want 999:999", user)
 	}
-	f.report("D1-A2 kek secret=%s mode=0600 owner=999:999 digest_bound=true container_user=%s mysql=%s",
+	f.report(d1KeyKEK+"secret=%s mode=0600 owner=999:999 digest_bound=true container_user=%s mysql=%s",
 		d1SecretKEK, user, mysqlID)
 }
 
@@ -1289,7 +1399,7 @@ func (f *d1Fixture) requireSocketAndKEK(t *testing.T, ctx context.Context) {
 	if !containsAll(outcome.Checks, "socket", "permissions", "version", "identity") {
 		f.fatal("the preflight did not run the locked checks: %v", outcome.Checks)
 	}
-	f.report("D1-A2 socket=preflight_passed checks=%d source=%s repository=%s sealed=true",
+	f.report(d1KeySocket+"preflight_passed checks=%d source=%s repository=%s sealed=true",
 		len(outcome.Checks), f.sourceID, f.repositoryID)
 }
 
@@ -1334,9 +1444,9 @@ func d1FileDigest(path string) (string, error) {
 func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
-	defer func() { f.report("D1-CASE %s", d1Cases[2]) }()
+	defer func() { f.report(d1KeyCase+"%s", d1Cases[2]) }()
 	f.policyID = f.createPolicy(t, "d1-policy", 0)
-	f.report("D1-A3 topology=compose-mysql->intern-web->local-repository policy=%s source=%s repository=%s replica=none",
+	f.report(d1KeyTopo+"compose-mysql->intern-web->local-repository policy=%s source=%s repository=%s replica=none",
 		f.policyID, f.sourceID, f.repositoryID)
 	f.fullBackup = f.backup(t, ctx, "full", "d1-a3-full")
 	f.seedRows(t, ctx, 4)
@@ -1349,7 +1459,7 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 	if actual != f.snapshot {
 		f.fatal("the export started by a new MySQL 8.4.11 container holds snapshot %s, want %s", actual, f.snapshot)
 	}
-	f.report("D1-A3 export_mysql_started=1 expected_snapshot=%s container_snapshot=%s match=true",
+	f.report(d1KeyNewMySQL+"1 expected_snapshot=%s container_snapshot=%s match=true",
 		f.snapshot, actual)
 }
 
@@ -1390,7 +1500,7 @@ func (f *d1Fixture) backup(t *testing.T, ctx context.Context, kind, key string) 
 	if backup.Status != "completed" || !backup.LocalPresent || backup.PayloadSize <= 0 {
 		f.fatal("backup %s is not a completed local payload: %+v", *run.BackupID, backup)
 	}
-	f.report("D1-A3 %s run=%s backup=%s status=%s seq=%d payload_bytes=%d sha256=%s",
+	f.report(d1RunKey(kind)+"run=%s backup=%s status=%s seq=%d payload_bytes=%d sha256=%s",
 		kind, runID, *run.BackupID, backup.Status, backup.Seq, d1Int(run.PayloadSize), backup.PayloadSHA256)
 	return *run.BackupID
 }
@@ -1496,7 +1606,7 @@ func (f *d1Fixture) requireChain(t *testing.T, full, incremental string) {
 			incremental, members[incremental].ParentID, full)
 	}
 	f.serverUUID = chains[0].ServerUUID
-	f.report("D1-A3 incremental parent=%s chain=%s server_uuid_bound=true",
+	f.report(d1KeyInc+"parent=%s chain=%s server_uuid_bound=true",
 		members[incremental].ParentID, chains[0].ID)
 }
 
@@ -1535,7 +1645,7 @@ func (f *d1Fixture) restore(t *testing.T, options backupOptions) string {
 		f.fatal("the completed restore %s published no export path", accepted.RestoreID)
 	}
 	f.restoreExport = *restore.ExportPath
-	f.report("D1-A3 restore=%s backup=%s status=%s export=%s bytes=%d rehearsal=%t verify=%s",
+	f.report(d1KeyRestore+"%s backup=%s status=%s export=%s bytes=%d rehearsal=%t verify=%s",
 		accepted.RestoreID, options.backupID, restore.Status, *restore.ExportPath,
 		d1Int(restore.ExportBytes), options.rehearse, restore.VerifyStatus)
 	return accepted.RestoreID
@@ -1574,7 +1684,7 @@ func (f *d1Fixture) requireExport(t *testing.T, ctx context.Context) {
 	if code != 0 {
 		f.fatal("the exported datadir cannot be inspected: %s", out)
 	}
-	f.report("D1-A3 export=%s mode_owner=%s", filepath.Base(f.restoreExport), strings.Join(strings.Fields(out), ":"))
+	f.report(d1KeyExport+"%s mode_owner=%s", filepath.Base(f.restoreExport), strings.Join(strings.Fields(out), ":"))
 }
 
 // exportSnapshot starts a brand-new pinned MySQL 8.4.11 container on the host
@@ -1631,7 +1741,7 @@ func d1Int(value *int64) int64 {
 func (f *d1Fixture) caseLifecycle(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
-	defer func() { f.report("D1-CASE %s", d1Cases[3]) }()
+	defer func() { f.report(d1KeyCase+"%s", d1Cases[3]) }()
 	volumes := f.volumeNames(ctx)
 	f.composeOK(ctx, "restart", "intern")
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
@@ -1700,8 +1810,12 @@ func (f *d1Fixture) requireRetained(t *testing.T, ctx context.Context, label str
 	if kek != host {
 		f.fatal("after %s the file secret KEK is %s, the host secret is %s", label, kek, host)
 	}
-	f.report("D1-A4 %s instance_id=%s login=%s backups=%d restores=1 incremental=%s migration=ready kek_digest_bound=true volumes=%d",
-		label, f.instanceID, version, len([]string{f.fullBackup, f.incBackup}), f.incBackup, len(volumes))
+	members := len(f.chains(t)[0].Members)
+	if members < 2 {
+		f.fatal("after %s the chain has %d members, want at least the full and the incremental", label, members)
+	}
+	f.report(d1LifecycleKey(label)+"instance_id=%s login=%s chain_members=%d a3_pair_readable=true restores=1 incremental=%s migration=ready kek_digest_bound=true volumes=%d",
+		f.instanceID, version, members, f.incBackup, len(volumes))
 }
 
 // continueIncremental triggers one incremental on the deployed policy and
@@ -1813,9 +1927,9 @@ func (f *d1Fixture) upgradeImage(t *testing.T, ctx context.Context) {
 	}
 	volumes := f.volumeNames(ctx)
 	f.requireRetained(t, ctx, "upgrade", volumes)
-	f.report("D1-A4 upgrade from=%s to=%s source_label=%s previous_label=%s labels_differ=true container=%s",
+	f.report(d1KeyUpgrade+"from=%s to=%s source_label=%s previous_label=%s labels_differ=true container=%s",
 		f.candidate, f.upgrade, label, f.source, after)
-	f.report("D1-A4 kek=preserved volumes=metadata,backups,work instance_id=%s", f.instanceID)
+	f.report(d1KeyKEKKeep+"preserved volumes=metadata,backups,work instance_id=%s", f.instanceID)
 }
 
 // ------------------------------------------------------------- guardrails (A5)
@@ -1827,7 +1941,7 @@ func (f *d1Fixture) upgradeImage(t *testing.T, ctx context.Context) {
 func (f *d1Fixture) caseGuardrails(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
-	defer func() { f.report("D1-CASE %s", d1Cases[4]) }()
+	defer func() { f.report(d1KeyCase+"%s", d1Cases[4]) }()
 	f.requireSingleOwner(t, ctx)
 	f.requireKEKRefusals(t, ctx)
 	f.requireGracefulStop(t, ctx)
@@ -1852,7 +1966,7 @@ func (f *d1Fixture) requireSingleOwner(t *testing.T, ctx context.Context) {
 	if healthStatus, _, _ := f.apiIssue(http.MethodGet, "/healthz", "", ""); healthStatus != http.StatusOK {
 		f.fatal("the deployed API stopped answering after the refusal")
 	}
-	f.report("D1-A5 second_container=refused flock_text=true exit=%d primary_healthy=true primary_api=200", code)
+	f.report(d1KeyFlock+"refused flock_text=true exit=%d primary_healthy=true primary_api=200", code)
 }
 
 // requireKEKRefusals proves the file secret is really the key the deployment
@@ -1871,7 +1985,7 @@ func (f *d1Fixture) requireKEKRefusals(t *testing.T, ctx context.Context) {
 	if code, _, _ := f.apiIssue(http.MethodGet, "/healthz", "", ""); code != http.StatusOK {
 		f.fatal("the deployed container was affected by the refusal probes")
 	}
-	f.report("D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true metadata_dir=%s",
+	f.report(d1KeyKEKRefuse+"missing_permissions missing=refused permissions=refused fixed_text=true metadata_dir=%s",
 		d1ProbeMetadata)
 }
 
@@ -1921,9 +2035,9 @@ func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
 	run := f.waitRun(t, runID, 5*time.Minute)
 	f.requireInterruptedRun(t, run, runID, before)
-	f.report("D1-A5 sigterm run=%s observed_running=true grace_seconds=%d stop_seconds=%d exit_code=%s oom_killed=false",
+	f.report(d1KeyStop+"run=%s observed_running=true grace_seconds=%d stop_seconds=%d exit_code=%s oom_killed=false",
 		runID, grace, int(elapsed.Seconds()), fields[0])
-	f.report("D1-A5 no_false_completed=true run_status=%s error_class=%s backup_id=none completed_runs_before=%d completed_runs_after=%d",
+	f.report(d1KeyNoFalse+"true run_status=%s error_class=%s backup_id=none completed_runs_before=%d completed_runs_after=%d",
 		run.Status, d1Text(run.ErrorClass), before, f.completedRuns(t))
 }
 
@@ -2140,7 +2254,7 @@ func (f *d1Fixture) captureArtifact(ctx context.Context, versions map[string]str
 	data, err := json.Marshal(record)
 	require(f.t, err)
 	require(f.t, os.WriteFile(filepath.Join(directory, "candidate-artifact.json"), append(data, '\n'), 0o644))
-	f.report("D1-ARTIFACT file=candidate-artifact.json source_sha=%s image_id=%s docker_save_sha256=%s docker_save_bytes=%d intern_web_sha256=%s versions_bound=true",
+	f.report(d1KeyArtifact+"file=candidate-artifact.json source_sha=%s image_id=%s docker_save_sha256=%s docker_save_bytes=%d intern_web_sha256=%s versions_bound=true",
 		f.source, f.candidateID, digest, bytes, f.webDigest)
 }
 

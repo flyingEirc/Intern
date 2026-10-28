@@ -50,6 +50,30 @@ COPY app/web ./app/web
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/intern-web ./app/web
 
+# License texts of the modules actually linked into intern-web. Each text is
+# copied unmodified out of the module cache and the manifest records module path,
+# version and file name, so the notice in the final image describes the binaries
+# it ships. Only build-time module-cache reads; nothing is fetched at run time.
+RUN set -eu; \
+    mkdir -p /out/licenses/go; \
+    : >/out/licenses/GO-MODULES.txt; \
+    cd /src/app/web; \
+    GOWORK=off go list -m -f '{{if .Dir}}{{.Path}} {{.Version}} {{.Dir}}{{end}}' all \
+      | awk 'NF==3 && $2 != "(devel)" && $1 !~ /^github\.com\/flyingEirc\/Intern/' | LC_ALL=C sort > /tmp/modules.list; \
+    listed=$(wc -l < /tmp/modules.list); \
+    while read -r module version dir; do \
+      [ -d "$dir" ] || { printf 'module %s has no module-cache directory\n' "$module" >&2; exit 1; }; \
+      license=$(find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | LC_ALL=C sort | head -n 1); \
+      [ -n "$license" ] || { printf 'module %s %s ships no LICENSE or COPYING\n' "$module" "$version" >&2; exit 1; }; \
+      safe=$(printf '%s' "$module" | tr '/@.+' '----'); \
+      mkdir -p "/out/licenses/go/$safe"; \
+      cp "$license" "/out/licenses/go/$safe/$(basename "$license")"; \
+      printf '%s %s %s\n' "$module" "$version" "$(basename "$license")" >> /out/licenses/GO-MODULES.txt; \
+    done < /tmp/modules.list; \
+    test -s /out/licenses/GO-MODULES.txt; \
+    [ "$listed" -eq "$(wc -l < /out/licenses/GO-MODULES.txt)" ] || { printf 'manifest lists %s of %s modules\n' "$(wc -l < /out/licenses/GO-MODULES.txt)" "$listed" >&2; exit 1; }; \
+    chmod -R a+rX /out/licenses
+
 FROM ${PXB_IMAGE} AS xtrabackup
 
 FROM ${MYSQL_IMAGE} AS mysql-licenses
@@ -63,13 +87,23 @@ COPY --from=xtrabackup /usr/lib64/libprocps.so.8 /usr/lib64/libprocps.so.8
 COPY --from=xtrabackup /usr/lib64/libprocps.so.8.0.3 /usr/lib64/libprocps.so.8.0.3
 COPY --from=builder /out/intern-web /usr/local/bin/intern-web
 
-# GPL materials. Each license text is the one shipped inside the pinned image of
-# the same component, copied unmodified, so the text always matches the exact
-# binaries this image carries.
-COPY THIRD_PARTY_NOTICES /usr/share/licenses/intern/NOTICE
+# License materials for this image. Every text is copied unmodified from the
+# pinned image that carries the matching binary, so the license always describes
+# the exact build shipped here. The repository-wide THIRD_PARTY_NOTICES file
+# describes the CLI verification runtime and is not the notice of this image.
+COPY app/web/deploy/licenses/WEB-NOTICE.txt /usr/share/licenses/intern/NOTICE-WEB.txt
 COPY app/web/deploy/licenses/GPL-SOURCE-OFFER.txt /usr/share/licenses/intern/GPL-SOURCE-OFFER.txt
 COPY --from=mysql-licenses /usr/share/doc/mysql-community-server-minimal/LICENSE /usr/share/licenses/intern/mysql-community-server/LICENSE
 COPY --from=xtrabackup /usr/share/doc/percona-xtrabackup-84/LICENSE /usr/share/licenses/intern/percona-xtrabackup/COPYING
+# libprocps.so.8 is copied out of the pinned PXB image and belongs to no package
+# in the final image, so its own license texts ship with it. The pinned image
+# carries procps-ng's COPYING and the GNU Library General Public License v2 text
+# (COPYING.LIB); upstream describes the package as LGPL-2.0-or-later /
+# LGPL-2.1-or-later.
+COPY --from=xtrabackup /usr/share/licenses/procps-ng/COPYING /usr/share/licenses/intern/procps-ng/COPYING
+COPY --from=xtrabackup /usr/share/licenses/procps-ng/COPYING.LIB /usr/share/licenses/intern/procps-ng/COPYING.LIB
+# The modules linked into intern-web, with their license texts and manifest.
+COPY --from=builder /out/licenses /usr/share/licenses/intern/go-internals
 
 RUN mysqld --version \
  && xtrabackup --version \
@@ -100,11 +134,19 @@ RUN set -eu \
       echo "xbstream=$(xbstream --version 2>&1)"; \
       echo ""; \
       echo "License texts shipped with this image:"; \
-      echo "  /usr/share/licenses/intern/NOTICE"; \
+      echo "  /usr/share/licenses/intern/NOTICE-WEB.txt"; \
       echo "  /usr/share/licenses/intern/GPL-SOURCE-OFFER.txt"; \
       echo "  /usr/share/licenses/intern/mysql-community-server/LICENSE"; \
       echo "  /usr/share/licenses/intern/percona-xtrabackup/COPYING"; \
+      echo "  /usr/share/licenses/intern/procps-ng/COPYING and COPYING.LIB"; \
+      echo "  /usr/share/licenses/intern/go-internals/GO-MODULES.txt (texts under go-internals/go/)"; \
+      echo ""; \
+      echo "Copied files that belong to no package of the final image (provenance and digest):"; \
+      for path in $( { ls /usr/lib/private/*.so* 2>/dev/null || true; echo /usr/lib64/libprocps.so.8; echo /usr/lib64/libprocps.so.8.0.3; } | LC_ALL=C sort ); do \
+        printf 'copied %s size=%s sha256=%s\n' "$path" "$(stat -c %s "$path")" "$(sha256sum "$path" | cut -d' ' -f1)"; \
+      done; \
     } >/usr/share/licenses/intern/VERSIONS.txt \
+ && test -s /usr/share/licenses/intern/go-internals/GO-MODULES.txt \
  && chmod 0644 /usr/share/licenses/intern/VERSIONS.txt
 
 LABEL org.opencontainers.image.title="Intern Web" \
