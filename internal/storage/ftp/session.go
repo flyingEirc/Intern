@@ -2,10 +2,12 @@ package ftp
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"io/fs"
 	"net"
+	"net/textproto"
 	"sync"
 	"time"
 
@@ -15,17 +17,18 @@ import (
 // A session has exactly one SDK caller. Cancellation touches only net.Conn,
 // never ServerConn or Response, which the SDK does not make concurrent-safe.
 type session struct {
-	repo        *Repository
-	ctx         context.Context
-	cancel      context.CancelFunc
-	stopParent  func() bool
-	stopIO      func() bool
-	conn        *client.ServerConn
-	mu          sync.Mutex
-	sockets     map[*deadlineConn]struct{}
-	interrupted bool
-	closeErr    error
-	once        sync.Once
+	repo          *Repository
+	ctx           context.Context
+	cancel        context.CancelFunc
+	stopParent    func() bool
+	stopIO        func() bool
+	conn          *client.ServerConn
+	mu            sync.Mutex
+	sockets       map[*deadlineConn]struct{}
+	interrupted   bool
+	closeErr      error
+	once          sync.Once
+	controlDialed bool
 }
 
 type deadlineConn struct {
@@ -75,13 +78,29 @@ func (r *Repository) connect(ctx context.Context) (*session, error) {
 	s := &session{repo: r, ctx: ctx, cancel: cancel, sockets: make(map[*deadlineConn]struct{})}
 	s.stopParent = context.AfterFunc(r.ctx, cancel)
 	s.stopIO = context.AfterFunc(ctx, s.interrupt)
-	// The SDK's MLSD parser treats unrecognized link types as regular files.
-	// LIST retains link identity; -a also exposes our private ownership marker.
-	conn, err := client.Dial(r.cfg.Address, client.DialWithDialFunc(s.dial),
-		client.DialWithDisabledMLSD(true), client.DialWithForceListHidden(true))
+	options := []client.DialOption{
+		client.DialWithDialFunc(s.dial),
+		client.DialWithDisabledMLSD(true),
+		client.DialWithForceListHidden(true),
+	}
+	switch r.cfg.TLSMode {
+	case TLSModeExplicit:
+		options = append(options, client.DialWithExplicitTLS(r.tlsConfig))
+	case TLSModeImplicit:
+		options = append(options, client.DialWithTLS(r.tlsConfig))
+	}
+	conn, err := client.Dial(r.cfg.Address, options...)
 	if err == nil {
 		s.conn = conn
 		err = conn.Login(r.cfg.Username, r.cfg.Password)
+	} else if r.tlsConfig != nil {
+		// AUTH TLS is the first command the SDK sends, before USER and PASS. A
+		// server that answers at all but refuses the upgrade therefore fails
+		// strictly before any credential left this process.
+		var reply *textproto.Error
+		if errors.As(err, &reply) {
+			err = errors.Join(err, ErrTLS)
+		}
 	}
 	if err != nil {
 		err = s.result(err)
@@ -104,9 +123,28 @@ func (s *session) dial(network, address string) (net.Conn, error) {
 		s.mu.Unlock()
 		return nil, errors.Join(s.ctx.Err(), conn.Close())
 	}
+	first := !s.controlDialed
+	s.controlDialed = true
 	s.sockets[wrapped] = struct{}{}
 	s.mu.Unlock()
-	return wrapped, nil
+	// The SDK upgrades the control channel itself after AUTH TLS, so explicit
+	// mode leaves that one connection alone. Every data channel, and both
+	// channels of an implicit server, are encrypted here: the library skips its
+	// own wrapping whenever a custom dial function is supplied.
+	if s.repo.tlsConfig == nil || (first && s.repo.cfg.TLSMode == TLSModeExplicit) {
+		return wrapped, nil
+	}
+	// The handshake completes before this connection is handed to the SDK, so a
+	// channel that cannot be encrypted fails here instead of carrying FTP bytes or
+	// a credential in cleartext on its first read. There is no path from this
+	// function to an unencrypted FTPS transfer.
+	channel := tls.Client(wrapped, s.repo.tlsConfig)
+	if err = channel.HandshakeContext(ctx); err != nil {
+		// The refusal is joined with the close outcome: a channel that could not
+		// be encrypted must also be provably gone before any FTP byte exists.
+		return nil, errors.Join(err, ErrTLS, wrapped.Close())
+	}
+	return channel, nil
 }
 
 func (s *session) interrupt() {

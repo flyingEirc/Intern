@@ -19,8 +19,8 @@ func validConfig() Config {
 
 func TestConfigurationRejectsBeforeDial(t *testing.T) {
 	cases := map[string]func(*Config){
-		"implicit_tls":      func(c *Config) { c.TLSMode = "implicit" },
-		"explicit_tls":      func(c *Config) { c.TLSMode = "explicit" },
+		"uppercase_tls":     func(c *Config) { c.TLSMode = "TLS" },
+		"downgrade_tls":     func(c *Config) { c.TLSMode = "starttls" },
 		"unspecified_tls":   func(c *Config) { c.TLSMode = "" },
 		"url_address":       func(c *Config) { c.Address = "ftp://intern:private@localhost:21" },
 		"missing_port":      func(c *Config) { c.Address = "localhost" },

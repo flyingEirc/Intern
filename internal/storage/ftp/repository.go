@@ -3,6 +3,7 @@ package ftp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"io/fs"
@@ -22,6 +23,7 @@ import (
 // not multiple independent writers sharing this namespace.
 type Repository struct {
 	cfg         Config
+	tlsConfig   *tls.Config
 	dialContext func(context.Context, string, string) (net.Conn, error)
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -38,13 +40,13 @@ type Repository struct {
 // Open verifies or exclusively creates the exact instance ownership marker.
 // Existing unmarked directories are never adopted, even when empty.
 func Open(ctx context.Context, cfg Config) (*Repository, error) {
-	cfg, err := normalizeConfig(cfg)
+	cfg, transport, err := normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
 	root, cancel := context.WithCancel(context.Background())
 	r := &Repository{
-		cfg: cfg, ctx: root, cancel: cancel,
+		cfg: cfg, tlsConfig: transport, ctx: root, cancel: cancel,
 		dialContext: (&net.Dialer{Timeout: cfg.DialTimeout}).DialContext,
 		sinks:       make(map[string]*Sink), parts: make(map[string]bool),
 	}
