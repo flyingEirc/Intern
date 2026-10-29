@@ -347,7 +347,10 @@ func startS2Fixture(t *testing.T, ctx context.Context, root string, nw *tc.Docke
 			WithStartupTimeout(4 * time.Minute),
 	}, Started: true})
 	if fixture != nil {
-		tc.CleanupContainer(t, fixture, tc.StopTimeout(5*time.Second))
+		// The audit volume is named (every worker mounts it), and testcontainers only
+		// removes anonymous volumes on terminate; name it explicitly so the final
+		// absence check proves a real cleanup rather than failing on a leftover.
+		tc.CleanupContainer(t, fixture, tc.StopTimeout(5*time.Second), tc.RemoveVolumes(auditVolume))
 	}
 	require(t, err)
 	inspected, err := fixture.Inspect(ctx)
@@ -398,6 +401,7 @@ func startS2TransportWorker(t *testing.T, ctx context.Context, binary string, nw
 			"HOME": "/tmp", "TMPDIR": "/tmp",
 		},
 		ConfigModifier: func(config *container.Config) { config.User = "1000:1000" },
+		Files:          []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/s2-transport-worker.test", FileMode: 0o755}},
 		WaitingFor:     wait.ForExec([]string{"/usr/bin/test", "-x", "/tmp/s2-transport-worker.test"}),
 	}, Started: true})
 	if worker != nil {
