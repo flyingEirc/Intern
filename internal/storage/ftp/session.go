@@ -134,11 +134,20 @@ func (s *session) dial(network, address string) (net.Conn, error) {
 	if s.repo.tlsConfig == nil || (first && s.repo.cfg.TLSMode == TLSModeExplicit) {
 		return wrapped, nil
 	}
-	// The handshake completes before this connection is handed to the SDK, so a
-	// channel that cannot be encrypted fails here instead of carrying FTP bytes or
-	// a credential in cleartext on its first read. There is no path from this
-	// function to an unencrypted FTPS transfer.
 	channel := tls.Client(wrapped, s.repo.tlsConfig)
+	if !first {
+		// A data channel must not handshake here: the SDK opens it before it
+		// sends STOR/RETR/LIST, while Pure-FTPd only starts the server side of the
+		// data-channel TLS after it has received that command. An eager handshake
+		// would wait for a ServerHello that never comes until the dial timeout.
+		// A tls.Conn writes no application byte before its handshake succeeds, so
+		// the first transfer read or write performs and verifies the handshake and
+		// there is still no path to an unencrypted FTPS transfer.
+		return channel, nil
+	}
+	// The implicit control channel is encrypted before the SDK reads the greeting,
+	// so a server that cannot be trusted fails here, strictly before any FTP byte
+	// or credential exists.
 	if err = channel.HandshakeContext(ctx); err != nil {
 		// The refusal is joined with the close outcome: a channel that could not
 		// be encrypted must also be provably gone before any FTP byte exists.
