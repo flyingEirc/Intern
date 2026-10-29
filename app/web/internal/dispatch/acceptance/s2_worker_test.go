@@ -519,7 +519,7 @@ func s2APIFTPS(t *testing.T, environment *s2Environment) {
 	rotated := environment.ca + environment.ca
 	body := s2RepositoryBody("s2-api-explicit", ftp.TLSModeExplicit, explicitHost, explicitPort, rotated, "")
 	fixture.admin.request(t, http.MethodPut, "/api/v1/repositories/"+created[0], body, http.StatusOK)
-	if view := fixture.s2RepositoryView(t, created[0]); view["ca_pem"] != rotated {
+	if config, _ := fixture.s2RepositoryView(t, created[0])["ftp"].(map[string]any); config == nil || config["ca_pem"] != rotated {
 		t.Fatal("the rotated trust bundle was not served back")
 	}
 	// Each refused body is valid except for its bundle, so the 422 is the ca_pem rule.
@@ -590,12 +590,14 @@ func s2RequireServedFTPS(t *testing.T, fixture *fixture, environment *s2Environm
 	if plaintext, ok := view["plaintext_credentials"].(bool); !ok || plaintext {
 		t.Fatalf("an FTPS repository is served as plaintext_credentials=%v", view["plaintext_credentials"])
 	}
-	for _, key := range []string{"kind", "tls_mode", "ca_pem", "plaintext_credentials"} {
+	for _, key := range []string{"kind", "tls_mode", "ftp", "plaintext_credentials"} {
 		if _, present := view[key]; !present {
 			t.Fatalf("the served repository carries no %q field", key)
 		}
 	}
-	if view["ca_pem"] != environment.ca {
+	// ca_pem is part of the FTP configuration object (openapi Repository.ftp.ca_pem).
+	config, _ := view["ftp"].(map[string]any)
+	if config == nil || config["ca_pem"] != environment.ca {
 		t.Fatalf("the served ca_pem is not the bundle that was submitted")
 	}
 	if strings.Contains(fmt.Sprint(view), fixture.secret.ftp) {

@@ -79,7 +79,6 @@ var s2ChainFacts = []string{
 	"S2-A1 implicit-chain readback", "S2-A1 implicit-chain restore",
 	"S2-A3 api_ftps", "S2-A2 refusal_api",
 	"plaintext_credentials=false", "invalid_ca=422", "mode_change=422",
-	"server=Pure-FTPd-1.0.54",
 }
 
 // s2APIFacts are the locked Web-facing facts, written as the stable prefixes of the

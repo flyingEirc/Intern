@@ -502,15 +502,12 @@ func (w *s2Worker) s2Identity(t *testing.T, face string) (fingerprint, dns strin
 				return errors.New("the face offered no certificate")
 			}
 			_, verdict = captured[0].Verify(x509.VerifyOptions{Roots: pool, DNSName: host, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})
-			return verdict
+			return nil // the verdict is recorded; finishing the handshake names the refused leaf
 		},
 	}
-	dialer := &tls.Dialer{Config: probe, NetDialer: &net.Dialer{Timeout: 5 * time.Second}}
-	conn, err := dialer.DialContext(t.Context(), "tcp", address)
-	if err != nil {
+	if err = s2ObservingHandshake(t.Context(), address, face != s2fixture.ListenerImplicit, probe); err != nil {
 		return "", "", time.Time{}, err
 	}
-	defer func() { _ = conn.Close() }()
 	if len(captured) == 0 {
 		t.Fatalf("the %s face presented no certificate at all", face)
 	}
@@ -640,6 +637,10 @@ func s2DataProtection(t *testing.T, worker *s2Worker) {
 	t.Helper()
 	session := worker.openRaw(t, s2fixture.ListenerExplicit)
 	defer func() { _ = session.Close() }()
+	// The raw session writes beneath s2/, which no earlier case created.
+	if code, _, err := session.command(t, "MKD s2", 257); err != nil && code != 550 {
+		t.Fatalf("MKD s2: %v (reply=%d)", err, code)
+	}
 	clearCode := worker.requireClearDataRefused(t, session)
 	privateCode := worker.requirePrivateDataTransfer(t, session)
 	completed, offered := worker.requireNoCleartextData(t, session)
@@ -714,13 +715,18 @@ func (w *s2Worker) requireNoCleartextData(t *testing.T, session *s2RawSession) (
 	if writeErr != nil && written == 0 {
 		t.Fatalf("the plaintext data probe never reached the server: %v", writeErr)
 	}
+	// The server only accepts the data socket, and only then starts TLS on it, once a
+	// transfer command arrives; without one it never answers at all.
+	if _, err := session.text.Cmd("%s", "STOR s2/plain-probe.bin"); err != nil {
+		t.Fatalf("STOR for the plaintext data probe: %v", err)
+	}
+	code := session.finalReply(30 * time.Second)
 	_ = data.Close()
-	code, _, probeErr := session.expect(t, "", 226)
-	if probeErr == nil && code == 226 {
+	if code == 226 {
 		t.Fatal("a plaintext data socket completed a transfer on a private channel")
 	}
-	if _, statErr := os.Stat(filepath.Join(w.oracle, w.account, "s2", "prot-private.bin")); statErr == nil {
-		if onDisk := w.disk(t, "s2/prot-private.bin"); bytes.Contains(onDisk, []byte("s2probe-"+w.marker)) {
+	if _, statErr := os.Stat(filepath.Join(w.oracle, w.account, "s2", "plain-probe.bin")); statErr == nil {
+		if onDisk := w.disk(t, "s2/plain-probe.bin"); bytes.Contains(onDisk, []byte("s2probe-"+w.marker)) {
 			t.Fatal("cleartext payload bytes reached the server filesystem")
 		}
 	}
@@ -748,8 +754,8 @@ func s2SessionReuse(t *testing.T, worker *s2Worker) {
 	repository, err := Open(t.Context(), worker.config(t, "reuse", s2fixture.ListenerExplicit, TLSModeExplicit, worker.ca(t)))
 	s2Require(t, err)
 	observation := s2Instrument(t, repository)
-	worker.publishInto(t, repository, "s2/reuse/payload.bin")
-	worker.deleteFrom(t, repository, "s2/reuse/payload.bin")
+	worker.publishInto(t, repository, "reuse/payload.bin")
+	worker.deleteFrom(t, repository, "reuse/payload.bin")
 	s2Require(t, repository.Close())
 	_, _, _, channels, resumed := observation.census()
 	if channels < 3 || resumed < 2 {
@@ -761,6 +767,9 @@ func s2SessionReuse(t *testing.T, worker *s2Worker) {
 		t.Fatalf("PROT P: %v", err)
 	}
 	shared := worker.clientConfig(t, s2fixture.ListenerExplicit)
+	// A new cache holds no session yet: the first transfer fills it, the second is
+	// the one that must resume.
+	_ = worker.resumeAttempt(t, session, shared)
 	sharedResumed := worker.resumeAttempt(t, session, shared)
 	fresh := worker.clientConfig(t, s2fixture.ListenerExplicit)
 	fresh.ClientSessionCache = nil
@@ -786,11 +795,28 @@ func (w *s2Worker) resumeAttempt(t *testing.T, session *s2RawSession, config *tl
 		t.Fatalf("data dial for the reuse probe: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = session.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	defer func() { _ = session.conn.SetReadDeadline(time.Time{}) }()
+	// The server accepts the data socket and starts TLS on it only for a transfer
+	// command, so the handshake follows the command, never precedes it.
+	if _, err := session.text.Cmd("%s", "NLST"); err != nil {
+		t.Fatalf("NLST for the reuse probe: %v", err)
+	}
+	if _, _, err := session.text.ReadResponse(150); err != nil {
+		t.Fatalf("NLST for the reuse probe: %v", err)
+	}
 	secure := tls.Client(conn, config)
 	if err := secure.HandshakeContext(t.Context()); err != nil {
 		t.Fatalf("data handshake for the reuse probe: %v", err)
 	}
-	return secure.ConnectionState().DidResume
+	resumed := secure.ConnectionState().DidResume
+	_, _ = io.Copy(io.Discard, secure)
+	_ = secure.Close()
+	if _, _, err := session.text.ReadResponse(226); err != nil {
+		t.Fatalf("NLST completion for the reuse probe: %v", err)
+	}
+	return resumed
 }
 
 func (w *s2Worker) clientConfig(t *testing.T, face string) *tls.Config {
@@ -930,6 +956,10 @@ func s2NoDowngrade(t *testing.T, worker *s2Worker) {
 	if !errors.As(plainOnTLS, &operation) {
 		t.Fatalf("plaintext against a TLS-required server was accepted: %v", plainOnTLS)
 	}
+	// jlaffaye/ftp v0.2.4 Login turns an unexpected USER reply into a bare message, so
+	// the library error cannot carry the code; the server's own answer to a cleartext
+	// USER is read on a raw session instead.
+	operation.ReplyCode = worker.plainUserReply(t, s2fixture.ListenerExplicit)
 	if operation.ReplyCode != 421 {
 		t.Fatalf("the TLS-required server refused plaintext with %d, want its own 421", operation.ReplyCode)
 	}
@@ -1308,4 +1338,73 @@ func (s *s2RawSession) Close() error {
 	}
 	s.closed = true
 	return s.conn.Close()
+}
+
+// plainUserReply sends a cleartext USER to one face and returns the server's reply code.
+func (w *s2Worker) plainUserReply(t *testing.T, face string) int {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", w.address(t, face), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial the %s face: %v", face, err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	text := textproto.NewConn(conn)
+	if _, _, err = text.ReadResponse(220); err != nil {
+		t.Fatalf("%s greeting: %v", face, err)
+	}
+	if _, err = text.Cmd("USER %s", w.account); err != nil {
+		t.Fatalf("%s USER: %v", face, err)
+	}
+	code, _, _ := text.ReadResponse(0)
+	return code
+}
+
+// s2ObservingHandshake dials one face, performs the explicit-FTPS preamble when the
+// face needs it, completes one TLS handshake with probe and closes the connection
+// before any FTP command is sent over TLS.
+func s2ObservingHandshake(ctx context.Context, address string, explicit bool, probe *tls.Config) error {
+	raw, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "tcp", address)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = raw.Close() }()
+	_ = raw.SetDeadline(time.Now().Add(10 * time.Second))
+	if explicit {
+		if err = s2AuthTLS(raw); err != nil {
+			return err
+		}
+	}
+	return tls.Client(raw, probe).HandshakeContext(ctx)
+}
+
+// s2AuthTLS performs the explicit-FTPS preamble on a raw control connection: the
+// plaintext greeting, then AUTH TLS, after which the caller starts the handshake.
+func s2AuthTLS(raw net.Conn) error {
+	text := textproto.NewConn(raw)
+	if _, _, err := text.ReadResponse(220); err != nil {
+		return err
+	}
+	if err := text.PrintfLine("AUTH TLS"); err != nil {
+		return err
+	}
+	_, _, err := text.ReadResponse(234)
+	return err
+}
+
+// finalReply reads past preliminary 1xx replies and returns the last reply code the
+// server gave within the wait, or zero when it closed the session without one.
+func (s *s2RawSession) finalReply(wait time.Duration) int {
+	_ = s.conn.SetReadDeadline(time.Now().Add(wait))
+	defer func() { _ = s.conn.SetReadDeadline(time.Time{}) }()
+	code := 0
+	for {
+		got, _, err := s.text.ReadResponse(0)
+		if got != 0 {
+			code = got
+		}
+		if err != nil || got/100 != 1 {
+			return code
+		}
+	}
 }
