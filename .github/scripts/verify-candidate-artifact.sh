@@ -22,14 +22,21 @@ jq -e -n --arg source "${GITHUB_SHA:-}" \
   ($entries | if length == 1 then .[0] else error("expected one linux/amd64 matrix entry") end) as $m |
   # The artifact line the harness logged after writing the file.
   ([$output | capture("D1-ARTIFACT file=candidate-artifact\\.json source_sha=(?<source>[0-9a-f]{40}) image_id=(?<image>sha256:[0-9a-f]{64}) docker_save_sha256=(?<save>[0-9a-f]{64}) docker_save_bytes=(?<bytes>[1-9][0-9]*) intern_web_sha256=(?<web>[0-9a-f]{64}) versions_bound=true")]) as $lines |
-  ([$output | capture("D1-A1 versions mysqld=(?<server>[0-9.]+) xtrabackup=(?<tool>[0-9.]+-[0-9]+) ")]) as $versions |
+  ([$output | capture("D1-A1 versions mysqld=(?<server>[0-9.]+) xtrabackup=(?<tool>[0-9.]+-[0-9]+) xbstream=(?<stream>[0-9.]+-[0-9]+) ")]) as $versions |
   ([$output | capture("D1-A1 built tag=(?<tag>intern:[^ ]+) image_id=")]) as $built |
+  ([$output | capture("D1-A2 identity daemon=[^ ]+ platform=linux/amd64 compose=(?<compose>[0-9][0-9A-Za-z.+-]*) ")]) as $identity |
+  # The license set the image must ship, by path; a count alone would admit any list.
+  ["NOTICE-WEB.txt", "GPL-SOURCE-OFFER.txt", "VERSIONS.txt",
+   "mysql-community-server/LICENSE", "percona-xtrabackup/COPYING",
+   "procps-ng/COPYING", "procps-ng/COPYING.LIB", "go-internals/GO-MODULES.txt"] as $licenses |
   $source != "" and
-  ($lines | length) == 1 and ($versions | length) == 1 and ($built | length) == 1 and
+  ($lines | length) == 1 and ($versions | length) == 1 and ($built | length) == 1 and ($identity | length) == 1 and
   $a.source_sha == $source and $lines[0].source == $source and
   $a.platform == "linux/amd64" and
   $a.image_id == $lines[0].image and
   $a.image_tag == $built[0].tag and
+  $a.image_tag == ("intern:" + $source[0:12] + "-mysql8.4") and
+  $a.upgrade_image_tag == ("intern:" + $source[0:12] + "-upgrade-mysql8.4") and
   $a.docker_save_sha256 == $lines[0].save and
   ($a.docker_save_bytes | tostring) == $lines[0].bytes and
   $a.intern_web_sha256 == $lines[0].web and
@@ -39,8 +46,13 @@ jq -e -n --arg source "${GITHUB_SHA:-}" \
   $a.mysql_image == $m.mysql_image and $a.pxb_image == $m.pxb_image and
   $a.mysql_server_version == $m.server_version and $a.xtrabackup_version == $m.tool_version and
   $versions[0].server == $m.server_version and $versions[0].tool == $m.tool_version and
+  $versions[0].stream == $m.tool_version and
   $a.matrix_status == $m.status and $a.matrix_verified == $m.verified and
-  ($a.license_files | type) == "array" and ($a.license_files | length) >= 8 and
-  ($a.component_versions | type) == "object" and ($a.component_versions | length) > 0
+  $a.evidence_issue == $m.evidence_issue and
+  $a.license_files == $licenses and
+  $a.component_versions == {
+    mysqld: $versions[0].server, xtrabackup: $versions[0].tool, xbstream: $versions[0].stream,
+    compose: $identity[0].compose, server: ("mysql-community:" + $m.server_version)
+  }
 ' >/dev/null
 echo "candidate artifact verified: source=${GITHUB_SHA} matrix=$(jq -r '.[0].status' "$3")"
