@@ -168,6 +168,7 @@ type d1Fixture struct {
 	root          string
 	dir           string
 	hostDir       string
+	kekDigest     string
 	secrets       string
 	probes        string
 	exports       string
@@ -298,6 +299,12 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 	fixture.caPEM = d1Certificate(t, fixture.secrets)
 	require(t, artifact.GenerateKey(filepath.Join(fixture.secrets, "intern_kek")))
 	require(t, os.Chmod(filepath.Join(fixture.secrets, "intern_kek"), 0o600))
+	// The ownership preparation hands the secret to uid 999 with mode 0600, after
+	// which the host test process can no longer read it; its digest is taken now,
+	// while the host still owns the file it generated.
+	kekDigest, err := d1FileDigest(filepath.Join(fixture.secrets, "intern_kek"))
+	require(t, err)
+	fixture.kekDigest = kekDigest
 	require(t, os.Chmod(filepath.Join(fixture.secrets, "intern_tls_key"), 0o600))
 	require(t, os.WriteFile(filepath.Join(fixture.probes, "intern_kek_0644"), []byte("not-a-keyset\n"), 0o644))
 	require(t, fixture.writeOverride())
@@ -1420,8 +1427,7 @@ func (f *d1Fixture) requireSecretsRead(t *testing.T, ctx context.Context, mysqlI
 		f.fatal("the container cannot read the KEK secret: %s", out)
 	}
 	container := strings.Fields(out)[0]
-	host, err := d1FileDigest(filepath.Join(f.secrets, "intern_kek"))
-	require(t, err)
+	host := f.kekDigest
 	if container != host {
 		f.fatal("the KEK in the container is %s, the host secret is %s", container, host)
 	}
@@ -1868,8 +1874,7 @@ func (f *d1Fixture) requireRetained(t *testing.T, ctx context.Context, label str
 		f.fatal("after %s the new incremental parented %s, want the previous head %s", label, backup.ParentID, previous)
 	}
 	kek := f.containerKEKDigest(ctx)
-	host, err := d1FileDigest(filepath.Join(f.secrets, "intern_kek"))
-	require(t, err)
+	host := f.kekDigest
 	if kek != host {
 		f.fatal("after %s the file secret KEK is %s, the host secret is %s", label, kek, host)
 	}
