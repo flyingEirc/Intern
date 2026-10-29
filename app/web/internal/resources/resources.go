@@ -319,6 +319,9 @@ func probeToken() string {
 	return hex.EncodeToString(id[:])
 }
 
+// probeFTP opens the repository exactly the way replication and restore will
+// open it, including the transport mode and the trust bundle, so a probe that
+// passes is a session the engine can really reproduce.
 func (s *Service) probeFTP(ctx context.Context, repository store.Repository) (ProbeOutcome, error) {
 	password, err := s.Store.RepositorySecret(ctx, repository.ID, s.Settings.Sealer)
 	if err != nil {
@@ -327,7 +330,7 @@ func (s *Service) probeFTP(ctx context.Context, repository store.Repository) (Pr
 	repositoryHandle, err := ftp.Open(ctx, ftp.Config{
 		Address: repository.FTP.Address(), Username: repository.FTP.Username,
 		Password: string(password), BasePath: repository.FTP.BasePath,
-		InstanceID: s.Store.InstanceID(), TLSMode: repository.TLSMode,
+		InstanceID: s.Store.InstanceID(), TLSMode: repository.TLSMode, CAPem: repository.FTP.CAPem,
 	})
 	if err != nil {
 		return ProbeOutcome{Failure: ftpFailure(err)}, nil

@@ -345,7 +345,10 @@ ORDER BY CASE r.status WHEN 'verified' THEN 0 ELSE 1 END, r.repository_id`, back
 }
 
 // openReplica unseals the FTP credential and opens one private session. The
-// engine closes it after the link that used it.
+// engine closes it after the link that used it. The transport comes from the
+// repository row itself: a restore from an FTPS copy verifies the server against
+// the bundle the operator stored, and there is no path here that could fall back
+// to plaintext if that handshake is refused.
 func (l *restoreLocator) openReplica(ctx context.Context, repositoryID string) (*ftp.Repository, error) {
 	repository, err := l.database.Repository(ctx, repositoryID)
 	if err != nil {
@@ -363,7 +366,8 @@ func (l *restoreLocator) openReplica(ctx context.Context, repositoryID string) (
 	}
 	return ftp.Open(ctx, ftp.Config{
 		Address: repository.FTP.Address(), Username: repository.FTP.Username, Password: string(password),
-		BasePath: repository.FTP.BasePath, InstanceID: l.database.InstanceID(), TLSMode: repository.TLSMode,
+		BasePath: repository.FTP.BasePath, InstanceID: l.database.InstanceID(),
+		TLSMode: repository.TLSMode, CAPem: repository.FTP.CAPem,
 	})
 }
 

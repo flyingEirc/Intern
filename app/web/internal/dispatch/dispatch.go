@@ -598,7 +598,8 @@ func (d *Dispatcher) openReplicator(ctx context.Context, repository, localRow st
 	}
 	remote, remoteClose, err := openRemote(ctx, ftpConfig{
 		Address: repository.FTP.Address(), Username: repository.FTP.Username, Password: string(password),
-		BasePath: repository.FTP.BasePath, InstanceID: d.config.Database.InstanceID(), TLSMode: repository.TLSMode,
+		BasePath: repository.FTP.BasePath, InstanceID: d.config.Database.InstanceID(),
+		TLSMode: repository.TLSMode, CAPem: repository.FTP.CAPem,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dispatch: FTP repository %s: %w", repository.ID, err)

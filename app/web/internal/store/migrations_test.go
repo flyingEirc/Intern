@@ -1,0 +1,221 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"io/fs"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"testing/fstest"
+
+	"github.com/pressly/goose/v3"
+)
+
+// migrationSet returns the embedded migrations whose version is at most through,
+// which is how a test starts a database at an older schema than the binary
+// carries — the exact state a real upgrade begins from.
+func migrationSet(t *testing.T, through int64) fs.FS {
+	t.Helper()
+	entries, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := fstest.MapFS{}
+	for _, entry := range entries {
+		name := filepath.Base(entry)
+		prefix, _, _ := strings.Cut(name, "_")
+		version, parseErr := strconv.ParseInt(prefix, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("migration %q has no numeric prefix", name)
+		}
+		if version > through {
+			continue
+		}
+		data, readErr := migrations.ReadFile(entry)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		set[name] = &fstest.MapFile{Data: data}
+	}
+	if len(set) == 0 {
+		t.Fatalf("no migrations at or below version %d", through)
+	}
+	return set
+}
+
+func applyMigrations(t *testing.T, db *sql.DB, fsys fs.FS) int64 {
+	t.Helper()
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, fsys, providerOptions()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := provider.Up(context.Background())
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var current int64
+	if err = db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied = 1`).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("applied %d migrations, now at version %d", len(applied), current)
+	return current
+}
+
+// TestFTPSMigrationUpgradesExistingRows is the S2 schema gate: a database that
+// already holds plain repositories and policies keeps every row and every
+// constraint through the rebuild, and only then accepts the FTPS modes.
+func TestFTPSMigrationUpgradesExistingRows(t *testing.T) {
+	db := seedPreFTPSDatabase(t)
+	if got := applyMigrations(t, db, migrationSet(t, latestEmbedded(t))); got != latestEmbedded(t) {
+		t.Fatalf("upgraded version = %d", got)
+	}
+	requirePlainRowPreserved(t, db)
+	requireForeignKeysIntact(t, db)
+	requireFTPSConstraints(t, db)
+}
+
+// seedPreFTPSDatabase opens a database at schema 8 holding one plain
+// repository, a source and a policy that references the repository.
+func seedPreFTPSDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if got := applyMigrations(t, db, migrationSet(t, 8)); got != 8 {
+		t.Fatalf("baseline version = %d, want 8", got)
+	}
+	// The plain-only shape must refuse FTPS before the upgrade, which is what
+	// makes this database a real pre-S2 state instead of an empty file.
+	if _, err = db.Exec(ftpRepositoryInsert("r-early", "early", "explicit")); !sqliteRejects(err) {
+		t.Fatalf("the old schema accepted FTPS: %v", err)
+	}
+	for _, statement := range []string{
+		ftpRepositoryInsert("r-plain", "plain-one", "plain"),
+		`INSERT INTO sources (id,name,socket,datadir,username,secret_ciphertext,created_at,updated_at)
+		 VALUES ('s-1','source','/run/mysqld/mysqld.sock','/var/lib/mysql','backup',X'736563726574','now','then')`,
+		`INSERT INTO policies (id,name,source_id,local_repository_id,replica_repository_id,full_cron,incremental_cron,
+			timezone,max_chain_length,parallel,throttle,zstd_level,page_tracking,enabled,created_at,updated_at)
+		 VALUES ('p-1','policy','s-1','r-plain','r-plain','0 2 * * *','0 * * * *','UTC',3,1,0,3,0,0,'now','then')`,
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	return db
+}
+
+// requirePlainRowPreserved checks the seeded plain repository survived the
+// table rebuild unchanged, including its sealed secret.
+func requirePlainRowPreserved(t *testing.T, db *sql.DB) {
+	t.Helper()
+	var name, mode, config, createdAt string
+	if err := db.QueryRow(`SELECT name, tls_mode, config_json, created_at FROM repositories WHERE id='r-plain'`).
+		Scan(&name, &mode, &config, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if name != "plain-one" || mode != "plain" || createdAt != "now" ||
+		config != `{"host":"ftp.example","port":21,"base_path":"/backups","username":"u"}` {
+		t.Fatalf("row changed across the rebuild: %q %q %q %q", name, mode, config, createdAt)
+	}
+	// The sealed secret is copied byte for byte: a rotated ciphertext would make
+	// every stored credential unreadable.
+	var secret []byte
+	if err := db.QueryRow(`SELECT secret_ciphertext FROM repositories WHERE id='r-plain'`).Scan(&secret); err != nil {
+		t.Fatal(err)
+	}
+	if string(secret) != "secret" {
+		t.Fatalf("sealed secret = %q", secret)
+	}
+}
+
+// requireForeignKeysIntact checks the rebuild left foreign keys enforced,
+// violation-free and switched on.
+func requireForeignKeysIntact(t *testing.T, db *sql.DB) {
+	t.Helper()
+	// Foreign keys are still enforced, which only holds if the rename left the
+	// policies REFERENCES clause pointing at this table.
+	if _, err := db.Exec(`INSERT INTO policies (id,name,source_id,local_repository_id,full_cron,incremental_cron,
+		timezone,max_chain_length,parallel,throttle,zstd_level,page_tracking,enabled,created_at,updated_at)
+		VALUES ('p-bad','bad','s-1','r-missing','0 2 * * *','0 * * * *','UTC',3,1,0,3,0,0,'now','then')`); !sqliteRejects(err) {
+		t.Fatalf("a dangling repository reference was accepted: %v", err)
+	}
+	var violations int
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		violations++
+	}
+	_ = rows.Close()
+	if violations != 0 {
+		t.Fatalf("foreign key violations after upgrade: %d", violations)
+	}
+	var pragma string
+	if err = db.QueryRow(`PRAGMA foreign_keys`).Scan(&pragma); err != nil {
+		t.Fatal(err)
+	}
+	if pragma != "1" {
+		t.Fatalf("foreign_keys left at %q by the migration", pragma)
+	}
+}
+
+// requireFTPSConstraints checks the relaxed schema now accepts both FTPS modes
+// and still refuses the combinations that would weaken a repository.
+func requireFTPSConstraints(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, mode := range []string{"explicit", "implicit"} {
+		if _, err := db.Exec(ftpRepositoryInsert("r-"+mode, mode, mode)); err != nil {
+			t.Fatalf("FTPS mode %s refused: %v", mode, err)
+		}
+	}
+	if _, err := db.Exec(noSecretFTPRepositoryInsert("r-ftps-bare", "bare", "explicit")); !sqliteRejects(err) {
+		t.Fatalf("a secret-less FTPS repository was accepted: %v", err)
+	}
+	if _, err := db.Exec(localRepositoryInsert("r-local-explicit", "local", "explicit")); !sqliteRejects(err) {
+		t.Fatalf("a local repository with an FTPS mode was accepted: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE repositories SET tls_mode='starttls' WHERE id='r-plain'`); !sqliteRejects(err) {
+		t.Fatalf("an unknown tls_mode was accepted after the upgrade: %v", err)
+	}
+}
+
+func latestEmbedded(t *testing.T) int64 {
+	t.Helper()
+	version, err := LatestVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+func ftpRepositoryInsert(id, name, mode string) string {
+	return `INSERT INTO repositories (id,name,kind,config_json,secret_ciphertext,tls_mode,created_at,updated_at) VALUES (
+		'` + id + `','` + name + `','ftp',
+		'{"host":"ftp.example","port":21,"base_path":"/backups","username":"u"}',
+		X'736563726574','` + mode + `','now','then')`
+}
+
+func noSecretFTPRepositoryInsert(id, name, mode string) string {
+	return `INSERT INTO repositories (id,name,kind,config_json,secret_ciphertext,tls_mode,created_at,updated_at) VALUES (
+		'` + id + `','` + name + `','ftp',
+		'{"host":"ftp.example","port":990,"base_path":"/backups","username":"u"}',
+		NULL,'` + mode + `','now','then')`
+}
+
+func localRepositoryInsert(id, name, mode string) string {
+	return `INSERT INTO repositories (id,name,kind,config_json,secret_ciphertext,tls_mode,created_at,updated_at) VALUES (
+		'` + id + `','` + name + `','local','{"root":"/repository"}',NULL,'` + mode + `','now','then')`
+}
+
+func sqliteRejects(err error) bool {
+	return err != nil && !errors.Is(err, ErrConflict)
+}

@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/storage/ftp"
 )
 
 // maxResourceName is the frozen name length for every Stage C resource.
@@ -29,11 +31,16 @@ type repositoryRequest struct {
 	Password *string     `json:"password"`
 }
 
+// ftpRequest is the FTP part of a repository body. ca_pem is public data, not a
+// secret: the PEM bundle that signed the server certificate, only meaningful for
+// an FTPS mode. It is capped and parsed here, so an unusable bundle is a 422
+// before any row exists.
 type ftpRequest struct {
 	Host     string `json:"host"`
 	Port     int64  `json:"port"`
 	BasePath string `json:"base_path"`
 	Username string `json:"username"`
+	CAPem    string `json:"ca_pem"`
 }
 
 type sourceRequest struct {
@@ -140,9 +147,9 @@ func repositoryConfigShape(kind string, request repositoryRequest) error {
 }
 
 // repositoryInput validates one repository body and applies the frozen tls_mode
-// rule: a local repository is "none"; an FTP repository must send "plain"
-// explicitly. An omitted value never becomes plain, and the FTPS values
-// ("explicit", "implicit") are refused because FTPS is not implemented in W3.
+// rule: a local repository is "none"; an FTP repository must name one of "plain",
+// "explicit" or "implicit" itself. An omitted value never becomes plain, and no
+// mode is ever inferred from the presence of a CA bundle.
 func (h resourceHandlers) repositoryInput(request repositoryRequest, creating bool) (store.RepositoryInput, bool, error) {
 	in := store.RepositoryInput{Name: request.Name, Kind: request.Kind, TLSMode: request.TLSMode}
 	if err := validateResourceName(request.Name); err != nil {
@@ -154,7 +161,7 @@ func (h resourceHandlers) repositoryInput(request repositoryRequest, creating bo
 		return in, false, err
 	case store.RepositoryFTP:
 		err := h.ftpRepositoryInput(&in, request, creating)
-		return in, err == nil, err
+		return in, err == nil && request.TLSMode == store.TLSModePlain, err
 	default:
 		return in, false, errors.New(`kind must be "local" or "ftp"`)
 	}
@@ -164,7 +171,7 @@ func (h resourceHandlers) repositoryInput(request repositoryRequest, creating bo
 // and never carries an FTP configuration or a secret.
 func (h resourceHandlers) localRepositoryInput(in *store.RepositoryInput, request repositoryRequest) error {
 	if request.TLSMode != store.TLSModeNone {
-		return &tlsModeError{`a local repository requires tls_mode "none"`}
+		return &transportShapeError{`a local repository requires tls_mode "none"`}
 	}
 	if !isAbsolutePath(request.Root) {
 		return errors.New("root must be a non-empty absolute path")
@@ -179,17 +186,20 @@ func (h resourceHandlers) localRepositoryInput(in *store.RepositoryInput, reques
 	return nil
 }
 
-// ftpRepositoryInput fills a plain FTP repository. TLSMode must be exactly
-// "plain"; the password is required on create and optional on update, where an
-// omitted value keeps the stored secret.
+// ftpRepositoryInput fills one FTP repository in any of the three modes. The
+// password is required on create and optional on update, where an omitted value
+// keeps the stored secret. A CA bundle belongs only to an FTPS mode, so a plain
+// body that carries one is refused rather than quietly ignored.
 func (h resourceHandlers) ftpRepositoryInput(in *store.RepositoryInput, request repositoryRequest, creating bool) error {
-	if request.TLSMode != store.TLSModePlain {
-		return &tlsModeError{`an FTP repository requires tls_mode "plain" explicitly; FTPS is not supported`}
+	switch request.TLSMode {
+	case store.TLSModePlain, store.TLSModeExplicit, store.TLSModeImplicit:
+	default:
+		return &transportShapeError{`an FTP repository requires tls_mode "plain", "explicit" or "implicit" explicitly`}
 	}
 	if request.Root != "" {
 		return errors.New("an FTP repository has no root")
 	}
-	config, err := validateFTP(request.FTP)
+	config, err := validateFTP(request.FTP, request.TLSMode)
 	if err != nil {
 		return err
 	}
@@ -207,25 +217,54 @@ func (h resourceHandlers) ftpRepositoryInput(in *store.RepositoryInput, request 
 	return nil
 }
 
-func validateFTP(config *ftpRequest) (*store.FTPRepositoryConfig, error) {
+func validateFTP(config *ftpRequest, mode string) (*store.FTPRepositoryConfig, error) {
 	if config == nil {
 		return nil, errors.New("an FTP repository requires host, port, base_path and username")
 	}
-	if config.Host == "" || strings.ContainsAny(config.Host, "\x00\r\n") {
-		return nil, errors.New("ftp.host must be a non-empty host or IP address without control bytes")
+	if err := validateFTPEndpoint(config); err != nil {
+		return nil, err
 	}
-	if config.Port < 1 || config.Port > 65535 {
-		return nil, errors.New("ftp.port must be between 1 and 65535")
-	}
-	if !isAbsoluteFTPPath(config.BasePath) {
-		return nil, errors.New("ftp.base_path must be an absolute, clean slash-separated path")
-	}
-	if config.Username == "" || strings.ContainsAny(config.Username, "\x00\r\n") {
-		return nil, errors.New("ftp.username must be a non-empty string without control bytes")
+	if err := validateFTPCAPem(config.CAPem, mode); err != nil {
+		return nil, err
 	}
 	return &store.FTPRepositoryConfig{
-		Host: config.Host, Port: config.Port, BasePath: config.BasePath, Username: config.Username,
+		Host: config.Host, Port: config.Port, BasePath: config.BasePath,
+		Username: config.Username, CAPem: config.CAPem,
 	}, nil
+}
+
+// validateFTPEndpoint checks the address, path and login fields in the order
+// the API reports them.
+func validateFTPEndpoint(config *ftpRequest) error {
+	if config.Host == "" || strings.ContainsAny(config.Host, "\x00\r\n") {
+		return errors.New("ftp.host must be a non-empty host or IP address without control bytes")
+	}
+	if config.Port < 1 || config.Port > 65535 {
+		return errors.New("ftp.port must be between 1 and 65535")
+	}
+	if !isAbsoluteFTPPath(config.BasePath) {
+		return errors.New("ftp.base_path must be an absolute, clean slash-separated path")
+	}
+	if config.Username == "" || strings.ContainsAny(config.Username, "\x00\r\n") {
+		return errors.New("ftp.username must be a non-empty string without control bytes")
+	}
+	return nil
+}
+
+// validateFTPCAPem rejects a trust bundle on a plain repository or one that
+// holds no parseable certificate.
+func validateFTPCAPem(caPem, mode string) error {
+	if caPem == "" {
+		return nil
+	}
+	if mode == store.TLSModePlain {
+		return &transportShapeError{`a plain FTP repository has no ca_pem; choose "explicit" or "implicit" to use one`}
+	}
+	if !ftp.ValidCAPem(caPem) {
+		return &transportShapeError{`ftp.ca_pem must hold one or more PEM certificates within ` +
+			strconv.Itoa(ftp.MaxCAPemBytes) + ` bytes`}
+	}
+	return nil
 }
 
 func (h resourceHandlers) deleteRepository(c *gin.Context) {
@@ -346,17 +385,18 @@ func validateSource(request sourceRequest, creating bool) (store.SourceInput, er
 	return in, nil
 }
 
-// tlsModeError marks the frozen tls_mode shape violation, which is reported as
-// 422 rather than 400: an FTP repository must send "plain" explicitly, and a
-// local repository must send "none".
-type tlsModeError struct{ message string }
+// transportShapeError marks a frozen transport-shape violation, which is
+// reported as 422 rather than 400: the tls_mode a kind requires, and a ca_pem
+// that is misplaced or unusable. Both are decisions about the shape of the whole
+// body, so resending the same body cannot fix them.
+type transportShapeError struct{ message string }
 
-func (e *tlsModeError) Error() string { return e.message }
+func (e *transportShapeError) Error() string { return e.message }
 
-// repositoryValidationError reports a tls_mode violation as 422 validation_failed
-// and every other repository body error as 400.
+// repositoryValidationError reports a transport-shape violation as 422
+// validation_failed and every other repository body error as 400.
 func repositoryValidationError(c *gin.Context, err error) {
-	var mode *tlsModeError
+	var mode *transportShapeError
 	if errors.As(err, &mode) {
 		render.Error(c, http.StatusUnprocessableEntity, render.ValidationFailed, mode.Error())
 		return
