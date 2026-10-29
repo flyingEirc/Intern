@@ -77,6 +77,97 @@ func TestFTPSMigrationUpgradesExistingRows(t *testing.T) {
 	requireFTPSConstraints(t, db)
 }
 
+// TestFTPSMigrationDownIsAtomic pins both downgrade outcomes. With an FTPS row
+// present the plain-only shape cannot hold it, so the downgrade must fail and
+// leave the database exactly as it was — the original table with every row, no
+// half-built copy, still at the FTPS version — so a retry starts from the same
+// state. Without one it must restore the plain-only shape and keep the rows.
+func TestFTPSMigrationDownIsAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "down.db")
+	db := openMigrationDB(t, path)
+	latest := latestEmbedded(t)
+	applyMigrations(t, db, migrationSet(t, latest))
+	for _, statement := range []string{
+		ftpRepositoryInsert("r-plain", "plain-one", "plain"),
+		ftpRepositoryInsert("r-ftps", "ftps-one", "explicit"),
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("seed %q: %v", statement, err)
+		}
+	}
+	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrationSet(t, latest), providerOptions()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = provider.Down(context.Background()); err == nil {
+		t.Fatal("the downgrade dropped the FTPS repository instead of refusing")
+	}
+	// A new connection sees only committed state: whatever the failed statement
+	// left open on the old one is gone with it.
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db = openMigrationDB(t, path)
+	requireRepositoryState(t, db, latest, 2)
+
+	if _, err = db.Exec(`DELETE FROM repositories WHERE id='r-ftps'`); err != nil {
+		t.Fatal(err)
+	}
+	provider, err = goose.NewProvider(goose.DialectSQLite3, db, migrationSet(t, latest), providerOptions()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = provider.Down(context.Background()); err != nil {
+		t.Fatalf("the downgrade of a plain-only database failed: %v", err)
+	}
+	requireRepositoryState(t, db, latest-1, 1)
+	if _, err = db.Exec(ftpRepositoryInsert("r-again", "again", "explicit")); !sqliteRejects(err) {
+		t.Fatalf("the downgraded schema accepted FTPS: %v", err)
+	}
+}
+
+func openMigrationDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// requireRepositoryState checks the schema version, that no rebuild table was
+// left behind, and how many repository rows survived.
+func requireRepositoryState(t *testing.T, db *sql.DB, version int64, rows int) {
+	t.Helper()
+	var current int64
+	if err := db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied = 1`).Scan(&current); err != nil {
+		t.Fatal(err)
+	}
+	if current != version {
+		t.Fatalf("schema version = %d, want %d", current, version)
+	}
+	var leftovers int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('repositories_ftps','repositories_plain')`).
+		Scan(&leftovers); err != nil {
+		t.Fatal(err)
+	}
+	if leftovers != 0 {
+		t.Fatalf("%d half-built rebuild tables were left behind", leftovers)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM repositories`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != rows {
+		t.Fatalf("repositories rows = %d, want %d", count, rows)
+	}
+}
+
 // seedPreFTPSDatabase opens a database at schema 8 holding one plain
 // repository, a source and a policy that references the repository.
 func seedPreFTPSDatabase(t *testing.T) *sql.DB {
@@ -86,6 +177,9 @@ func seedPreFTPSDatabase(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// The product store runs on exactly one connection, which the explicit
+	// BEGIN/COMMIT inside the NO TRANSACTION rebuild relies on.
+	db.SetMaxOpenConns(1)
 	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatal(err)
 	}
