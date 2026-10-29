@@ -225,8 +225,8 @@ curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/repositories" \
 curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/repositories" \
   -H 'Content-Type: application/json' \
   -d "$(jq -n --rawfile ca ops-ftp-ca.pem '{name:"opsftps",kind:"ftp",tls_mode:"explicit",
-       ftp:{host:"ftp.internal",port:21,base_path:"/intern",username:"intern_bkp"},
-       ca_pem:$ca,password:"READ_FROM_SECRET_STORE"}')"
+       ftp:{host:"ftp.internal",port:21,base_path:"/intern",username:"intern_bkp",ca_pem:$ca},
+       password:"READ_FROM_SECRET_STORE"}')"
 
 # 3) 数据源：走共享 socket，账号是 'intern_bkp'@'localhost'
 SRC=$(curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/sources" \
