@@ -80,11 +80,16 @@ start_listener() {
         0)
             # A server without TLS at all: compiled with TLS support, but the
             # upgrade is refused, so this is the downgrade oracle.
-            "$daemon_binary" -H -S"$ADVERTISE,$daemon" -lpuredb:/data/users.pdb -E -A -j \
+            # -w (allowuserfxp): the control channel reaches the daemon through
+            # the s2-tap relay, so its peer is this container, while PASV data
+            # connections come straight from the worker; without -w Pure-FTPd
+            # drops every data connection whose address differs from the control
+            # peer. It changes no TLS behaviour.
+            "$daemon_binary" -H -S"$ADVERTISE,$daemon" -lpuredb:/data/users.pdb -E -A -j -w \
                 -u1000 -p"$first:$last" -c64 -C64 -g"/run/pure-ftpd/$name.pid" -Y 0 &
             ;;
         *)
-            "$daemon_binary" -H -S"$ADVERTISE,$daemon" -lpuredb:/data/users.pdb -E -A -j \
+            "$daemon_binary" -H -S"$ADVERTISE,$daemon" -lpuredb:/data/users.pdb -E -A -j -w \
                 -u1000 -p"$first:$last" -c64 -C64 -g"/run/pure-ftpd/$name.pid" \
                 -Y "$level" --certfile "/run/s2/$cert.pem" &
             ;;
