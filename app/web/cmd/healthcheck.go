@@ -184,15 +184,10 @@ func validHealthURL(endpoint *url.URL) error {
 	return nil
 }
 
-// isLoopbackHost accepts the loopback literals and the resolved names, and
-// refuses an empty or wildcard host so only a real loopback target is trusted.
+// isLoopbackHost accepts only literal loopback addresses. A name such as
+// "localhost" is resolved by the host's resolver configuration and could point
+// elsewhere, so it never earns the certificate-verification exception.
 func isLoopbackHost(host string) bool {
-	if host == "" || host == "*" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
 	address := net.ParseIP(host)
 	return address != nil && address.IsLoopback()
 }

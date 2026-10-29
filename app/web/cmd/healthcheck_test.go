@@ -116,12 +116,12 @@ func TestHealthcheckTargetAcceptsExplicitURL(t *testing.T) {
 }
 
 func TestHealthcheckIsLoopbackHost(t *testing.T) {
-	for _, host := range []string{"127.0.0.1", "127.0.0.53", "::1", "localhost", "Localhost"} {
+	for _, host := range []string{"127.0.0.1", "127.0.0.53", "::1"} {
 		if !isLoopbackHost(host) {
 			t.Fatalf("%q is loopback", host)
 		}
 	}
-	for _, host := range []string{"", "*", "0.0.0.0", "::", "192.0.2.5", "intern.example", "[::1]"} {
+	for _, host := range []string{"", "*", "0.0.0.0", "::", "192.0.2.5", "intern.example", "[::1]", "localhost", "Localhost"} {
 		if isLoopbackHost(host) {
 			t.Fatalf("%q is not loopback", host)
 		}
