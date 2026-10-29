@@ -65,8 +65,8 @@ type Bundle struct {
 //     name, so only the hostname check can refuse it;
 //   - LeafExpired is issued by the same CA for the right name and is already past
 //     its NotAfter, so only the validity window can refuse it;
-//   - LeafRogue is self-signed for the right name, so the chain is the refusal
-//     against the bundle a worker pins.
+//   - LeafRogue is issued for the right name by a second, unrelated CA, so the
+//     chain is the refusal against the bundle a worker pins.
 //
 // Keys are ECDSA P-256 and every signature is SHA-256, which is what both the
 // daemon's default cipher list and a TLS 1.2 or 1.3 client negotiate.
@@ -97,11 +97,11 @@ func Certificates(host string, now time.Time) (Bundle, error) {
 		{LeafExpired, host, now.Add(-time.Hour), false},
 		{LeafRogue, host, now.Add(24 * time.Hour), true},
 	} {
-		signer, issuer := caKey, "test-ca"
+		signer, parent, issuer := caKey, caCert, "test-ca"
 		if wanted.foreign {
-			signer, issuer = rogueKey, "self"
+			signer, parent, issuer = rogueKey, rogueCert, "rogue-ca"
 		}
-		leaf, err := serve(wanted.name, wanted.dns, wanted.notAfter, now, signer, caCert, issuer)
+		leaf, err := serve(wanted.name, wanted.dns, wanted.notAfter, now, signer, parent, issuer)
 		if err != nil {
 			return Bundle{}, err
 		}
