@@ -2155,8 +2155,10 @@ func (f *d1Fixture) requireInterruptedRun(t *testing.T, run d1Run, runID string,
 func (f *d1Fixture) stopGraceSeconds(ctx context.Context) int {
 	f.t.Helper()
 	id := f.containerID(ctx, "intern")
-	raw := f.docker(ctx, "inspect", "--format", "{{json .HostConfig.StopGracePeriod}}", id)
-	grace, err := strconv.Atoi(strings.Trim(raw, "\""))
+	// Compose maps stop_grace_period to the container's Config.StopTimeout (whole
+	// seconds); there is no HostConfig.StopGracePeriod field.
+	raw := f.docker(ctx, "inspect", "--format", "{{json .Config.StopTimeout}}", id)
+	grace, err := strconv.Atoi(strings.TrimSpace(raw))
 	require(f.t, err)
 	if grace < 90 {
 		f.fatal("the deployed stop_grace_period is %ds, the design requires at least 90s", grace)
