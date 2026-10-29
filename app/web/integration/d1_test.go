@@ -2137,12 +2137,13 @@ func (f *d1Fixture) requireInterruptedRun(t *testing.T, run d1Run, runID string,
 	if run.Status == "completed" || run.BackupID != nil {
 		f.fatal("the interrupted run reported completed with backup %s", d1Text(run.BackupID))
 	}
+	// A graceful SIGTERM cancels the worker loop; the dispatcher records a run that
+	// was still copying as failed/backup_failed (dispatch/backup.go failChain). Only
+	// a run found still running at the next start becomes interrupted, and only an
+	// explicit cancel becomes canceled, so neither is the contract for this stop.
 	class := d1Text(run.ErrorClass)
-	if run.Status != "failed" && run.Status != "canceled" {
-		f.fatal("the stopped run %s ended %s, want failed or canceled", runID, run.Status)
-	}
-	if class != "canceled" && class != "interrupted" {
-		f.fatal("the stopped run %s ended %s class=%s code=%s, want canceled or interrupted",
+	if run.Status != "failed" || class != "backup_failed" {
+		f.fatal("the SIGTERM-stopped run %s ended %s class=%s code=%s, want failed/backup_failed",
 			runID, run.Status, class, d1Text(run.ErrorCode))
 	}
 	if after := f.completedRuns(t); after != before {

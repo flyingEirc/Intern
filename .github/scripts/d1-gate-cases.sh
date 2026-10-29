@@ -86,7 +86,7 @@ payload() {
 		"D1-A5 second_container=refused flock_text=true exit=1 primary_healthy=true primary_api=200" \
 		"D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true metadata_dir=/tmp/d1-refusal-metadata" \
 		"D1-A5 sigterm run=$sigterm_run observed_running=true grace_seconds=120 stop_seconds=7 exit_code=0 oom_killed=false" \
-		"D1-A5 no_false_completed=true run_status=failed error_class=interrupted backup_id=none completed_runs_before=3 completed_runs_after=3" \
+		"D1-A5 no_false_completed=true run_status=failed error_class=backup_failed backup_id=none completed_runs_before=3 completed_runs_after=3" \
 		"D1-ARTIFACT file=candidate-artifact.json source_sha=$source image_id=$image docker_save_sha256=$save docker_save_bytes=1610612736 intern_web_sha256=$web versions_bound=true" \
 		"D1-CASE a1-image" "D1-CASE a2-compose" "D1-CASE a3-business" "D1-CASE a4-lifecycle" "D1-CASE a5-guardrails"
 }
@@ -226,9 +226,9 @@ reject stop_beyond_grace 'if has("Output") then .Output |= sub("stop_seconds=7";
 reject stop_unobserved 'if has("Output") then .Output |= sub("observed_running=true"; "observed_running=false") else . end'
 reject sigkilled 'if has("Output") then .Output |= sub("exit_code=0"; "exit_code=137") else . end'
 reject oom_killed 'if has("Output") then .Output |= sub("oom_killed=false"; "oom_killed=true") else . end'
-reject false_completed 'if has("Output") then .Output |= sub("run_status=failed error_class=interrupted backup_id=none"; "run_status=completed error_class=none backup_id=55555555555555555555555555555555") else . end'
+reject false_completed 'if has("Output") then .Output |= sub("run_status=failed error_class=backup_failed backup_id=none"; "run_status=completed error_class=none backup_id=55555555555555555555555555555555") else . end'
 reject completed_grew 'if has("Output") then .Output |= sub("completed_runs_before=3 completed_runs_after=3"; "completed_runs_before=3 completed_runs_after=4") else . end'
-reject canceled_as_clean 'if has("Output") then .Output |= sub("error_class=interrupted"; "error_class=unavailable") else . end'
+reject wrong_stop_class 'if has("Output") then .Output |= sub("error_class=backup_failed backup_id=none"; "error_class=unavailable backup_id=none") else . end'
 reject no_artifact 'if has("Output") then .Output |= select((. // "") | contains("D1-ARTIFACT file=") | not) else . end'
 
 if run_gate "$wrong_source" "$work/accept.jsonl" "$work/sha.log"; then

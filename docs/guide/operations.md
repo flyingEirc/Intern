@@ -309,9 +309,9 @@ docker run --rm --platform linux/amd64 -u 999:999 \
 
 `intern-web serve` 收到 SIGTERM/SIGINT 后按顺序：停止接收新请求 → 在 `--shutdown-timeout`（默认 30s）窗口内优雅关停 → 排干 dispatcher 的两个 worker。注意 flag 自己的说明：**这只是关闭窗口，不是进程退出的绝对死线**；窗口之后在途 handler 仍可能继续排干（分离审计预算 + SQLite busy 超时 + 少量余量，当前约 10.5s）。取消一个请求不会打断 SQLite 的 busy 等待或 fsync。
 
-因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例的做法是保持一个被 `throttle=1` 拖住的真实全量在飞行中，再用 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码不是 137、没有 OOMKilled。
+因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例的做法是保持一个被 `throttle=1` 拖住的真实全量在飞行中，再用 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码为 0、没有 OOMKilled。
 
-被中断的运行**永不记成 completed**：重启后由下一次启动的恢复流程把该行收敛为 `failed` 或 `canceled`，`error_class` 是 `canceled` 或 `interrupted`，`backup_id` 为空，completed 计数不增长。若 worker 活过了 bounded 排干窗口，`serve` 会返回错误（不吞掉），状态交给下次启动回收。已发布导出与已提交备份不受影响。
+被中断的运行**永不记成 completed**，`backup_id` 为空，completed 计数不增长：在宽限期内完成的优雅 SIGTERM 会把仍在复制的运行记为 `failed`、`error_class=backup_failed`；进程被强杀（SIGKILL/崩溃）时，下一次启动的恢复流程把遗留的 `running` 行收敛为 `failed`、`error_class=interrupted`；只有显式取消才是 `canceled`。若 worker 活过了 bounded 排干窗口，`serve` 会返回错误（不吞掉），状态交给下次启动回收。已发布导出与已提交备份不受影响。
 
 ## 10. 升级、重建与回滚
 

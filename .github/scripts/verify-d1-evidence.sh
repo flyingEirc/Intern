@@ -120,7 +120,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A5 second_container=refused flock_text=true exit=[1-9][0-9]* primary_healthy=true primary_api=200")) and
   ($output | test("D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true")) and
   ($output | test("D1-A5 sigterm run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} observed_running=true grace_seconds=1[0-9][0-9] stop_seconds=([0-9]|[1-8][0-9]) exit_code=0 oom_killed=false")) and
-  ($output | test("D1-A5 no_false_completed=true run_status=(?:failed|canceled) error_class=(?:canceled|interrupted) backup_id=none completed_runs_before=([0-9]+) completed_runs_after=\\1")) and
+  ($output | test("D1-A5 no_false_completed=true run_status=failed error_class=backup_failed backup_id=none completed_runs_before=([0-9]+) completed_runs_after=\\1")) and
   # The candidate artifact binds the exact commit, the image that was built, the
   # tarball digest, and the binary digest the repeatable build compared.
   ($output | test("D1-A1 repeatable=true[^\\n]*intern_web_sha256=([0-9a-f]{64})[\\s\\S]*D1-ARTIFACT file=candidate-artifact\\.json[^\\n]*intern_web_sha256=\\1")) and
