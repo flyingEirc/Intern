@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Intern Web control plane
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Session authentication, three-role authorization, users and audit API.
     JSON uses encoding/json/v2; handwritten handlers are checked by kin-openapi.

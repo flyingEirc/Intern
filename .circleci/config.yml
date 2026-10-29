@@ -105,6 +105,24 @@ jobs:
           name: S2 evidence gate accept and reject cases
           command: .github/scripts/s2-gate-cases.sh
       - run:
+          name: Candidate artifact gate accept and reject cases
+          command: .github/scripts/candidate-artifact-cases.sh
+      - run:
+          name: Publish the OpenAPI contract with its digest
+          command: |
+            set -euo pipefail
+            mkdir -p .cache/contract
+            cp app/web/api/openapi.yaml .cache/contract/openapi.yaml
+            version=$(grep -m1 -E '^  version:' app/web/api/openapi.yaml | awk '{print $2}')
+            test -n "$version"
+            digest=$(sha256sum app/web/api/openapi.yaml | cut -d' ' -f1)
+            printf 'source_sha=%s\ncontract=app/web/api/openapi.yaml\ninfo_version=%s\nsha256=%s\n' \
+              "$CIRCLE_SHA1" "$version" "$digest" > .cache/contract/openapi.release
+            cat .cache/contract/openapi.release
+      - store_artifacts:
+          path: .cache/contract
+          destination: contract-openapi
+      - run:
           name: Install pinned golangci-lint
           no_output_timeout: 20m
           command: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
@@ -375,6 +393,14 @@ jobs:
             set -eo pipefail
             export GITHUB_SHA="$CIRCLE_SHA1"
             .github/scripts/verify-d1-evidence.sh .cache/quality/deploy/events.jsonl
+      - run:
+          name: Bind the candidate artifact to the run that wrote it
+          when: always
+          command: |
+            set -eo pipefail
+            export GITHUB_SHA="$CIRCLE_SHA1"
+            .github/scripts/verify-candidate-artifact.sh .cache/quality/deploy/events.jsonl \
+              .cache/quality/deploy/candidate-artifact.json internal/physical/compat.json
       - run:
           name: Stage allowlisted deployment evidence
           when: always
