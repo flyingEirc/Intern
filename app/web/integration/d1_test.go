@@ -1027,6 +1027,17 @@ func (f *d1Fixture) checkComposePins(mysqlImage, pxbImage string) {
 		d1ComposePath, d1EnvExamplePath, d1DockerfilePath)
 }
 
+// refreshAPI re-reads the published HTTPS port and starts a fresh client. The
+// deployment publishes on an ephemeral host port, and Docker assigns a new one
+// whenever the container is restarted, recreated or started again, so every such
+// step must re-resolve the API address (and log in again: the cookie jar is keyed
+// by host and port).
+func (f *d1Fixture) refreshAPI(ctx context.Context) {
+	f.t.Helper()
+	f.apiBase = "https://127.0.0.1:" + f.publishedPort(ctx, "intern", "8443")
+	f.newAPIClient()
+}
+
 // readRepositoryFile reads one repository file the deployment must keep in sync
 // with the compatibility matrix.
 func (f *d1Fixture) readRepositoryFile(path string) string {
@@ -1570,7 +1581,7 @@ func (f *d1Fixture) backup(t *testing.T, ctx context.Context, kind, key string) 
 		f.fatal("backup %s is not a completed local payload: %+v", *run.BackupID, backup)
 	}
 	f.report(d1RunKey(kind)+"run=%s backup=%s status=%s seq=%d payload_bytes=%d sha256=%s",
-		kind, runID, *run.BackupID, backup.Status, backup.Seq, d1Int(run.PayloadSize), backup.PayloadSHA256)
+		runID, *run.BackupID, backup.Status, backup.Seq, d1Int(run.PayloadSize), backup.PayloadSHA256)
 	return *run.BackupID
 }
 
@@ -1814,9 +1825,11 @@ func (f *d1Fixture) caseLifecycle(t *testing.T, ctx context.Context) {
 	volumes := f.volumeNames(ctx)
 	f.composeOK(ctx, "restart", "intern")
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
+	f.refreshAPI(ctx)
 	f.requireRetained(t, ctx, "restart", volumes)
 	f.composeOK(ctx, "up", "--detach", "--force-recreate", "intern")
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
+	f.refreshAPI(ctx)
 	f.requireRetained(t, ctx, "recreate", volumes)
 	f.upgradeImage(t, ctx)
 }
@@ -1981,6 +1994,7 @@ func (f *d1Fixture) upgradeImage(t *testing.T, ctx context.Context) {
 	f.d1SetEnv("INTERN_VERSION", strings.TrimSuffix(strings.TrimPrefix(f.upgrade, "intern:"), "-mysql8.4"))
 	f.composeOK(ctx, "up", "--detach", "intern")
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
+	f.refreshAPI(ctx)
 	after := f.containerID(ctx, "intern")
 	if after == before {
 		f.fatal("the upgrade kept the same container %s, so no image was replaced", after)
@@ -2105,6 +2119,8 @@ func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	}
 	f.composeOK(ctx, "start", "intern")
 	f.waitHealthy(ctx, "intern", 4*time.Minute)
+	f.refreshAPI(ctx)
+	f.login(d1AdminUsername, f.adminPass)
 	run := f.waitRun(t, runID, 5*time.Minute)
 	f.requireInterruptedRun(t, run, runID, before)
 	f.report(d1KeyStop+"run=%s observed_running=true grace_seconds=%d stop_seconds=%d exit_code=%s oom_killed=false",
