@@ -93,7 +93,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true container_user=999:999")) and
   ($output | test("D1-A2 socket=preflight_passed checks=[1-9][0-9]* source=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} repository=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} sealed=true")) and
   ($output | test("D1-A2 identity [^\\n]*project=(d1[0-9a-f]+)[\\s\\S]*D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=\\1")) and
-  ($output | test("D1-A2 stack=healthy[^\\n]*mysql=([0-9a-f]{12,64})[^\\n]*intern=([0-9a-f]{12,64})[\\s\\S]*D1-A2 kek secret=/run/secrets/intern_kek[^\\n]*mysql=\\1")) and
+  # The KEK line and the stack line name the same MySQL container; the harness
+  # emits them in either order, so the two captures are compared, not chained.
+  (([$output | capture("D1-A2 stack=healthy[^\\n]*mysql=(?<m>[0-9a-f]{12,64})") | .m]) as $stack |
+   ([$output | capture("D1-A2 kek secret=/run/secrets/intern_kek[^\\n]*mysql=(?<m>[0-9a-f]{12,64})") | .m]) as $kek |
+   ($stack | length) == 1 and $stack == $kek) and
   ($output | test("D1-A2 socket=preflight_passed checks=[0-9]+ source=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}) repository=([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})[\\s\\S]*D1-A3 topology=[^\\n]* source=\\1 repository=\\2")) and
   (([$output | scan("D1-A3 (?:full|incremental) run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} backup=([0-9a-f]{32})")] | map(.[0]) | unique) | length == 2) and
   (([$output | scan("D1-A4 (restart|recreate|upgrade) instance_id=([0-9a-zA-Z_-]{8,})")] | map(.[1]) | unique) | length == 1) and

@@ -65,11 +65,11 @@ payload() {
 		"D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=18 pxb_gpl=6 source_sha_bound=true procps_lgpl=9 procps_named=3 go_modules=182 go_license_texts=182 copied_objects=89 matrix=8.4.11,8.4.0-7" \
 		"D1-A1 compose_pins=true compose=app/web/deploy/compose.yaml env_example=app/web/deploy/.env.example dockerfile=app/web/deploy/Dockerfile matrix_images=2" \
 		"D1-A2 identity daemon=linux/amd64 platform=linux/amd64 compose=2.35.1 project=$project" \
-		"D1-A2 stack=healthy compose_file=app/web/deploy/compose.yaml project=$project mysql=$mysql_container intern=$intern_container api=https://127.0.0.1:49153 mysql_port=49154 healthcheck=intern-web" \
 		"D1-A2 create_admin=created user=d1-admin login=200 negotiated=1.3 stdin=true" \
 		"D1-A2 https=verified plaintext=refused untrusted_ca=refused" \
 		"D1-A2 datadir_ro=refused metadata_dir=0700 owner=999:999" \
 		"D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true container_user=999:999 mysql=$mysql_container" \
+		"D1-A2 stack=healthy compose_file=app/web/deploy/compose.yaml project=$project mysql=$mysql_container intern=$intern_container api=https://127.0.0.1:49153 mysql_port=49154 healthcheck=intern-web" \
 		"D1-A2 socket=preflight_passed checks=7 source=$source_id repository=$repository sealed=true" \
 		"D1-A3 topology=compose-mysql->intern-web->local-repository policy=$policy source=$source_id repository=$repository replica=none" \
 		"D1-A3 full run=$full_run backup=$full_backup status=completed seq=1 payload_bytes=268435456 sha256=$payload_sha" \
@@ -229,6 +229,7 @@ reject oom_killed 'if has("Output") then .Output |= sub("oom_killed=false"; "oom
 reject false_completed 'if has("Output") then .Output |= sub("run_status=failed error_class=backup_failed backup_id=none"; "run_status=completed error_class=none backup_id=55555555555555555555555555555555") else . end'
 reject completed_grew 'if has("Output") then .Output |= sub("completed_runs_before=3 completed_runs_after=3"; "completed_runs_before=3 completed_runs_after=4") else . end'
 reject wrong_stop_class 'if has("Output") then .Output |= sub("error_class=backup_failed backup_id=none"; "error_class=unavailable backup_id=none") else . end'
+reject kek_foreign_mysql "if has(\"Output\") then .Output |= sub(\"container_user=999:999 mysql=${mysql_container}\"; \"container_user=999:999 mysql=fedcba9876543210fedcba9876543210\") else . end"
 reject no_artifact 'if has("Output") then .Output |= select((. // "") | contains("D1-ARTIFACT file=") | not) else . end'
 
 if run_gate "$wrong_source" "$work/accept.jsonl" "$work/sha.log"; then
