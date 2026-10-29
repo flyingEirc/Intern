@@ -2372,5 +2372,7 @@ func (f *d1Fixture) composeVersion(ctx context.Context) string {
 // refuses emulation, so this is the recorded fact and not a wish.
 func (f *d1Fixture) daemonPlatform(ctx context.Context) string {
 	f.t.Helper()
-	return f.docker(ctx, "info", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
+	// `.Server.*` exists only in `docker version`; `docker info` exposes OSType
+	// and Architecture (linux/x86_64, which the gate accepts alongside amd64).
+	return f.docker(ctx, "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}")
 }
