@@ -153,11 +153,15 @@ fi
         printf 'listener name=%s client=%s daemon=%s passive=%s:%s tls=%s cert=%s cert_sha256=%s\n' \
             "$name" "$client" "$daemon" "$first" "$last" "$level" "$cert" "$digest"
     done < /run/s2/listeners
-} > /audit/fixture.txt
-chmod 0644 /audit/fixture.txt
+} > /audit/fixture.tmp
+chmod 0644 /audit/fixture.tmp
 : > /audit/control.jsonl
 chmod 0644 /audit/control.jsonl
 rm -f /run/s2-password /run/s2/marker
+# Readiness is the manifest's existence, so it is published by one rename as the
+# very last step: a reader never sees a partial manifest, and never sees one
+# before the census was reset and the bootstrap secrets were removed.
+mv /audit/fixture.tmp /audit/fixture.txt
 # The taps and the daemons are children of this process, and a child that dies
 # stays a zombie until someone reaps it, so liveness is read from its own task
 # state, not from the existence of its pid. A fixture that quietly lost one of its
