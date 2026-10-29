@@ -102,6 +102,9 @@ jobs:
           name: D1 evidence gate accept and reject cases
           command: .github/scripts/d1-gate-cases.sh
       - run:
+          name: S2 evidence gate accept and reject cases
+          command: .github/scripts/s2-gate-cases.sh
+      - run:
           name: Install pinned golangci-lint
           no_output_timeout: 20m
           command: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
@@ -393,6 +396,38 @@ jobs:
           destination: deploy-d1/candidate-artifact.json
       - save-go-caches
 
+  # S2 FTPS acceptance. It is the only job that runs the six-face TLS fixture:
+  # explicit and implicit FTPS against a real Pure-FTPd 1.0.54 (two daemons built from
+  # the same pinned source, the second with IMPLICIT_TLS), every face behind an audit
+  # tap that records whether a credential ever reached the server, the four certificate
+  # refusals, the full + incremental chain replicated over FTPS to verified, and two
+  # restores per face whose published exports this harness then starts in brand-new
+  # pinned MySQL 8.4.11 containers. Emulated architectures are refused by the harness.
+  container-ftps:
+    executor: native-amd64
+    steps:
+      - checkout
+      - install-go
+      - run:
+          name: Native FTPS container acceptance
+          no_output_timeout: 85m
+          command: |
+            set -eo pipefail
+            mkdir -p .cache/quality/ftps
+            timeout 80m go test -json -tags=integration -count=1 -timeout=75m ./app/web/integration -run '^TestS2NativeContainers$' | tee .cache/quality/ftps/events.jsonl
+      - run:
+          name: Reject incomplete or skipped FTPS evidence
+          when: always
+          no_output_timeout: 5m
+          command: |
+            set -eo pipefail
+            export GITHUB_SHA="$CIRCLE_SHA1"
+            .github/scripts/verify-s2-evidence.sh .cache/quality/ftps/events.jsonl
+      - store_artifacts:
+          path: .cache/quality/ftps/events.jsonl
+          destination: ftps-s2/events.jsonl
+      - save-go-caches
+
   quality-gate:
     executor: native-amd64
     steps:
@@ -458,6 +493,8 @@ workflows:
           filters: "pipeline.git.branch or pipeline.git.tag"
       - container-deploy:
           filters: "pipeline.git.branch or pipeline.git.tag"
+      - container-ftps:
+          filters: "pipeline.git.branch or pipeline.git.tag"
       - quality-gate:
           requires:
             - quality-fast
@@ -470,4 +507,5 @@ workflows:
             - container-restore
             - container-restore-api
             - container-deploy
+            - container-ftps
           filters: "pipeline.git.branch or pipeline.git.tag"
