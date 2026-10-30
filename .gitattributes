@@ -1,0 +1,5 @@
+# Line endings are build input. A Windows checkout defaults to
+# core.autocrlf=true, which hands bash CRLF shell scripts and container
+# entrypoints, changes the SHA-256 of the published OpenAPI contract and makes
+# gofmt/golangci-lint reject every Go file. Keep LF on every platform.
+* text=auto eol=lf
