@@ -1,0 +1,24 @@
+name: Windows runner bootstrap
+description: >-
+  Puts Git for Windows' bash on PATH and installs the pinned jq, so the
+  repository's bash scripts and `shell: bash` steps run on the Windows
+  self-hosted runner. Needs the repository checked out first.
+
+runs:
+  using: composite
+  steps:
+    # The runner service has no bash on PATH and a PowerShell execution policy
+    # that blocks script files, so this step is cmd. Git's own location comes
+    # from `where git`; bash is started by absolute path because a PATH entry
+    # added through GITHUB_PATH is only guaranteed to apply to later steps.
+    - name: Put Git Bash on PATH and install jq
+      shell: cmd
+      run: |
+        for /f "delims=" %%G in ('where git') do set "GITEXE=%%G"
+        for %%I in ("%GITEXE%\..\..") do set "GITROOT=%%~fI"
+        if not exist "%GITROOT%\bin\bash.exe" (
+          echo ::error title=No Git Bash::bash.exe was not found under Git for Windows at %GITROOT%
+          exit /b 1
+        )
+        >>"%GITHUB_PATH%" echo %GITROOT%\bin
+        "%GITROOT%\bin\bash.exe" --noprofile --norc -eo pipefail .github/scripts/windows-install-jq.sh
