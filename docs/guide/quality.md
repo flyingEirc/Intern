@@ -32,7 +32,7 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 
 ## CI 执行环境（Windows 自托管 runner）
 
-`.github/workflows/quality.yml` 的全部 job 运行在仓库的 Windows 自托管 runner 上（标签 `self-hosted`、`Windows`、`X64`）；一台机器，job 串行。迁移与探测记录在 [#46](https://github.com/flyingEirc/Intern/issues/46)。下表是 2026-10-30 对 runner `JACKVANCE`（Windows 11 家庭中文版 26200、14 GB 内存、runner 2.338.0 以 NETWORK SERVICE 服务账户运行）的实测与工作流的对应处理，不是对其他机器的承诺。
+`.github/workflows/quality.yml` 的全部 job 运行在仓库的 Windows 自托管 runner 上（标签 `self-hosted`、`Windows`、`X64`）；一台机器，job 串行。迁移与探测记录在 [#46](https://github.com/flyingEirc/Intern/issues/46)。下表是 2026-10-30 对 runner `JACKVANCE`（Windows 11 家庭中文版 26200、14 GB 内存、runner 2.338.0 以 NETWORK SERVICE 服务账户运行）的实测，Linux 执行一行补充了 2026-10-31 装好 Docker Desktop 后的复测；它不是对其他机器的承诺。
 
 | 项 | 实测 | 工作流的处理 |
 | --- | --- | --- |
@@ -40,17 +40,17 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 | jq | 未安装，Git for Windows 不带 | 固定 jq 1.7.1，每次校验 SHA-256；PATH 上的包装脚本强制 `--binary`，否则原生 jq 输出 CRLF，门禁的逐字节比较会失败 |
 | 换行 | 系统 `core.autocrlf=true` | `.gitattributes` 固定 LF；`.sh`、Dockerfile 与 OpenAPI 摘要都依赖 LF |
 | Go | 未安装 | `actions/setup-go` 1.27.0；模块代理列表先 `goproxy.cn`，`go.sum` / `go.work.sum` 仍锁定每个模块 |
-| Linux 执行 | 无 Docker、无 WSL；Windows 原生 `go test` 在 `app/web` 多个包失败（NTFS 没有 0700 目录、创建符号链接需特权、`syscall.SetsockoptInt` 无法编译） | build、race 测试与 lint 在 digest 固定的 Linux Go 容器中运行（`.github/scripts/linux-go.sh`，源码以 `git archive HEAD` 入卷）；真实组件 job 在主机运行 `go test`，worker 交叉编译为 linux/amd64 后在容器内运行 |
+| Linux 执行 | Windows 原生 `go test` 在 `app/web` 多个包失败（NTFS 没有 0700 目录、创建符号链接需特权、`syscall.SetsockoptInt` 无法编译）。2026-10-30 没有 Docker、没有 WSL。2026-10-31 已装 Docker Desktop（客户端 29.9.2，WSL2），引擎在用户的登录会话里运行，但 runner 服务账户 NETWORK SERVICE 连接引擎管道被拒（`permission denied while trying to connect to the docker API at npipe:////./pipe/docker_engine`，`dockerDesktopLinuxEngine` 管道同样），`docker-users` 组里只有安装用户，`docker` 也不在该服务的 PATH 上 | build、race 测试与 lint 在 digest 固定的 Linux Go 容器中运行（`.github/scripts/linux-go.sh`，源码以 `git archive HEAD` 入卷）；真实组件 job 在主机运行 `go test`，worker 交叉编译为 linux/amd64 后在容器内运行。`windows-runner` 动作把 Docker Desktop 的默认安装目录补进 PATH；`require-linux-docker.sh` 把权限被拒报成明确失败并给出处理办法 |
 | 网络 | 到 github.com、`proxy.golang.org`、Docker Hub 的直连不稳定或被阻断，checkout 多次超时 | 属机器配置，仓库不写死代理；见前置条件 2 |
 
 前置条件，缺任一项时对应 job 明确失败，不跳过、不回退：
 
-1. runner 服务账户可达的原生 Linux amd64 Docker 引擎（`docker version` 报告 `linux/amd64`），Windows 上即 Docker Desktop 的 Linux 容器（WSL2 后端），且 runner 的服务账户能访问它。`.github/scripts/require-linux-docker.sh` 在每个需要容器的 job 中、第一个容器步骤之前检查，不满足即失败。
+1. runner 以能使用 Docker Desktop 引擎的账户运行：原生 Linux amd64 引擎（`docker version` 报告 `linux/amd64`，Windows 上即 Docker Desktop 的 Linux 容器、WSL2 后端），该账户在 `docker-users` 组里，Docker Desktop 已启动（引擎属于登录会话，不是系统服务）。NETWORK SERVICE 默认不行，处理办法是改用该账户运行 runner（服务的登录账户，或在登录会话里直接运行 `run.cmd`），或把服务账户加入 `docker-users` 并重启 runner 服务；两种办法在本仓库的 runner 上都尚未验证。`.github/scripts/require-linux-docker.sh` 在每个需要容器的 job 中、第一个容器步骤之前检查，不满足即失败。
 2. 机器的网络稳定到达 github.com、Docker Hub、`ghcr.io`、`repo.mysql.com`、`download.pureftpd.org` 与 Go 模块代理，使 Docker 能拉取 `internal/physical/compat.json`、`app/cli/internal/qualitygate/contract.json` 固定的镜像。代理或镜像配置在机器上（runner 目录的 `.env`、Docker 的代理设置），不进仓库。
 3. Git for Windows（含 `bin\bash.exe`）。jq、Go 与 golangci-lint 由工作流按固定版本安装。
 4. 内存与磁盘：CircleCI 执行器为 4 vCPU / 15 GB（`large`）；该 runner 的内存总量为 14 GB，Docker 引擎实际能分到多少、矩阵能否在其上通过，以实际运行为准。
 
-当前状态（2026-10-30）：该 runner 没有 Docker 引擎也没有 WSL，`quality-fast` 的 Linux 步骤与全部 `container-*` job 只会在引擎检查处失败，整套矩阵尚未在其上通过。工作流因此保持手动触发，CircleCI 继续作为合并门禁。
+当前状态（2026-10-31）：Docker Desktop 已装并在运行，但 runner 服务账户无权使用它的引擎，`quality-fast` 的 Linux 步骤与全部 `container-*` job 仍只会在引擎检查处失败，整套矩阵尚未在其上通过。工作流因此保持手动触发，CircleCI 继续作为合并门禁。
 
 切换到 GitHub Actions 仅在同一 SHA 上整套矩阵（含 `quality-gate`）于该 runner 全绿之后执行：把 `quality.yml` 的触发改为 `push` / `pull_request`；把 [PR 规范](../workflow/pr.md) 的合并门禁改为该 Actions 流水线；删除 `.circleci/config.yml` 并同步各文档对 CircleCI 的现行描述（历史证据保留原日期与来源）。
 
