@@ -38,11 +38,11 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 
 前置条件，缺任一项时对应 job 在第一个步骤由 `.github/scripts/require-runner.sh` 明确失败并列出全部缺项，不跳过、不回退：
 
-1. Ubuntu 24.04（WSL2），`/etc/wsl.conf` 里 `[boot]` 下 `systemd=true`；runner 以 systemd 服务运行（`sudo ./svc.sh install <账户>`），账户不是 root。
+1. Ubuntu 24.04（WSL2），`/etc/wsl.conf` 里 `[boot]` 下 `systemd=true`；runner 以 systemd 服务运行（`sudo ./svc.sh install <账户>`），账户不是 root。runner 目录与 `_work` 放在发行版自己的文件系统里（如 `~/actions-runner`），不放 `/mnt/c`、`/mnt/d`：那是 NTFS 经 9p 挂载，不保证 Linux 的属主与权限位语义，而 harness 与 D1 依赖绑定挂载目录上的 chown / chmod。
 2. Docker Engine（Docker 官方 apt 源的 `docker-ce`、`docker-compose-plugin`、`docker-buildx-plugin`）直接装在该发行版里，账户在 `docker` 组，`docker version` 报告 `linux/amd64`。Docker Desktop 的 WSL 集成对该发行版必须关闭，否则 `docker` 指向 Desktop 的引擎，又回到对登录会话的依赖。
 3. `git`、`jq`、`curl`、`build-essential`（`go test -race` 要 cgo）；Go 由 `actions/setup-go` 按 `1.27.0` 装进 runner 的工具缓存，golangci-lint 由 quality-fast 用 `go install` 装。
 4. 资源：CircleCI 执行器为 4 vCPU / 15 GB（`large`）。WSL2 默认最多用主机内存的一半，这台机器（14 GB）约 7 GB；`%UserProfile%\.wslconfig` 的 `[wsl2]` 下 `memory=` 按实测调整，矩阵能否在其上通过以实际运行为准。
-5. 常驻：WSL2 实例在没有进程时会被回收，runner 随之离线，需要在 Windows 侧保活（例如开机计划任务运行 `wsl.exe -d Ubuntu-24.04 --exec sleep infinity`）；重启后能否自动恢复要实测。
+5. 常驻：WSL2 实例在没有进程时会被回收，runner 随之离线，需要在 Windows 侧保活（例如开机计划任务运行 `wsl.exe -d Ubuntu-24.04 --exec sleep infinity`）；Windows 本身不能睡眠或休眠（电源计划设为从不睡眠），否则 runner 同样离线（2026-11-03 Windows 上的 runner 曾连续离线一个多小时，原因没有查明）；重启后能否自动恢复要实测。
 6. 网络：WSL2 默认是 NAT，到 github.com、`proxy.golang.org`、Docker Hub、`ghcr.io`、`repo.mysql.com`、`download.pureftpd.org`、`downloads.percona.com` 的通路要在 WSL 里单独确认。代理与镜像配置在机器上（runner 目录的 `.env`、Docker 守护进程配置、`.wslconfig` 的网络选项），不进仓库。
 
 与旧的 hosted 写法的差异只有：`runs-on`；每个 job 开头的 `require-runner.sh`；`setup-go` 的 `cache: false`（runner 自己保留模块与构建缓存）；超时在原值上加 15 分钟（scope 20、quality-fast 45：第一次运行要冷拉全部固定镜像与模块）。
