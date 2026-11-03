@@ -90,7 +90,9 @@ run() {
 	# The script travels in the environment: no argument quoting between Git
 	# Bash, the Windows docker client and the engine to get wrong.
 	export HARNESS_SCRIPT=$script
-	local args=(--rm --workdir "$scratch/src" --volume "$root:$root"
+	# The label lets clean remove what a cancelled step left running: killing
+	# the docker client does not stop its container.
+	local args=(--rm --label "intern.ci.key=$key" --workdir "$scratch/src" --volume "$root:$root"
 		--volume intern-ci-gomod:/go/pkg/mod
 		--volume intern-ci-gocache:/root/.cache/go-build
 		--volume intern-ci-gobin:/go/bin
@@ -126,6 +128,11 @@ clean() {
 	# No engine means nothing of ours is on it; do not fail a job for that.
 	docker info >/dev/null 2>&1 || { echo "no Docker engine reachable; no scratch tree to remove"; return 0; }
 	ensure_tools
+	# A cancelled step leaves its container running; Testcontainers' reaper then
+	# removes what that container started once its connection drops.
+	local ids
+	ids=$(docker ps --all --quiet --filter "label=intern.ci.key=$key")
+	if [[ -n "$ids" ]]; then docker rm --force $ids >/dev/null || true; fi
 	# Also sweep trees a killed job left behind.
 	helper "rm -rf '$scratch'; find '$root' -mindepth 1 -maxdepth 1 -mmin +720 -exec rm -rf {} +" </dev/null
 }
