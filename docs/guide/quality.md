@@ -52,7 +52,7 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 4. 内存与磁盘：CircleCI 执行器为 4 vCPU / 15 GB（`large`）；该 runner 的内存总量为 14 GB，Docker 引擎实际能分到多少、矩阵能否在其上通过，以实际运行为准。
 5. 杀毒软件不得拦截或删除 runner 自己的文件：把 `D:\actions-runner`（含 `externals`、`_work`）加入 Kaspersky 与腾讯电脑管家的排除 / 信任区。若 `externals\node24\bin\node.exe` 已被删除，用 runner 安装包（SHA-256 与 [官方发布页](https://github.com/actions/runner/releases/tag/v2.338.2) 一致）里的同名文件还原。
 
-当前状态（2026-11-03）：Docker Desktop 已装并在运行；runner 重装为 2.338.2 后仍以 NETWORK SERVICE 运行，无权打开引擎管道，`quality-fast` 的 Linux 步骤与全部 `container-*` job 只会在引擎检查处失败，整套矩阵尚未在其上通过。同日 runner 的 `externals\node24\bin\node.exe` 在一次运行中途被删除（见上表“杀毒软件”），已还原。工作流因此保持手动触发，CircleCI 继续作为合并门禁。
+当前状态（2026-11-03）：Docker Desktop 已装并在运行；runner 重装为 2.338.2 后仍以 NETWORK SERVICE 运行，无权打开引擎管道，`quality-fast` 的 Linux 步骤与全部 `container-*` job 只会在引擎检查处失败，整套矩阵尚未在其上通过。同日 runner 的 `externals\node24\bin\node.exe` 在一次运行中途被删除（见上表“杀毒软件”），已还原。CircleCI 一侧：自 2026-10-29 02:13 UTC 起它的流水线不再执行任何 job——此后的 47 条流水线（含 main 的每日定时流水线），`quality-fast` 的 `started_at` 都是零值，唯一步骤是 `Error: Task information unavailable`（CircleCI API）；原因没有从 API 读到，需在 CircleCI 控制台确认。最后一次真正执行的矩阵是 `9d3541b`（2026-10-29 02:03 UTC：11 个 job 通过，`container-ftps` 失败），之后的 S2 修复提交没有任何真实的容器矩阵结果，所以该 runner 上的矩阵一旦能跑，就是它们的第一份结果，失败也不一定是环境问题。文档规定的合并门禁仍是 CircleCI（[PR 规范](../workflow/pr.md)），本次迁移不改这条规定，工作流保持手动触发。
 
 切换到 GitHub Actions 仅在同一 SHA 上整套矩阵（含 `quality-gate`）于该 runner 全绿之后执行：把 `quality.yml` 的触发改为 `push` / `pull_request`；把 [PR 规范](../workflow/pr.md) 的合并门禁改为该 Actions 流水线；删除 `.circleci/config.yml` 并同步各文档对 CircleCI 的现行描述（历史证据保留原日期与来源）。
 
