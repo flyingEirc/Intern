@@ -19,6 +19,8 @@ name: Intern quality
 #   has no POSIX modes. The real-component jobs run `go test` on the host; their
 #   workers are cross-built for linux/amd64 and run in containers on the Docker
 #   engine, which require-linux-docker.sh insists is native linux/amd64.
+#   The check runs before the toolchain install, so a runner without a usable
+#   engine fails in seconds instead of after a Go download.
 # - The runner reaches proxy.golang.org only intermittently, so the module proxy
 #   list starts with goproxy.cn. go.sum and go.work.sum still pin every module.
 # - The runner keeps GOCACHE and GOMODCACHE between runs, so setup-go does not
@@ -135,12 +137,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Real CLI and database container scenarios
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
@@ -174,12 +176,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native physical runner and source preflight
         run: |
           mkdir -p .cache/quality/physical
@@ -207,12 +209,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native FTP publication and fault acceptance
         env:
           INTERN_S1_ARCH: amd64
@@ -242,12 +244,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native replication, authentication and retention acceptance
         run: |
           mkdir -p .cache/quality/replication
@@ -275,12 +277,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native Web resource, preflight and policy acceptance
         run: |
           mkdir -p .cache/quality/web
@@ -308,12 +310,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native dispatcher run, replica and SSE acceptance
         run: |
           mkdir -p .cache/quality/dispatch
@@ -341,12 +343,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native isolated restore acceptance
         run: |
           mkdir -p .cache/quality/restore
@@ -374,12 +376,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native restore API end to end
         run: |
           mkdir -p .cache/quality/restore-api
@@ -413,12 +415,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native Compose deployment acceptance
         run: |
           mkdir -p .cache/quality/deploy
@@ -455,12 +457,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/windows-runner
+      - name: Native Linux amd64 Docker engine
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
           cache: false
-      - name: Native Linux amd64 Docker engine
-        run: .github/scripts/require-linux-docker.sh
       - name: Native FTPS container acceptance
         run: |
           mkdir -p .cache/quality/ftps

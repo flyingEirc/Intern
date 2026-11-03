@@ -42,6 +42,7 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 | Go | 未安装 | `actions/setup-go` 1.27.0；模块代理列表先 `goproxy.cn`，`go.sum` / `go.work.sum` 仍锁定每个模块 |
 | Linux 执行 | Windows 原生 `go test` 在 `app/web` 多个包失败（NTFS 没有 0700 目录、创建符号链接需特权、`syscall.SetsockoptInt` 无法编译）。2026-10-30 没有 Docker、没有 WSL。2026-10-31 与 11-03：已装 Docker Desktop（客户端 29.9.2，WSL2），引擎在用户的登录会话里运行；runner 服务账户 NETWORK SERVICE 打不开任何 Docker Desktop 管道（`docker_engine`、`docker_engine_linux`、`dockerDesktopLinuxEngine`、`dockerDesktopEngine`、`docker_cli` 均为 `Access to the path is denied`，TCP 2375 / 2376 未开放）。[Docker 文档](https://docs.docker.com/desktop/setup/install/windows-permission-requirements/)：非特权管道只允许启动 Docker Desktop 的用户、本机 `Administrators` 组成员与 `LocalSystem` 打开，`docker-users` 组只管特权辅助服务的管道，所以把服务账户加进 `docker-users` 没有用 | build、race 测试与 lint 在 digest 固定的 Linux Go 容器中运行（`.github/scripts/linux-go.sh`，源码以 `git archive HEAD` 入卷）；真实组件 job 在主机运行 `go test`，worker 交叉编译为 linux/amd64 后在容器内运行。`windows-runner` 动作把 Docker Desktop 的默认安装目录补进 PATH 并打印运行账户；`require-linux-docker.sh` 把权限被拒报成明确失败并写出处理办法 |
 | 网络 | 2026-10-30：到 github.com、`proxy.golang.org`、Docker Hub 的直连不稳定或被阻断，checkout 多次超时。2026-11-03：github.com、`proxy.golang.org`、`sum.golang.org`、`goproxy.cn`、Docker Hub（`registry-1.docker.io`、`auth.docker.io`、`production.cloudflare.docker.com`）、`ghcr.io`、`repo.mysql.com`、`download.pureftpd.org`、`downloads.percona.com`、`dl-cdn.alpinelinux.org` 都在 0.2–2.4 秒内应答，checkout 约 15 秒 | 属机器配置，仓库不写死代理；见前置条件 2。固定镜像能否拉取尚未测到（引擎打不开） |
+| 杀毒软件 | 2026-11-03：Kaspersky 与腾讯电脑管家的实时防护开启（Windows Defender 实时防护关闭）。runner 重装后第一次用 `actions/setup-go` 下载并解压 Go 时，该步骤的 node24 进程运行 3 分 8 秒后以退出码 5 结束（12:15:45Z），同一秒 Kaspersky 的 `avp` 在应用程序事件日志写入两条事件（ID 4662，正文读不到）；随后 `D:\actions-runner\externals\node24\bin\node.exe` 从磁盘消失（runner 包的其余文件和 node20 的 `node.exe` 都在，安装包 SHA-256 与官方发布页一致），之后每个 JavaScript 动作（`actions/checkout` 等）都因找不到该文件而启动失败。事件与文件消失在时间上吻合；Kaspersky 自己的隔离记录没有查看，归因是推断。已从该安装包还原 `node.exe`，JavaScript 动作恢复 | 属机器配置：把 `D:\actions-runner` 加入杀毒软件的排除 / 信任区，见前置条件 5；仓库不规避杀毒软件 |
 
 前置条件，缺任一项时对应 job 明确失败，不跳过、不回退：
 
@@ -49,8 +50,9 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 2. 机器的网络稳定到达 github.com、Docker Hub、`ghcr.io`、`repo.mysql.com`、`download.pureftpd.org` 与 Go 模块代理，使 Docker 能拉取 `internal/physical/compat.json`、`app/cli/internal/qualitygate/contract.json` 固定的镜像。代理或镜像配置在机器上（runner 目录的 `.env`、Docker 的代理设置），不进仓库。
 3. Git for Windows（含 `bin\bash.exe`）。jq、Go 与 golangci-lint 由工作流按固定版本安装。
 4. 内存与磁盘：CircleCI 执行器为 4 vCPU / 15 GB（`large`）；该 runner 的内存总量为 14 GB，Docker 引擎实际能分到多少、矩阵能否在其上通过，以实际运行为准。
+5. 杀毒软件不得拦截或删除 runner 自己的文件：把 `D:\actions-runner`（含 `externals`、`_work`）加入 Kaspersky 与腾讯电脑管家的排除 / 信任区。若 `externals\node24\bin\node.exe` 已被删除，用 runner 安装包（SHA-256 与 [官方发布页](https://github.com/actions/runner/releases/tag/v2.338.2) 一致）里的同名文件还原。
 
-当前状态（2026-11-03）：Docker Desktop 已装并在运行；runner 重装为 2.338.2 后仍以 NETWORK SERVICE 运行，无权打开引擎管道，`quality-fast` 的 Linux 步骤与全部 `container-*` job 只会在引擎检查处失败，整套矩阵尚未在其上通过。工作流因此保持手动触发，CircleCI 继续作为合并门禁。
+当前状态（2026-11-03）：Docker Desktop 已装并在运行；runner 重装为 2.338.2 后仍以 NETWORK SERVICE 运行，无权打开引擎管道，`quality-fast` 的 Linux 步骤与全部 `container-*` job 只会在引擎检查处失败，整套矩阵尚未在其上通过。同日 runner 的 `externals\node24\bin\node.exe` 在一次运行中途被删除（见上表“杀毒软件”），已还原。工作流因此保持手动触发，CircleCI 继续作为合并门禁。
 
 切换到 GitHub Actions 仅在同一 SHA 上整套矩阵（含 `quality-gate`）于该 runner 全绿之后执行：把 `quality.yml` 的触发改为 `push` / `pull_request`；把 [PR 规范](../workflow/pr.md) 的合并门禁改为该 Actions 流水线；删除 `.circleci/config.yml` 并同步各文档对 CircleCI 的现行描述（历史证据保留原日期与来源）。
 
