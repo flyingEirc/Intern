@@ -17,6 +17,7 @@ runs:
     - name: Put Git Bash and the Docker CLI on PATH, install jq
       shell: cmd
       run: |
+        whoami
         for /f "delims=" %%G in ('where git') do set "GITEXE=%%G"
         for %%I in ("%GITEXE%\..\..") do set "GITROOT=%%~fI"
         if not exist "%GITROOT%\bin\bash.exe" (

@@ -12,13 +12,13 @@ fail() {
 }
 
 command -v docker >/dev/null 2>&1 ||
-	fail 'docker is not on PATH for the account this runner runs as. Install Docker Desktop (Linux containers, WSL2 backend) for that account; see docs/guide/quality.md, CI execution environment.'
+	fail 'docker is not on PATH and not in the Docker Desktop install directory. Install Docker Desktop (Linux containers, WSL2 backend); see docs/guide/quality.md, CI execution environment.'
 
 platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1) || {
 	platform=${platform//$'\n'/ }
 	hint=''
 	if [[ "$platform" == *'permission denied'* ]]; then
-		hint='. This account may not use the Docker Desktop pipe: run the runner as the account that runs Docker Desktop (a member of the docker-users group), or add this account to docker-users and restart the runner service.'
+		hint='. Docker Desktop lets only the user that launched it, local Administrators and LocalSystem open its engine pipes; docker-users membership does not grant that. Run this runner as the Windows user that runs Docker Desktop, with Docker Desktop started; see docs/guide/quality.md, CI execution environment.'
 	fi
 	fail "the Docker engine is not reachable by this account: ${platform}${hint}"
 }
