@@ -1,9 +1,21 @@
 name: Intern quality
 
-# Automatic triggers are disabled: CircleCI (.circleci/config.yml) is the
-# active CI and this workflow is manual-only (workflow_dispatch). It is kept
-# for comparison once GitHub Actions billing is restored, and must be kept in
-# sync with .circleci/config.yml.
+# Runs on the repository's self-hosted Linux x86_64 runner: a WSL2 Ubuntu 24.04
+# with a native Docker Engine on a Windows machine (prerequisites in
+# docs/guide/quality.md, "CI execution environment"). That is the host layout of
+# the CircleCI machine executor (ubuntu-2404 with Docker), so go test runs on the
+# host and the harness assumptions (Linux paths, uid, bind mount ownership) hold
+# unchanged. Every job starts with .github/scripts/require-runner.sh, which fails
+# explicitly and names whatever the runner lacks.
+#
+# Automatic triggers are disabled: CircleCI (.circleci/config.yml) is the active
+# CI and this workflow is manual-only (workflow_dispatch) until the whole matrix
+# passes on this runner for one SHA (switch conditions in docs/guide/quality.md).
+# It must be kept in sync with .circleci/config.yml. Differences from the old
+# hosted-runner form: runs-on; the require-runner.sh step; setup-go with
+# cache: false (the runner keeps its module and build caches between jobs); and
+# timeouts raised by 15 minutes (scope 20, quality-fast 45) because the first run
+# on a runner pulls every pinned image and module cold.
 on:
   workflow_dispatch:
 
@@ -24,7 +36,8 @@ env:
 
 jobs:
   scope:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
     outputs:
       required: ${{ steps.scope.outputs.required }}
       matrix: ${{ steps.scope.outputs.matrix }}
@@ -33,6 +46,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh
       - id: scope
         working-directory: .
         env:
@@ -44,20 +59,18 @@ jobs:
   quality-fast:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --cc
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/cli/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Build
         run: go build ./internal/... ./app/cli/... ./app/web/...
       - name: Behavior and race tests
@@ -105,8 +118,8 @@ jobs:
   container-mysql:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -120,14 +133,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/cli/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Real CLI and database container scenarios
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
@@ -154,19 +165,18 @@ jobs:
   container-physical:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native physical runner and source preflight
         run: |
           mkdir -p .cache/quality/physical
@@ -187,19 +197,18 @@ jobs:
   container-ftp:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native FTP publication and fault acceptance
         env:
           INTERN_S1_ARCH: amd64
@@ -222,19 +231,18 @@ jobs:
   container-replication:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native replication, authentication and retention acceptance
         run: |
           mkdir -p .cache/quality/replication
@@ -255,19 +263,18 @@ jobs:
   container-web:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native Web resource, preflight and policy acceptance
         run: |
           mkdir -p .cache/quality/web
@@ -288,19 +295,18 @@ jobs:
   container-dispatch:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native dispatcher run, replica and SSE acceptance
         run: |
           mkdir -p .cache/quality/dispatch
@@ -321,19 +327,18 @@ jobs:
   container-restore:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native isolated restore acceptance
         run: |
           mkdir -p .cache/quality/restore
@@ -354,19 +359,18 @@ jobs:
   container-restore-api:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native restore API end to end
         run: |
           mkdir -p .cache/quality/restore-api
@@ -391,21 +395,20 @@ jobs:
   container-deploy:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 75
     env:
       INTERN_D1_ARTIFACT_DIR: ${{ github.workspace }}/.cache/quality/deploy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --compose
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native Compose deployment acceptance
         run: |
           mkdir -p .cache/quality/deploy
@@ -435,19 +438,18 @@ jobs:
   container-ftps:
     needs: scope
     if: needs.scope.outputs.required == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - name: Native FTPS container acceptance
         run: |
           mkdir -p .cache/quality/ftps
@@ -469,7 +471,7 @@ jobs:
     name: quality-gate
     needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch, container-restore, container-restore-api, container-deploy, container-ftps]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
       - name: Validate job outcomes and documentation-only scope
@@ -503,11 +505,7 @@ jobs:
         if: needs.scope.outputs.required == 'true'
         with:
           go-version: '1.27.0'
-          cache-dependency-path: |
-            internal/go.sum
-            app/cli/go.sum
-            app/web/go.sum
-            go.work.sum
+          cache: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.scope.outputs.required == 'true'
         with:

@@ -28,7 +28,28 @@ lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet`
 - 失败场景先到达可观察注入点，再核对拒绝、目标前后状态、公开备份列表、水位和资源清理。setup 失败不能冒充成功触发业务拒绝。
 - 必需入口的 runtime 不可用、镜像/工具不匹配、零用例、缺矩阵结果、skip 或取消必须阻断门禁，不得自动回退 mock 或把未执行写成通过。
 - 候选 CLI/发布镜像与被测对象必须一致；源码 SHA、程序 SHA256、镜像 digest、平台和工具版本都要可追踪。测试后重建的新制品不能继承旧制品通过结论。
-- CI 的固定汇总门禁必须核对依赖成功、预期案例集合、矩阵完整与 skip=0；required 门禁按提交 SHA 从 CircleCI 流水线记录，GitHub 不做技术强制，合并门禁按 [PR 规范](../workflow/pr.md) 的流程执行。CI 位置：CircleCI（`.circleci/config.yml`）是活跃 CI，与 GitHub Actions 工作流使用同一矩阵和同一组 `verify-*-evidence.sh` 门禁；`.github/workflows/quality.yml` 仅保留手动触发（workflow_dispatch）。九个证据门禁（physical、ftp、replication、W3、W4、P4、W5、D1、S2）以及候选制品门禁 `verify-candidate-artifact.sh` 都要求 `GITHUB_SHA` 非空且与流内记录的源码身份一致，空的或未设置的 `GITHUB_SHA` 一律拒绝；候选制品门禁还要求 `candidate-artifact.json` 的镜像 ID、`docker save` 摘要与字节数、`intern-web` 摘要与同一次运行日志一致，固定镜像与版本与 `internal/physical/compat.json` 一致。`w4`、`p4`、`w5`、`d1`、`s2` 的 `*-gate-cases.sh` 与 `candidate-artifact-cases.sh` 在两边 quality-fast 中运行各自门禁的接受/拒绝用例（含外来 SHA 与空 SHA；d1、s2 与候选制品用例还要求每个变异真的改变了输入），门禁被悄悄放宽会在这里失败。quality-fast 同时把 `app/web/api/openapi.yaml` 连同 `info.version` 与 SHA-256 作为 `contract-openapi` 制品发布。
+- CI 的固定汇总门禁必须核对依赖成功、预期案例集合、矩阵完整与 skip=0；required 门禁按提交 SHA 从 CircleCI 流水线记录，GitHub 不做技术强制，合并门禁按 [PR 规范](../workflow/pr.md) 的流程执行。CI 位置：CircleCI（`.circleci/config.yml`）是活跃 CI，与 GitHub Actions 工作流使用同一矩阵和同一组 `verify-*-evidence.sh` 门禁；`.github/workflows/quality.yml` 在仓库的 Linux 自托管 runner（Windows 主机上的 WSL2）上运行，仍只保留手动触发（workflow_dispatch），在该 runner 上整套矩阵对同一 SHA 全绿之前不是合并门禁；runner 前置条件与切换条件见下文「CI 执行环境」。九个证据门禁（physical、ftp、replication、W3、W4、P4、W5、D1、S2）以及候选制品门禁 `verify-candidate-artifact.sh` 都要求 `GITHUB_SHA` 非空且与流内记录的源码身份一致，空的或未设置的 `GITHUB_SHA` 一律拒绝；候选制品门禁还要求 `candidate-artifact.json` 的镜像 ID、`docker save` 摘要与字节数、`intern-web` 摘要与同一次运行日志一致，固定镜像与版本与 `internal/physical/compat.json` 一致。`w4`、`p4`、`w5`、`d1`、`s2` 的 `*-gate-cases.sh` 与 `candidate-artifact-cases.sh` 在两边 quality-fast 中运行各自门禁的接受/拒绝用例（含外来 SHA 与空 SHA；d1、s2 与候选制品用例还要求每个变异真的改变了输入），门禁被悄悄放宽会在这里失败。quality-fast 同时把 `app/web/api/openapi.yaml` 连同 `info.version` 与 SHA-256 作为 `contract-openapi` 制品发布。
+
+## CI 执行环境（WSL2 里的 Linux 自托管 runner）
+
+`.github/workflows/quality.yml` 的全部 job 运行在仓库的自托管 runner 上，标签 `self-hosted`、`Linux`、`X64`：Windows 11 主机上的 WSL2 Ubuntu 24.04，runner 与 Docker Engine 都装在这个发行版里；一台机器，job 串行。选它的原因：服务只在 Linux 上运行，真实组件验收要求原生 Linux amd64 Docker（见上文）；原 CI（CircleCI 的 `machine: ubuntu-2404:current`，Actions 工作流原先的 `ubuntu-24.04`）都是 Linux 主机，`go test` 直接在宿主机上跑，harness 按这个宿主机写（路径、uid、绑定挂载目录的 chown / chmod）。WSL2 里的 Ubuntu 与它同形，工作流只需要换 `runs-on`。迁移与探测记录在 [#46](https://github.com/flyingEirc/Intern/issues/46)。
+
+没有选 Windows runner。仓库曾在它上面做过适配（#46，分支 `ci/windows-self-hosted-runner`，未合并），代价高于收益：Docker Desktop 的引擎归登录用户的会话，runner 服务账户（NETWORK SERVICE）实测打不开它的管道（[Docker 文档](https://docs.docker.com/desktop/setup/install/windows-permission-requirements/) 同样说明，`docker-users` 组无效），要用就得让 runner 以登录用户运行并保持登录；读代码得出宿主侧 harness 不能作为 Windows 进程运行（`filepath` 拼 Linux 容器路径、`os.Getuid()`、NTFS 上的 chown / chmod 语义，未在 Windows 上运行验证），只能把所有 Go 步骤放进容器；runner 目录里 node24 的 `node.exe` 还被杀毒软件删除过一次。仓库里同时登记着 Windows runner `JACKVANCE`（标签 `Windows`），工作流不再使用它，保留或在 Settings 里移除都可以。
+
+前置条件，缺任一项时对应 job 在第一个步骤由 `.github/scripts/require-runner.sh` 明确失败并列出全部缺项，不跳过、不回退：
+
+1. Ubuntu 24.04（WSL2），`/etc/wsl.conf` 里 `[boot]` 下 `systemd=true`；runner 以 systemd 服务运行（`sudo ./svc.sh install <账户>`），账户不是 root。
+2. Docker Engine（Docker 官方 apt 源的 `docker-ce`、`docker-compose-plugin`、`docker-buildx-plugin`）直接装在该发行版里，账户在 `docker` 组，`docker version` 报告 `linux/amd64`。Docker Desktop 的 WSL 集成对该发行版必须关闭，否则 `docker` 指向 Desktop 的引擎，又回到对登录会话的依赖。
+3. `git`、`jq`、`curl`、`build-essential`（`go test -race` 要 cgo）；Go 由 `actions/setup-go` 按 `1.27.0` 装进 runner 的工具缓存，golangci-lint 由 quality-fast 用 `go install` 装。
+4. 资源：CircleCI 执行器为 4 vCPU / 15 GB（`large`）。WSL2 默认最多用主机内存的一半，这台机器（14 GB）约 7 GB；`%UserProfile%\.wslconfig` 的 `[wsl2]` 下 `memory=` 按实测调整，矩阵能否在其上通过以实际运行为准。
+5. 常驻：WSL2 实例在没有进程时会被回收，runner 随之离线，需要在 Windows 侧保活（例如开机计划任务运行 `wsl.exe -d Ubuntu-24.04 --exec sleep infinity`）；重启后能否自动恢复要实测。
+6. 网络：WSL2 默认是 NAT，到 github.com、`proxy.golang.org`、Docker Hub、`ghcr.io`、`repo.mysql.com`、`download.pureftpd.org`、`downloads.percona.com` 的通路要在 WSL 里单独确认。代理与镜像配置在机器上（runner 目录的 `.env`、Docker 守护进程配置、`.wslconfig` 的网络选项），不进仓库。
+
+与旧的 hosted 写法的差异只有：`runs-on`；每个 job 开头的 `require-runner.sh`；`setup-go` 的 `cache: false`（runner 自己保留模块与构建缓存）；超时在原值上加 15 分钟（scope 20、quality-fast 45：第一次运行要冷拉全部固定镜像与模块）。
+
+当前状态（2026-11-03）：WSL2 里的 Linux runner 尚未注册，整套矩阵没有在任何 runner 上通过。CircleCI 一侧：自 2026-10-29 02:13 UTC 起它的流水线不再执行任何 job——此后的 47 条流水线（含 main 的每日定时流水线），`quality-fast` 的 `started_at` 都是零值，唯一步骤是 `Error: Task information unavailable`（CircleCI API）；原因没有从 API 读到，需在 CircleCI 控制台确认。最后一次真正执行的矩阵是 `9d3541b`（2026-10-29 02:03 UTC：11 个 job 通过，`container-ftps` 失败），之后的 S2 修复提交没有任何真实的容器矩阵结果，所以该 runner 上的矩阵一旦能跑，就是它们的第一份结果，失败也不一定是环境问题。文档规定的合并门禁仍是 CircleCI（[PR 规范](../workflow/pr.md)），本次迁移不改这条规定，工作流保持手动触发。
+
+切换到 GitHub Actions 仅在同一 SHA 上整套矩阵（含 `quality-gate`）于该 runner 全绿之后执行：把 `quality.yml` 的触发改为 `push` / `pull_request`；把 [PR 规范](../workflow/pr.md) 的合并门禁改为该 Actions 流水线；删除 `.circleci/config.yml` 并同步各文档对 CircleCI 的现行描述（历史证据保留原日期与来源）。
 
 ## 证据与支持范围
 
