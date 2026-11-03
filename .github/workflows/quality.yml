@@ -7,24 +7,28 @@ name: Intern quality
 #
 # Manual-only (workflow_dispatch) until the whole matrix has passed on that
 # runner: .circleci/config.yml stays the active CI and the merge gate. The
-# runner prerequisites (Docker engine, network, account) and the trigger switch
-# are in docs/guide/quality.md, "CI execution environment".
+# runner prerequisites (Docker engine and account, antivirus) and the trigger
+# switch are in docs/guide/quality.md, "CI execution environment".
 #
-# Windows adaptations:
-# - Bash steps run in Git Bash; the windows-runner action puts it on PATH (the
-#   runner service has no bash and blocks PowerShell script files) and installs
-#   the pinned jq the gates need.
-# - Go build, race tests and lint run in the digest-pinned Linux Go container
-#   (linux-go.sh): a Windows host cannot execute Linux test binaries and NTFS
-#   has no POSIX modes. The real-component jobs run `go test` on the host; their
-#   workers are cross-built for linux/amd64 and run in containers on the Docker
-#   engine, which require-linux-docker.sh insists is native linux/amd64.
-#   The check runs before the toolchain install, so a runner without a usable
-#   engine fails in seconds instead of after a Go download.
-# - The runner reaches proxy.golang.org only intermittently, so the module proxy
-#   list starts with goproxy.cn. go.sum and go.work.sum still pin every module.
-# - The runner keeps GOCACHE and GOMODCACHE between runs, so setup-go does not
-#   also restore them through actions/cache.
+# The Windows host is the Docker engine and the orchestrator, nothing more:
+# - Bash steps run in Git Bash. The windows-runner action puts it on PATH (the
+#   runner service has no usable bash and blocks PowerShell script files) and
+#   installs the pinned jq the gates need.
+# - Every Go step runs in a Linux container (.github/scripts/linux-go.sh): the
+#   build, the race tests, the lint and the container acceptance harness itself.
+#   The harness assumes a Linux host (container paths built with
+#   filepath.Join, os.Getuid, bind mounts whose chown and chmod must hold), so it
+#   cannot run as a Windows process. The container drives the host's engine
+#   through its socket; require-linux-docker.sh insists the engine is a native
+#   linux/amd64 one and runs before any toolchain or image work, so a runner
+#   without a usable engine fails in seconds.
+# - The gates, jq and the artifact upload stay on the host. Evidence that the
+#   tests write inside the container comes back through linux-go.sh export.
+# - The module proxy list starts with goproxy.cn: the runner's route to
+#   proxy.golang.org was unreliable. go.sum and go.work.sum still pin every
+#   module.
+# - Container job limits are the CircleCI limits plus 15 minutes for cold image
+#   pulls and module downloads on a runner that has not run the job before.
 
 on:
   workflow_dispatch:
@@ -112,17 +116,20 @@ jobs:
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
       - name: Build
-        run: .github/scripts/linux-go.sh 'go build ./internal/... ./app/cli/... ./app/web/...'
+        run: .github/scripts/linux-go.sh run 'go build ./internal/... ./app/cli/... ./app/web/...'
       - name: Behavior and race tests
-        run: .github/scripts/linux-go.sh 'go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...'
+        run: .github/scripts/linux-go.sh run 'go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...'
       - name: Lint including integration code
-        run: .github/scripts/linux-go.sh 'bash .github/scripts/install-golangci-lint.sh && golangci-lint run --build-tags=integration ./internal/... ./app/cli/... ./app/web/...'
+        run: .github/scripts/linux-go.sh run 'bash .github/scripts/install-golangci-lint.sh && golangci-lint run --build-tags=integration ./internal/... ./app/cli/... ./app/web/...'
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-mysql:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -130,8 +137,8 @@ jobs:
       INTERN_TEST_PROFILE: ${{ matrix.profile }}
       INTERN_TEST_SOURCE_SHA: ${{ github.sha }}
       INTERN_TEST_PLATFORM: linux/amd64
-      INTERN_TEST_REPORT_DIR: ${{ github.workspace }}/.cache/quality/${{ matrix.profile }}
       INTERN_CONTAINER_PARALLEL: '2'
+      LINUX_GO_KEY: container-mysql-${{ matrix.profile }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,20 +146,23 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Real CLI and database container scenarios
         run: |
-          mkdir -p "$INTERN_TEST_REPORT_DIR"
-          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          .github/scripts/linux-go.sh run --docker '
+            export INTERN_TEST_REPORT_DIR="$HARNESS_DATA/report"
+            mkdir -p "$INTERN_TEST_REPORT_DIR"
+            go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"'
       - name: Reject incomplete or skipped scenario evidence
         if: always()
         run: |
-          go run ./app/cli/cmd/quality-gate verify \
-            --directory "$INTERN_TEST_REPORT_DIR" --profile "$INTERN_TEST_PROFILE" \
-            --source "$INTERN_TEST_SOURCE_SHA" --platform "$INTERN_TEST_PLATFORM" --ci
+          .github/scripts/linux-go.sh run '
+            export INTERN_TEST_REPORT_DIR="$HARNESS_DATA/report"
+            go run ./app/cli/cmd/quality-gate verify \
+              --directory "$INTERN_TEST_REPORT_DIR" --profile "$INTERN_TEST_PROFILE" \
+              --source "$INTERN_TEST_SOURCE_SHA" --platform "$INTERN_TEST_PLATFORM" --ci'
+      - name: Bring the evidence back from the container
+        if: always()
+        run: .github/scripts/linux-go.sh export report ".cache/quality/${INTERN_TEST_PROFILE}"
       - name: Retain only approved diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -165,12 +175,15 @@ jobs:
             .cache/quality/${{ matrix.profile }}/candidate.json
             .cache/quality/${{ matrix.profile }}/events.jsonl
             .cache/quality/${{ matrix.profile }}/receipts/*.json
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-physical:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -178,14 +191,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native physical runner and source preflight
         run: |
           mkdir -p .cache/quality/physical
-          go test -json -tags=integration -count=1 -timeout=16m ./app/web/integration -run '^TestP2NativeContainers$' | tee .cache/quality/physical/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=16m ./app/web/integration -run "^TestP2NativeContainers$"' | tee .cache/quality/physical/events.jsonl
       - name: Reject incomplete or skipped physical evidence
         if: always()
         run: .github/scripts/verify-physical-evidence.sh .cache/quality/physical/events.jsonl
@@ -198,12 +207,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/physical/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-ftp:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -211,16 +223,12 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native FTP publication and fault acceptance
         env:
           INTERN_S1_ARCH: amd64
         run: |
           mkdir -p .cache/quality/ftp
-          go test -json -tags=integration -count=1 -timeout=14m ./app/web/integration -run '^TestS1NativeContainers$' | tee .cache/quality/ftp/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=14m ./app/web/integration -run "^TestS1NativeContainers$"' | tee .cache/quality/ftp/events.jsonl
       - name: Reject incomplete or skipped FTP evidence
         if: always()
         run: .github/scripts/verify-ftp-evidence.sh .cache/quality/ftp/events.jsonl
@@ -233,12 +241,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/ftp/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-replication:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -246,14 +257,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native replication, authentication and retention acceptance
         run: |
           mkdir -p .cache/quality/replication
-          go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run '^TestR1NativeContainers$' | tee .cache/quality/replication/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run "^TestR1NativeContainers$"' | tee .cache/quality/replication/events.jsonl
       - name: Reject incomplete or skipped replication evidence
         if: always()
         run: .github/scripts/verify-replication-evidence.sh .cache/quality/replication/events.jsonl
@@ -266,12 +273,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/replication/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-web:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 35
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -279,14 +289,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native Web resource, preflight and policy acceptance
         run: |
           mkdir -p .cache/quality/web
-          go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run '^TestW3NativeContainers$' | tee .cache/quality/web/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=32m ./app/web/integration -run "^TestW3NativeContainers$"' | tee .cache/quality/web/events.jsonl
       - name: Reject incomplete or skipped Web evidence
         if: always()
         run: .github/scripts/verify-w3-evidence.sh .cache/quality/web/events.jsonl
@@ -299,12 +305,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/web/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-dispatch:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -312,14 +321,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native dispatcher run, replica and SSE acceptance
         run: |
           mkdir -p .cache/quality/dispatch
-          go test -json -tags=integration -count=1 -timeout=40m ./app/web/integration -run '^TestW4NativeContainers$' | tee .cache/quality/dispatch/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=40m ./app/web/integration -run "^TestW4NativeContainers$"' | tee .cache/quality/dispatch/events.jsonl
       - name: Reject incomplete or skipped dispatcher evidence
         if: always()
         run: .github/scripts/verify-w4-evidence.sh .cache/quality/dispatch/events.jsonl
@@ -332,12 +337,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/dispatch/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-restore:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -345,14 +353,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native isolated restore acceptance
         run: |
           mkdir -p .cache/quality/restore
-          go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestP4NativeContainers$' | tee .cache/quality/restore/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run "^TestP4NativeContainers$"' | tee .cache/quality/restore/events.jsonl
       - name: Reject incomplete or skipped restore evidence
         if: always()
         run: .github/scripts/verify-p4-evidence.sh .cache/quality/restore/events.jsonl
@@ -365,12 +369,15 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/restore/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   container-restore-api:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 55
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -378,14 +385,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native restore API end to end
         run: |
           mkdir -p .cache/quality/restore-api
-          go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestW5NativeContainers$' | tee .cache/quality/restore-api/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=50m ./app/web/integration -run "^TestW5NativeContainers$"' | tee .cache/quality/restore-api/events.jsonl
       - name: Reject incomplete or skipped restore API evidence
         if: always()
         run: .github/scripts/verify-w5-evidence.sh .cache/quality/restore-api/events.jsonl
@@ -398,18 +401,22 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/restore-api/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   # D1 deployment acceptance: the only job that builds the deployment image and
   # runs the repository Compose file with `docker compose`. The candidate-artifact
   # evidence (image id, `docker save` digest, component versions JSON) is captured
-  # by the test and stored here for the release gate to bind.
+  # by the test inside the container and brought back here for the release gate to
+  # bind. The test's fixture directories are bind-mounted into the containers it
+  # starts and must keep their owners and modes, which is why it runs on the
+  # engine's own filesystem (see linux-go.sh).
   container-deploy:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 60
-    env:
-      INTERN_D1_ARTIFACT_DIR: ${{ github.workspace }}/.cache/quality/deploy
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -417,14 +424,16 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native Compose deployment acceptance
         run: |
           mkdir -p .cache/quality/deploy
-          go test -json -tags=integration -count=1 -timeout=55m ./app/web/integration -run '^TestD1NativeContainers$' | tee .cache/quality/deploy/events.jsonl
+          .github/scripts/linux-go.sh run --docker '
+            export INTERN_D1_ARTIFACT_DIR="$HARNESS_DATA/deploy"
+            mkdir -p "$INTERN_D1_ARTIFACT_DIR"
+            go test -json -tags=integration -count=1 -timeout=55m ./app/web/integration -run "^TestD1NativeContainers$"' | tee .cache/quality/deploy/events.jsonl
+      - name: Bring the candidate artifact record back from the container
+        if: always()
+        run: .github/scripts/linux-go.sh export deploy .cache/quality/deploy
       - name: Reject incomplete or skipped deployment evidence
         if: always()
         run: .github/scripts/verify-d1-evidence.sh .cache/quality/deploy/events.jsonl
@@ -442,6 +451,9 @@ jobs:
           path: |
             .cache/quality/deploy/events.jsonl
             .cache/quality/deploy/candidate-artifact.json
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   # S2 FTPS acceptance: the six-face TLS fixture, both FTPS modes, the four certificate
   # refusals with the server-side credential census, the chain replicated over FTPS and
@@ -451,7 +463,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.required == 'true'
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 90
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -459,14 +471,10 @@ jobs:
       - uses: ./.github/actions/windows-runner
       - name: Native Linux amd64 Docker engine
         run: .github/scripts/require-linux-docker.sh
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
       - name: Native FTPS container acceptance
         run: |
           mkdir -p .cache/quality/ftps
-          go test -json -tags=integration -count=1 -timeout=80m ./app/web/integration -run '^TestS2NativeContainers$' | tee .cache/quality/ftps/events.jsonl
+          .github/scripts/linux-go.sh run --docker 'go test -json -tags=integration -count=1 -timeout=80m ./app/web/integration -run "^TestS2NativeContainers$"' | tee .cache/quality/ftps/events.jsonl
       - name: Reject incomplete or skipped FTPS evidence
         if: always()
         run: .github/scripts/verify-s2-evidence.sh .cache/quality/ftps/events.jsonl
@@ -479,6 +487,9 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/ftps/events.jsonl
+      - name: Remove the scratch tree
+        if: always()
+        run: .github/scripts/linux-go.sh clean
 
   quality-gate:
     name: quality-gate
@@ -523,17 +534,18 @@ jobs:
         if: needs.scope.outputs.required == 'true'
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: ./.github/actions/windows-runner
         if: needs.scope.outputs.required == 'true'
-        with:
-          go-version: '1.27.0'
-          cache: false
+      - name: Native Linux amd64 Docker engine
+        if: needs.scope.outputs.required == 'true'
+        run: .github/scripts/require-linux-docker.sh
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         if: needs.scope.outputs.required == 'true'
         with:
           pattern: container-*
           path: .cache/downloaded
       - name: Verify the entire locked matrix for this exact commit
+        id: aggregate
         if: needs.scope.outputs.required == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
@@ -541,6 +553,8 @@ jobs:
           FAST: ${{ needs.quality-fast.result }}
           CONTAINERS: ${{ needs.container-mysql.result }}
         run: |
-          go run ./app/cli/cmd/quality-gate aggregate \
-            --directory .cache/downloaded --source "$SOURCE_SHA" --platform linux/amd64 \
-            --required=true --scope "$SCOPE" --fast "$FAST" --containers "$CONTAINERS"
+          .github/scripts/linux-go.sh import downloaded .cache/downloaded
+          .github/scripts/linux-go.sh run "go run ./app/cli/cmd/quality-gate aggregate --directory \"\$HARNESS_DATA/downloaded\" --source $SOURCE_SHA --platform linux/amd64 --required=true --scope $SCOPE --fast $FAST --containers $CONTAINERS"
+      - name: Remove the scratch tree
+        if: always() && steps.aggregate.conclusion != 'skipped'
+        run: .github/scripts/linux-go.sh clean
