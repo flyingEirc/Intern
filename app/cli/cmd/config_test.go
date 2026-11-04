@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 // cleanConfigEnv isolates a test from the machine that runs it. The loader reads
@@ -175,5 +177,79 @@ func assertNotCreated(t *testing.T, paths ...string) {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			t.Fatalf("command ran and created %q: %v", path, err)
 		}
+	}
+}
+
+// passwordYAML holds the plaintext connection password that needs a private file.
+const passwordYAML = "connection:\n  password: s3cret\n"
+
+// privatePasswordFile is the refusal for a password file that others can access.
+const privatePasswordFile = "YAML containing connection.password must be a regular private file (chmod 600); password_env is recommended"
+
+// loadConfigFile runs the real loader on one YAML file.
+func loadConfigFile(t *testing.T, path string) (configuration, error) {
+	t.Helper()
+	cleanConfigEnv(t)
+	loader := newConfigLoader(&cobra.Command{}, io.Discard)
+	if err := loader.flags.Parse([]string{"--config", path}); err != nil {
+		t.Fatal(err)
+	}
+	return loader.load()
+}
+
+// writeConfigFile creates a YAML file with exactly mode; WriteFile alone would apply the umask.
+func writeConfigFile(t *testing.T, contents string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "backup.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestPrivatePasswordFileLoads pins that a password in YAML is accepted when
+// neither group nor others have any access to the file.
+func TestPrivatePasswordFileLoads(t *testing.T) {
+	for _, mode := range []os.FileMode{0o600, 0o400, 0o700} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			c, err := loadConfigFile(t, writeConfigFile(t, passwordYAML, mode))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Connection.Password != "s3cret" {
+				t.Fatalf("password = %q, want %q", c.Connection.Password, "s3cret")
+			}
+		})
+	}
+}
+
+// TestPublicPasswordFileRefused pins that any one group or other permission bit
+// refuses a file that holds a password, and that the refusal carries no password.
+func TestPublicPasswordFileRefused(t *testing.T) {
+	for _, mode := range []os.FileMode{0o640, 0o620, 0o610, 0o604, 0o602, 0o601, 0o644, 0o660, 0o666} {
+		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
+			c, err := loadConfigFile(t, writeConfigFile(t, passwordYAML, mode))
+			if err == nil || err.Error() != privatePasswordFile {
+				t.Fatalf("error = %v, want %q", err, privatePasswordFile)
+			}
+			if c.Connection.Password != "" {
+				t.Fatal("refused configuration still carries the password")
+			}
+		})
+	}
+}
+
+// TestPasswordEnvFileNeedsNoPrivateMode pins that the private-file rule applies
+// only to a file that holds the password itself, not to one that names its source.
+func TestPasswordEnvFileNeedsNoPrivateMode(t *testing.T) {
+	c, err := loadConfigFile(t, writeConfigFile(t, "connection:\n  password_env: INTERN_TEST_DB_PASSWORD\n", 0o644))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Connection.PasswordEnv != "INTERN_TEST_DB_PASSWORD" || c.Connection.Password != "" {
+		t.Fatalf("password_env = %q, password set = %t", c.Connection.PasswordEnv, c.Connection.Password != "")
 	}
 }
