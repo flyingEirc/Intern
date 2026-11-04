@@ -413,7 +413,13 @@ jobs:
   # D1 deployment acceptance: the only job that builds the deployment image and
   # runs the repository Compose file with `docker compose`. The candidate-artifact
   # evidence (image id, `docker save` digest, component versions JSON) is captured
-  # by the test and stored here for the release gate to bind.
+  # by the test and stored here for the release gate to bind. The test removes its
+  # stack in t.Cleanup, which a cancelled job never reaches (the runner stops only
+  # the step's shell, and the orphaned test is killed at the end of the job), while
+  # the services restart: unless-stopped and the testcontainers reaper does not own
+  # Compose resources. d1-compose-clean.sh therefore removes this runner's D1
+  # Compose projects, and nothing else, before the test (leftovers of earlier jobs)
+  # and after it with always().
   container-deploy:
     needs: scope
     if: needs.scope.outputs.required == 'true'
@@ -431,10 +437,21 @@ jobs:
         with:
           go-version: '1.27.0'
           cache: false
+      # Self-test of the cleanup script below: what it removes and what it must
+      # never touch. It needs no Docker engine.
+      - name: D1 cleanup scope accept and reject cases
+        run: .github/scripts/d1-compose-clean-cases.sh
+      - name: Remove D1 Compose stacks that earlier jobs of this runner left behind
+        timeout-minutes: 5
+        run: .github/scripts/d1-compose-clean.sh
       - name: Native Compose deployment acceptance
         run: |
           mkdir -p .cache/quality/deploy
           go test -json -tags=integration -count=1 -timeout=55m ./app/web/integration -run '^TestD1NativeContainers$' | tee .cache/quality/deploy/events.jsonl
+      - name: Remove this job's D1 Compose stack
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/d1-compose-clean.sh
       - name: Reject incomplete or skipped deployment evidence
         if: always()
         run: .github/scripts/verify-d1-evidence.sh .cache/quality/deploy/events.jsonl
