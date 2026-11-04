@@ -23,8 +23,12 @@
 # repository Dockerfile, which does not know the runner), so they are scoped by
 # the name the harness gives them: intern-quality:<profile>-<sha12>-<arch>.
 # Only images of this job's INTERN_TEST_PROFILE and native architecture are
-# removed, only when GITHUB_SHA names the current commit, and never the current
-# SHA's image. There is no image prune, so no unrelated image can be lost.
+# considered, only when GITHUB_SHA names the current commit. The newest
+# keep_candidates images by creation time are kept, and the current SHA's image
+# is always kept (it counts toward K when it is one of the newest): runs of
+# different branches interleave on this runner, and pruning every other branch's
+# image would force a cold rebuild in its next job. There is no image prune, so
+# no unrelated image can be lost.
 #
 #   cli-quality-clean.sh              remove this runner's CLI quality leftovers
 #   cli-quality-clean.sh --inventory  fail if any labelled resource remains
@@ -51,6 +55,8 @@ esac
 runner=${RUNNER_NAME:?RUNNER_NAME is not set: this script runs inside a GitHub Actions job}
 tag=$(printf '%s' "$runner" | sha256sum | cut -c1-8)
 label=intern.quality.runner
+# Candidate images kept per profile besides the current commit's image.
+keep_candidates=3
 filter=label=$label=$tag
 
 # Every listing is its own assignment: a failing docker must end the script, not
@@ -68,7 +74,7 @@ images=''
 images_scoped=0
 if [[ -n $profile && $platform == */* && $current =~ ^[0-9a-f]{40}$ ]]; then
 	images_scoped=1
-	images=$(docker image ls --format '{{.Repository}}:{{.Tag}}')
+	images=$(docker image ls --format '{{.CreatedAt}} {{.Repository}}:{{.Tag}}')
 fi
 arch=${platform#*/}
 
@@ -117,17 +123,35 @@ if [[ -n $volumes ]]; then
 fi
 
 if ((images_scoped)); then
-	for ref in $images; do
+	entries=''
+	while IFS= read -r entry; do
+		[[ -n $entry ]] || continue
+		ref=${entry##* }
 		rest=${ref#intern-quality:}
 		[[ $rest != "$ref" ]] || continue
 		[[ $rest == "$profile-"* && $rest == *"-$arch" ]] || continue
 		sha=${rest#"$profile-"}
 		sha=${sha%"-$arch"}
 		[[ $sha =~ ^[0-9a-f]{12}$ ]] || continue
-		[[ $sha != "${current:0:12}" ]] || continue
-		echo "cli-quality-clean: removing candidate image $ref"
-		docker image rm "$ref" || status=1
-	done
+		entries="$entries$entry"$'\n'
+	done <<< "$images"
+	kept=0
+	while IFS= read -r entry; do
+		[[ -n $entry ]] || continue
+		ref=${entry##* }
+		rest=${ref#intern-quality:}
+		sha=${rest#"$profile-"}
+		sha=${sha%"-$arch"}
+		if ((kept < keep_candidates)) || [[ $sha == "${current:0:12}" ]]; then
+			echo "cli-quality-clean: keeping candidate image $ref"
+			if ((kept < keep_candidates)); then
+				kept=$((kept + 1))
+			fi
+		else
+			echo "cli-quality-clean: removing candidate image $ref"
+			docker image rm "$ref" || status=1
+		fi
+	done <<< "$(printf '%s' "$entries" | LC_ALL=C sort -r)"
 else
 	echo "cli-quality-clean: candidate images kept: INTERN_TEST_PROFILE, INTERN_TEST_PLATFORM and GITHUB_SHA must all scope them"
 fi

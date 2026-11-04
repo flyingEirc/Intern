@@ -57,7 +57,7 @@ if [[ ${FAKE_DOCKER_DOWN:-} == all || ($action == list && ${FAKE_DOCKER_DOWN:-} 
 fi
 if [[ $action == list ]]; then
 	if [[ $table == images ]]; then
-		[[ $* == '--format {{.Repository}}:{{.Tag}}' ]] || fail "unsupported list arguments: $*"
+		[[ $* == '--format {{.CreatedAt}} {{.Repository}}:{{.Tag}}' ]] || fail "unsupported list arguments: $*"
 		cat "$state/images"
 		exit 0
 	fi
@@ -79,7 +79,7 @@ for id in "$@"; do
 		continue
 	fi
 	if [[ $table == images ]]; then
-		{ grep -v -x -F -- "$id" "$state/images" || true; } > "$state/images.new"
+		awk -v ref="$id" '$NF != ref' "$state/images" > "$state/images.new"
 	else
 		awk -v id="$id" '$1 != id' "$state/$table" > "$state/$table.new"
 	fi
@@ -103,9 +103,10 @@ current=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 old=0123456789ab
 
 # seed ID:LABEL... resets the tables. The first letter of an id names its
-# table: c container, n network, v volume, i image reference. An empty label is
-# a resource no CLI quality label matches (an unlabelled resource, or a D1
-# Compose resource, which this script must never touch).
+# table: c container, n network, v volume, i image. An image entry is
+# iN:CREATED REF; CREATED may contain spaces, REF is the last field. An empty
+# label is a resource no CLI quality label matches (an unlabelled resource, or a
+# D1 Compose resource, which this script must never touch).
 seed() {
 	local entry
 	: > "$FAKE_DOCKER_STATE/containers"
@@ -153,7 +154,7 @@ left() {
 		awk '{ print $1 }' | LC_ALL=C sort | tr '\n' ' '
 }
 images_left() {
-	LC_ALL=C sort "$FAKE_DOCKER_STATE/images" | tr '\n' ' '
+	awk '{ print $NF }' "$FAKE_DOCKER_STATE/images" | LC_ALL=C sort | tr '\n' ' '
 }
 
 # expect NAME STATUS LEFT [LOG-PATTERN] compares the last clean call: the exit
@@ -209,22 +210,41 @@ clean JackVance
 expect '1 this runner resources removed, everything else kept' 0 'cd1 cx1 cx2 nd1 nx1 nx2 vd1 vx1 vx2' \
 	'found container c1'
 
-# 2. Only old candidate images of this profile and architecture go; the current
-# commit's image, another profile, another architecture, a non-hex tag and a
-# longer tag all stay.
-seed "i1:intern-quality:$profile-${current:0:12}-$arch" \
-	"i2:intern-quality:$profile-$old-$arch" \
-	"i3:intern-quality:mysql-8.4.11-$old-$arch" \
-	"i4:intern-quality:$profile-$old-arm64" \
-	"i5:intern-quality:$profile-$old-$arch-extra" \
-	"i6:intern-quality:$profile-0123456789AB-$arch" \
-	"i7:intern-quality:$profile-0123456789a-$arch" \
-	"i8:other/repository:$old"
+# 2. Candidate pruning keeps the newest three images of this profile and the
+# current commit's image even though it is older; another profile, another
+# architecture, malformed tags, longer tags and unrelated repositories stay.
+seed \
+	"i1:2023-12-31 00:00:00 +0000 UTC intern-quality:$profile-${current:0:12}-$arch" \
+	"i2:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-111111111111-$arch" \
+	"i3:2024-01-04 00:00:00 +0000 UTC intern-quality:$profile-222222222222-$arch" \
+	"i4:2024-01-03 00:00:00 +0000 UTC intern-quality:$profile-333333333333-$arch" \
+	"i5:2024-01-02 00:00:00 +0000 UTC intern-quality:$profile-444444444444-$arch" \
+	"i6:2024-01-01 00:00:00 +0000 UTC intern-quality:$profile-555555555555-$arch" \
+	"i7:2024-01-05 00:00:00 +0000 UTC intern-quality:mysql-8.4.11-$old-$arch" \
+	"i8:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-$old-arm64" \
+	"i9:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-$old-$arch-extra" \
+	"i10:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-0123456789AB-$arch" \
+	"i11:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-0123456789a-$arch" \
+	"i12:2024-01-05 00:00:00 +0000 UTC other/repository:$old"
 clean JackVance
-expect '2 old candidate image of this profile removed, all others kept' 0 '' \
-	"removing candidate image intern-quality:$profile-$old-$arch"
-expect_images '2 candidate image scope' \
-	"intern-quality:$profile-${current:0:12}-$arch intern-quality:mysql-8.4.11-$old-$arch intern-quality:$profile-$old-arm64 intern-quality:$profile-$old-$arch-extra intern-quality:$profile-0123456789AB-$arch intern-quality:$profile-0123456789a-$arch other/repository:$old"
+expect '2 newest K and current SHA kept, older candidates removed' 0 '' \
+	"removing candidate image intern-quality:$profile-444444444444-$arch"
+expect_images '2 candidate image scope (current older)' \
+	"intern-quality:$profile-${current:0:12}-$arch intern-quality:$profile-111111111111-$arch intern-quality:$profile-222222222222-$arch intern-quality:$profile-333333333333-$arch intern-quality:mysql-8.4.11-$old-$arch intern-quality:$profile-$old-arm64 intern-quality:$profile-$old-$arch-extra intern-quality:$profile-0123456789AB-$arch intern-quality:$profile-0123456789a-$arch other/repository:$old"
+
+# 2b. When the current commit's image is itself one of the newest images it
+# counts toward K, so only three candidates survive.
+seed \
+	"i1:2024-01-06 00:00:00 +0000 UTC intern-quality:$profile-${current:0:12}-$arch" \
+	"i2:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-111111111111-$arch" \
+	"i3:2024-01-04 00:00:00 +0000 UTC intern-quality:$profile-222222222222-$arch" \
+	"i4:2024-01-03 00:00:00 +0000 UTC intern-quality:$profile-333333333333-$arch" \
+	"i5:2024-01-02 00:00:00 +0000 UTC intern-quality:$profile-444444444444-$arch"
+clean JackVance
+expect '2b current SHA among the newest K, older candidates removed' 0 '' \
+	"removing candidate image intern-quality:$profile-333333333333-$arch"
+expect_images '2b candidate image scope (current newest)' \
+	"intern-quality:$profile-${current:0:12}-$arch intern-quality:$profile-111111111111-$arch intern-quality:$profile-222222222222-$arch"
 
 # 3. Nothing to remove is a success with a log line, and touches nothing.
 seed "cx1:" "vx1:$other"
@@ -240,7 +260,7 @@ expect '4 a stuck container is reported, the rest still goes' 1 'c1' 'removal of
 # 5. An unreachable engine must not read as an empty host, whichever listing
 # notices it first, and nothing is removed before all listings succeeded.
 for down in all containers networks volumes images; do
-	seed "c1:$mine" "n1:$mine" "v1:$mine" "i1:intern-quality:$profile-$old-$arch"
+	seed "c1:$mine" "n1:$mine" "v1:$mine" "i1:2024-01-01 00:00:00 +0000 UTC intern-quality:$profile-$old-$arch"
 	FAKE_DOCKER_DOWN=$down clean JackVance
 	expect "5 docker unreachable ($down)" 1 'c1 n1 v1' 'Cannot connect to the Docker daemon'
 done
@@ -267,7 +287,7 @@ expect '9 inventory fails on leftovers without removing them' 1 'c1 cx1 n1 v1' '
 
 # 10. Without a current commit id the candidate image cannot be protected, so
 # no image is removed; the labelled resources still are.
-seed "c1:$mine" "i1:intern-quality:$profile-$old-$arch"
+seed "c1:$mine" "i1:2024-01-01 00:00:00 +0000 UTC intern-quality:$profile-$old-$arch"
 sha=''
 clean JackVance
 expect '10 no GITHUB_SHA keeps every candidate image' 0 '' 'candidate images kept'
@@ -275,7 +295,7 @@ expect_images '10 old image kept without a current SHA' "intern-quality:$profile
 
 # 11. Without a profile the image name cannot be scoped, so no image is
 # removed; the labelled resources still are.
-seed "c1:$mine" "i1:intern-quality:$profile-$old-$arch"
+seed "c1:$mine" "i1:2024-01-01 00:00:00 +0000 UTC intern-quality:$profile-$old-$arch"
 sha=$current
 prof=''
 clean JackVance
@@ -316,8 +336,10 @@ if [[ ${CLEAN_CASES_MUTANTS:-1} == 1 ]]; then
 		'^FAIL 1 .*: left \['
 	mutant 'removal failures ignored' '|| status=1' '|| status=0' \
 		'^FAIL 4 .*: exit status 0, want 1'
-	mutant 'current SHA protection inverted' '[[ $sha != "${current:0:12}" ]] || continue' '[[ $sha == "${current:0:12}" ]] || continue' \
-		'^FAIL 2 candidate image scope: images \['
+	mutant 'current SHA no longer protected when older' '[[ $sha == "${current:0:12}" ]]' 'false' \
+		'^FAIL 2 candidate image scope .*images \['
+	mutant 'newest K ignored' 'keep_candidates=3' 'keep_candidates=0' \
+		'^FAIL 2b candidate image scope .*images \['
 	mutant 'inventory leftovers ignored' 'if ((leftovers)); then' 'if false; then' \
 		'^FAIL 9 .*: exit status 0, want 1'
 	mutant 'RUNNER_NAME guard removed' 'runner=${RUNNER_NAME:?' 'runner=${RUNNER_NAME:-' \
