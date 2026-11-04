@@ -6,12 +6,17 @@ import (
 	"io"
 	"io/fs"
 	"net/textproto"
+	"strings"
 )
 
 var (
 	ErrOwnership       = errors.New("FTP namespace ownership refused")
 	ErrCommitUncertain = errors.New("FTP publication outcome uncertain")
 	ErrCleanupPending  = errors.New("FTP temporary object cleanup pending")
+	// ErrTLS reports that an FTPS channel was refused: the server certificate
+	// failed verification, or TLS itself was never negotiated. It never carries
+	// the peer's message, which can name a host or an authority.
+	ErrTLS = errors.New("FTP TLS refused")
 )
 
 // Error contains only safe operation metadata. Raw server replies, paths,
@@ -50,6 +55,13 @@ func failure(op string, err error) error {
 	} else if errors.As(err, &previous) {
 		result.ReplyCode = previous.ReplyCode
 		result.Kind = previous.Kind
+	}
+	// A refusal keeps its precise category across every layer that wraps it:
+	// the certificate error behind it is deliberately not retained, so the kind
+	// an earlier operation reported is the only faithful description left.
+	if kind, ok := tlsKind(err); ok && !strings.HasPrefix(result.Kind, "tls_") {
+		result.cause = errors.Join(result.cause, ErrTLS)
+		result.Kind = kind
 	}
 	if result.ReplyCode == 552 {
 		result.Kind = "quota"

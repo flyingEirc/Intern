@@ -1,20 +1,30 @@
 package server
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
+	"encoding/json/v2"
+	"encoding/pem"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/storage/ftp"
 )
 
 // repositoryBody and sourceBody are built per call because the local root must
@@ -193,34 +203,45 @@ func storedCiphertext(t *testing.T, dir, table, id string) string {
 	return string(ciphertext)
 }
 
-func TestRepositoryValidationRejectsUnsafeAndFTPSShapes(t *testing.T) {
+// TestRepositoryValidationRejectsUnsafeShapes pins the frozen 422/400 split of a
+// repository body. A tls_mode that does not match the kind is a shape violation
+// (422), and so is a ca_pem that is misplaced, unparsable or a private key; every
+// other malformed field stays a 400.
+func TestRepositoryValidationRejectsUnsafeShapes(t *testing.T) {
 	f := newAuthFixture(t)
 	f.seed(t, "admin", "admin")
 	cookie := f.login(t, "admin", testPassword)
 	root := newRepositoryDir(t)
-	// A tls_mode that does not match the kind is the frozen 422 case: an FTP
-	// repository must send "plain" explicitly, and omitted or FTPS values are
-	// refused rather than downgraded.
-	for name, body := range map[string]string{
-		"omitted tls_mode": `{"name":"a","kind":"ftp","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
-		"explicit ftps":    `{"name":"a","kind":"ftp","tls_mode":"explicit","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
-		"implicit ftps":    `{"name":"a","kind":"ftp","tls_mode":"implicit","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
-		"local with plain": `{"name":"a","kind":"local","tls_mode":"plain","root":"` + root + `"}`,
-	} {
+	bundle, privateKey := testBundles(t)
+	rejected := map[string]string{
+		"omitted tls_mode":   `{"name":"a","kind":"ftp","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"unknown tls_mode":   `{"name":"a","kind":"ftp","tls_mode":"starttls","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"none for ftp":       `{"name":"a","kind":"ftp","tls_mode":"none","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"},"password":"x"}`,
+		"local with plain":   `{"name":"a","kind":"local","tls_mode":"plain","root":"` + root + `"}`,
+		"local with ftps":    `{"name":"a","kind":"local","tls_mode":"explicit","root":"` + root + `"}`,
+		"ca_pem on plain":    repositoryBody("a", "plain", 21, bundle),
+		"ca_pem not a cert":  repositoryBody("a", "explicit", 21, "not a certificate"),
+		"ca_pem private key": repositoryBody("a", "implicit", 990, privateKey),
+		// The bundle limit sits under the request-body limit, so an over-limit
+		// bundle is the handler's 422 and never the generic 413.
+		"ca_pem oversized": repositoryBody("a", "explicit", 21, strings.Repeat("a", ftp.MaxCAPemBytes+1)),
+	}
+	for name, body := range rejected {
 		t.Run(name, func(t *testing.T) {
 			response := f.requestRejected(t, "POST", "/api/v1/repositories", body, cookie, http.StatusUnprocessableEntity)
 			assertSingleError(t, response, render.ValidationFailed)
 		})
 	}
 	for name, body := range map[string]string{
-		"relative root":      `{"name":"a","kind":"local","tls_mode":"none","root":"relative/path"}`,
-		"empty name":         `{"name":"","kind":"local","tls_mode":"none","root":"` + root + `"}`,
-		"long name":          `{"name":"` + strings.Repeat("n", 65) + `","kind":"local","tls_mode":"none","root":"` + root + `"}`,
-		"unknown kind":       `{"name":"a","kind":"s3","tls_mode":"none","root":"` + root + `"}`,
-		"ftp without secret": `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"}}`,
-		"ftp relative path":  `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"b","username":"u"},"password":"x"}`,
-		"ftp bad port":       `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":0,"base_path":"/b","username":"u"},"password":"x"}`,
-		"local with ftp":     `{"name":"a","kind":"local","tls_mode":"none","root":"` + root + `","ftp":{"host":"h","port":21,"base_path":"/b","username":"u"}}`,
+		"relative root":       `{"name":"a","kind":"local","tls_mode":"none","root":"relative/path"}`,
+		"empty name":          `{"name":"","kind":"local","tls_mode":"none","root":"` + root + `"}`,
+		"long name":           `{"name":"` + strings.Repeat("n", 65) + `","kind":"local","tls_mode":"none","root":"` + root + `"}`,
+		"unknown kind":        `{"name":"a","kind":"s3","tls_mode":"none","root":"` + root + `"}`,
+		"ftp without secret":  `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"}}`,
+		"ftps without secret": `{"name":"a","kind":"ftp","tls_mode":"explicit","ftp":{"host":"127.0.0.1","port":21,"base_path":"/b","username":"u"}}`,
+		"ftp relative path":   `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"b","username":"u"},"password":"x"}`,
+		"ftp bad port":        `{"name":"a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":0,"base_path":"/b","username":"u"},"password":"x"}`,
+		"local with ftp":      `{"name":"a","kind":"local","tls_mode":"none","root":"` + root + `","ftp":{"host":"h","port":21,"base_path":"/b","username":"u"}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			// These bodies are out of the OpenAPI schema as well as out of the
@@ -230,6 +251,133 @@ func TestRepositoryValidationRejectsUnsafeAndFTPSShapes(t *testing.T) {
 		})
 	}
 	expectAuditCount(t, f.dir, "repositories.create", "success", 0)
+}
+
+// repositoryBodyPassword is distinctive enough for assertNoSecrets to prove the
+// stored FTPS credential never reaches a response, the audit table or the logs.
+const repositoryBodyPassword = "unit-ftps-secret-value"
+
+// repositoryBody builds one FTP repository body with the given transport mode,
+// trust bundle and password. Encoding it keeps a multi-line PEM out of
+// hand-written JSON.
+func repositoryBody(name, mode string, port int64, bundle string) string {
+	type ftp struct {
+		Host     string `json:"host"`
+		Port     int64  `json:"port"`
+		BasePath string `json:"base_path"`
+		Username string `json:"username"`
+		CAPem    string `json:"ca_pem,omitempty"`
+	}
+	body := struct {
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+		TLSMode  string `json:"tls_mode"`
+		FTP      ftp    `json:"ftp"`
+		Password string `json:"password"`
+	}{
+		Name: name, Kind: "ftp", TLSMode: mode, Password: repositoryBodyPassword,
+		FTP: ftp{Host: "ftps.example", Port: port, BasePath: "/backups", Username: "backup", CAPem: bundle},
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
+// testBundles returns one parsable CA certificate PEM and one private key PEM:
+// the first is what a repository may store, the second must never be accepted.
+func testBundles(t *testing.T) (bundle, privateKey string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "unit-test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	secret, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle, string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: secret}))
+}
+
+// TestFTPSRepositoryCRUD covers S2-A3 at the API: both FTPS modes are created,
+// read back with the bundle the operator sent, report no plaintext credential and
+// record no plaintext_ftp audit, and refuse any later change of transport.
+func TestFTPSRepositoryCRUD(t *testing.T) {
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	cookie := f.login(t, "admin", testPassword)
+	bundle, _ := testBundles(t)
+	creates := 0
+	for _, testCase := range []struct {
+		mode string
+		port int64
+	}{{"explicit", 21}, {"implicit", 990}} {
+		t.Run(testCase.mode, func(t *testing.T) {
+			creates++
+			requireFTPSRepositoryLifecycle(t, f, cookie, bundle, testCase.mode, testCase.port, creates)
+		})
+	}
+}
+
+// requireFTPSRepositoryLifecycle creates one FTPS repository, checks the
+// stored and audited shape, reads it back, and proves the transport cannot be
+// moved to plain while an in-mode replacement still succeeds. creates is the
+// number of successful repository creates expected in the audit afterwards.
+func requireFTPSRepositoryLifecycle(t *testing.T, f *authFixture, cookie *http.Cookie, bundle, mode string, port int64, creates int) {
+	t.Helper()
+	repository := createFTPSRepository(t, f, cookie, bundle, mode, port)
+	if got := countAudit(t, f.dir, "repositories.create", "success"); got != creates {
+		t.Fatalf("creates audited = %d, want %d", got, creates)
+	}
+	if strings.Contains(rawAudit(t, f.dir), `"plaintext_ftp":true`) {
+		t.Fatal("an FTPS create recorded plaintext_ftp")
+	}
+	read := f.request(t, "GET", "/api/v1/repositories/"+repository.ID, "", cookie, http.StatusOK)
+	if !strings.Contains(read.Body.String(), `"tls_mode":"`+mode+`"`) ||
+		strings.Contains(read.Body.String(), `"plaintext_credentials":true`) {
+		t.Fatalf("%s read body = %s", mode, read.Body)
+	}
+	assertNoSecrets(t, f, read.Body.String(), repositoryBodyPassword)
+	moved := f.requestRejected(t, "PUT", "/api/v1/repositories/"+repository.ID,
+		repositoryBody("ftps-"+mode, "plain", port, ""), cookie, http.StatusUnprocessableEntity)
+	assertSingleError(t, moved, render.ValidationFailed)
+	rotated := repositoryBody("ftps-"+mode, mode, port, bundle)
+	f.request(t, "PUT", "/api/v1/repositories/"+repository.ID, rotated, cookie, http.StatusOK)
+}
+
+// createFTPSRepository creates one FTPS repository and checks the returned
+// row carries the selected mode, the sent bundle and no plaintext credential.
+func createFTPSRepository(t *testing.T, f *authFixture, cookie *http.Cookie, bundle, mode string, port int64) store.Repository {
+	t.Helper()
+	created := f.request(t, "POST", "/api/v1/repositories",
+		repositoryBody("ftps-"+mode, mode, port, bundle), cookie, http.StatusCreated)
+	var repository store.Repository
+	if err := json.Unmarshal(created.Body.Bytes(), &repository); err != nil {
+		t.Fatal(err)
+	}
+	if repository.Kind != store.RepositoryFTP || repository.TLSMode != mode ||
+		!repository.HasSecret || repository.PlaintextCredentials {
+		t.Fatalf("%s repository = %+v", mode, repository)
+	}
+	if repository.FTP == nil || repository.FTP.CAPem != bundle || repository.FTP.Port != port {
+		t.Fatalf("%s repository config = %+v", mode, repository.FTP)
+	}
+	return repository
 }
 
 // TestLocalRepositoryRootMustNotContainKEK covers the repository-time location

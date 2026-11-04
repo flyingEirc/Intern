@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Intern Web control plane
-  version: 0.2.0
+  version: 0.3.0
   description: >-
     Session authentication, three-role authorization, users and audit API.
     JSON uses encoding/json/v2; handwritten handlers are checked by kin-openapi.
@@ -400,13 +400,18 @@ paths:
           $ref: '#/components/responses/Error'
     post:
       operationId: createRepository
-      summary: Create a local or plain-FTP repository (repositories:manage, admin only)
+      summary: Create a local, plain-FTP or FTPS repository (repositories:manage, admin only)
       description: >-
         A local repository requires tls_mode "none" and an absolute root. An FTP
-        repository requires tls_mode "plain" explicitly; an omitted value, "explicit"
-        or "implicit" is rejected because FTPS is not implemented. The password is
-        sealed with the deployment KEK and is never returned. A successful FTP
-        create records plaintext_ftp=true in the same transaction as its audit.
+        repository must name its own transport: "plain", "explicit" or "implicit";
+        an omitted or unknown value is 422 and is never guessed from the address or
+        port. An FTPS repository may carry ca_pem, the public PEM bundle that signed
+        the server certificate, and without it the system roots are used. No option
+        skips certificate verification, and a bundle that is unparsable, oversized,
+        or sent with tls_mode "plain" is 422. The password is sealed with the
+        deployment KEK and is never returned. A successful plain FTP create records
+        plaintext_ftp=true in the same transaction as its audit; an FTPS create
+        records no such flag.
       requestBody:
         required: true
         content:
@@ -451,9 +456,11 @@ paths:
       operationId: updateRepository
       summary: Replace a repository (repositories:manage, admin only)
       description: >-
-        kind and tls_mode are immutable. An omitted password keeps the stored
-        secret; a supplied password replaces the ciphertext in place, in the same
-        transaction as the success audit.
+        kind and tls_mode are immutable: a repository never changes transport, so
+        an FTPS copy cannot be moved to plaintext and a plaintext one cannot acquire
+        a CA bundle by update. An omitted password keeps the stored secret; a
+        supplied password replaces the ciphertext in place, in the same transaction
+        as the success audit.
       requestBody:
         required: true
         content:
@@ -504,9 +511,12 @@ paths:
       summary: Probe repository writability (repositories:manage, admin only)
       description: >-
         A local repository is probed through a private staged write and removal.
-        An FTP repository is opened with this instance's namespace marker and
-        probed without publishing. The result is 200 with ok=false and a safe code
-        when the target is unusable; raw replies, paths and credentials never appear.
+        An FTP repository is opened with this instance's namespace marker over the
+        transport its tls_mode names, and probed without publishing. An FTPS probe
+        that cannot verify the server answers ok=false with a tls_ code (tls_untrusted,
+        tls_hostname, tls_expired, tls_negotiation) and never transmits the
+        credential. The result is 200 with ok=false and a safe code when the target
+        is unusable; raw replies, paths and credentials never appear.
       responses:
         '200':
           description: Probe result
@@ -1803,10 +1813,14 @@ components:
       enum: [local, ftp]
     TLSMode:
       type: string
-      enum: [none, plain]
+      enum: [none, plain, explicit, implicit]
       description: >-
-        local repositories are "none"; FTP repositories are "plain" only. FTPS
-        ("explicit", "implicit") is not accepted.
+        The transport a repository uses, chosen once at creation. local is "none".
+        ftp is "plain" (cleartext FTP, credentials included), "explicit" (FTPS after
+        AUTH TLS) or "implicit" (FTPS on a TLS-only listener). An FTPS session needs
+        TLS 1.2 or newer on both channels and verifies the server against ca_pem or,
+        when none is supplied, the system roots; no mode skips that verification and
+        none falls back to plaintext.
     Repository:
       type: object
       additionalProperties: false
@@ -1844,12 +1858,19 @@ components:
               type: string
             username:
               type: string
+            ca_pem:
+              type: string
+              description: >-
+                The public PEM bundle that signed this FTPS server's certificate,
+                empty when the system roots are trusted. Never returned for plain.
         has_secret:
           type: boolean
           description: A sealed secret is stored; the value is never returned.
         plaintext_credentials:
           type: boolean
-          description: True for plain FTP, whose credentials cross the network unencrypted.
+          description: >-
+            True only for plain FTP, whose credentials cross the network
+            unencrypted. An explicit or implicit FTPS repository is always false.
         created_at:
           type: string
           format: date-time
@@ -1871,8 +1892,9 @@ components:
           allOf:
             - $ref: '#/components/schemas/TLSMode'
           description: >-
-            Must match the kind: "none" for local, "plain" for FTP. An FTP
-            repository that omits it, or sends "explicit"/"implicit", is 422.
+            Must match the kind: "none" for local, and one of "plain", "explicit"
+            or "implicit" for an FTP repository. An FTP repository that omits it is
+            422; the mode is immutable afterwards.
         root:
           type: string
           description: Required for local repositories; must be an absolute path.
@@ -1894,6 +1916,14 @@ components:
             username:
               type: string
               minLength: 1
+            ca_pem:
+              type: string
+              maxLength: 262144
+              description: >-
+                Optional FTPS trust bundle: one or more certificate PEM blocks. A
+                bundle that does not parse, exceeds the limit, or is sent with
+                tls_mode "plain" is 422. It is public data, not a secret, and is
+                stored with the repository configuration.
         password:
           type: string
           writeOnly: true

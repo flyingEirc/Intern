@@ -64,6 +64,9 @@ type ftpWrite struct {
 	Port     int64  `json:"port"`
 	BasePath string `json:"base_path"`
 	Username string `json:"username"`
+	// CAPem is the public FTPS trust bundle, omitted when empty so a W3 body stays
+	// byte-identical: the S2 worker is the only caller that fills it.
+	CAPem string `json:"ca_pem,omitempty"`
 }
 
 type sourceWrite struct {

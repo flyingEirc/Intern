@@ -495,17 +495,60 @@ func s1Paths(t *testing.T) {
 			t.Fatalf("unsafe delete accepted: %q", key)
 		}
 	}
-	for _, mode := range []string{"", "explicit", "implicit"} {
-		cfg := s1Config("paths", "normal")
-		cfg.TLSMode = mode
-		if _, err := Open(t.Context(), cfg); err == nil {
-			t.Fatal("unsupported TLS mode silently downgraded")
-		}
+	// An unset mode is a configuration error, refused before any dial. The two
+	// FTPS modes are valid selections now, so what refuses them here is the
+	// server itself: this fixture listens with TLS disabled, and it must answer
+	// the upgrade with a refusal the caller can classify as a TLS negotiation
+	// failure - never a silent downgrade to plaintext.
+	if _, err := Open(t.Context(), s1ModeConfig("paths", "")); !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("an unset TLS mode was not refused as invalid: %v", err)
+	}
+	explicit := s1TLSRefusal(t, TLSModeExplicit)
+	implicit := s1TLSRefusal(t, TLSModeImplicit)
+	// Explicit: AUTH TLS is the first command the client sends, and the server
+	// answered it, so the refusal carries the server's own reply code and no FTP
+	// reply was ever exchanged for a credential. Implicit: the very first byte the
+	// client reads must be a TLS record, so the handshake itself refuses and no
+	// FTP command - let alone USER or PASS - ever left this process.
+	if explicit.ReplyCode < 400 || explicit.ReplyCode > 599 {
+		t.Fatalf("explicit mode did not surface the server's own refusal reply: %+v", explicit)
+	}
+	if implicit.ReplyCode != 0 {
+		t.Fatalf("implicit mode reported an FTP reply from an unencrypted server: %+v", implicit)
 	}
 	if _, err := r.Open(t.Context(), "paths/payload", -1); !errors.Is(err, fs.ErrInvalid) {
 		t.Fatal("negative RETR offset accepted")
 	}
-	t.Log("S1-A3 path_tls_rejection: traversal and foreign paths refused; plain explicitly selected; FTP credentials travel in cleartext")
+	t.Log("S1-A3 path_tls_rejection: traversal and foreign paths refused; plain explicitly selected; explicit/implicit refused by a plain-only server as tls_negotiation before any credential; FTP credentials travel in cleartext")
+}
+
+// s1ModeConfig selects one transport mode against the plain-only S1 fixture,
+// leaving the address and the credentials the harness injected untouched.
+func s1ModeConfig(instance, mode string) Config {
+	cfg := s1Config(instance, "normal")
+	cfg.TLSMode = mode
+	return cfg
+}
+
+// s1TLSRefusal opens the fixture in one FTPS mode and returns the classified
+// transport refusal. A completed session here would be the downgrade itself.
+func s1TLSRefusal(t *testing.T, mode string) *Error {
+	t.Helper()
+	_, err := Open(t.Context(), s1ModeConfig("paths", mode))
+	if err == nil {
+		t.Fatalf("%s mode completed against a server without TLS", mode)
+	}
+	var operation *Error
+	if !errors.As(err, &operation) {
+		t.Fatalf("%s mode failed outside the classified chain: %v", mode, err)
+	}
+	if !strings.HasPrefix(operation.Kind, "tls_") || !errors.Is(err, ErrTLS) {
+		t.Fatalf("%s mode is not a TLS refusal: kind=%s err=%v", mode, operation.Kind, err)
+	}
+	if strings.Contains(err.Error(), os.Getenv("INTERN_S1_PASSWORD")) {
+		t.Fatalf("%s mode leaked the account password", mode)
+	}
+	return operation
 }
 
 func s1RejectRewrittenNames(t *testing.T, r *Repository) {

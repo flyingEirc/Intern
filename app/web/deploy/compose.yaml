@@ -1,0 +1,138 @@
+# Intern Web reference deployment: one Linux Docker host, one MySQL 8.4 source
+# container, one Intern container. It is the deployment shape the D1 acceptance
+# test (app/web/integration/d1_test.go) drives with real `docker compose`, so the
+# commands in docs/guide/operations.md are this file, not a simulation.
+#
+# Everything an operator must choose comes from the environment (see
+# .env.example next to this file): no credential and no private key is stored
+# here. Business data (repositories, sources, policies, backups, restores) lives
+# only in the intern-metadata volume, so recreating or upgrading the image never
+# overwrites it.
+#
+# Before `docker compose up`, create the three secret files and make the KEK
+# readable by the container user only: Compose file secrets are plain bind
+# mounts, so the host file must be a regular file owned by the container UID
+# (999 by default) with mode 0600, or `intern-web serve` refuses to start.
+#
+#   INTERN_KEK_FILE_HOST        mode 0600, owner = container uid  (KEK keyset)
+#   INTERN_TLS_CERT_HOST        the HTTPS certificate for INTERN_HOST_PORT
+#   INTERN_TLS_KEY_HOST         its private key (keep it private)
+#
+# The TLS certificate must be valid for the name clients use (for example
+# localhost or the host's internal DNS name); Intern refuses to serve a
+# non-loopback listener without TLS.
+name: intern
+
+services:
+  mysql:
+    # Pinned by digest from internal/physical/compat.json. The same value is the
+    # base of the Intern image, so mysqld and the rehearsal binary are one
+    # version. INTERN_MYSQL_IMAGE lets a deployment mirror it internally.
+    image: ${INTERN_MYSQL_IMAGE:-mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a}
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # The socket directory is shared with Intern: the backup account is
+      # 'intern_bkp'@'localhost', so every connection is a local socket
+      # connection instead of a TCP connection authenticated by container IP.
+      - mysql-run:/var/run/mysqld
+    healthcheck:
+      # An unauthenticated ping proves mysqld accepts connections without
+      # putting a password in the healthcheck command line.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  intern:
+    # Tag convention: intern:<version>-mysql<server major.minor>, because the
+    # image embeds mysqld and XtraBackup of exactly that server version.
+    image: intern:${INTERN_VERSION:-local}-mysql8.4
+    build:
+      context: ../..
+      dockerfile: app/web/deploy/Dockerfile
+      args:
+        MYSQL_IMAGE: ${INTERN_MYSQL_IMAGE:-mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a}
+        PXB_IMAGE: ${INTERN_PXB_IMAGE:-percona/percona-xtrabackup:8.4.0-7@sha256:bf1478c188271b2478faddb92a27e8378364b672b8e399c0df1c17fef8cb0ceb}
+        SOURCE_SHA: ${INTERN_SOURCE_SHA:-unknown}
+    # The mysql uid/gid: the datadir on the shared volume belongs to it, and the
+    # KEK file is expected to be owned by it.
+    user: "999:999"
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # A graceful stop is the shutdown window plus the detached-audit budget, the
+    # SQLite busy timeout and a scheduling margin (about 10.5 s with the default
+    # 30 s window). The grace period must cover that, and a running backup or
+    # restore must be able to reach its cancel semantics instead of being killed.
+    stop_grace_period: 120s
+    ports:
+      # Intern serves HTTPS with the certificate above. Keep the loopback
+      # mapping and put a reverse proxy in front, or bind the host port to the
+      # internal network address you actually control.
+      - "127.0.0.1:${INTERN_HOST_PORT:-8443}:8443"
+    environment:
+      INTERN_LISTEN: "0.0.0.0:8443"
+      INTERN_LOG_LEVEL: ${INTERN_LOG_LEVEL:-info}
+      INTERN_METADATA_DIR: /var/lib/intern/metadata
+      INTERN_WORK_ROOT: /var/lib/intern/work
+      INTERN_EXPORT_ROOT: /var/lib/intern/export
+      INTERN_KEK_FILE: /run/secrets/intern_kek
+      INTERN_TLS_CERT_FILE: /run/secrets/intern_tls_cert
+      INTERN_TLS_KEY_FILE: /run/secrets/intern_tls_key
+      INTERN_XTRABACKUP_PATH: /usr/bin/xtrabackup
+      INTERN_XBSTREAM_PATH: /usr/bin/xbstream
+      INTERN_MYSQLD_PATH: /usr/sbin/mysqld
+      # Free-space floors: both must be positive for backup and restore to run.
+      INTERN_MIN_WORK_BYTES: ${INTERN_MIN_WORK_BYTES:-536870912}
+      INTERN_MIN_BACKUP_BYTES: ${INTERN_MIN_BACKUP_BYTES:-536870912}
+      HOME: /tmp
+      TMPDIR: /tmp
+    volumes:
+      # The datadir is read-only on purpose: xtrabackup must never write to the
+      # source. The same volume is mounted read-write for mysql.
+      - mysql-data:/var/lib/mysql:ro
+      - mysql-run:/var/run/mysqld
+      - intern-metadata:/var/lib/intern/metadata
+      - intern-backups:/var/lib/intern/backups
+      - intern-work:/var/lib/intern/work
+      # Restore exports go to a host directory so a brand-new mysql container
+      # can start on them without importing anything into Intern's volumes.
+      - ${INTERN_EXPORT_HOST_DIR:?set INTERN_EXPORT_HOST_DIR in .env}:/var/lib/intern/export
+    secrets:
+      - intern_kek
+      - intern_tls_cert
+      - intern_tls_key
+    # Resource isolation for a container that shares the host with production
+    # MySQL: cap CPU and memory, and take the smallest share of disk bandwidth.
+    cpus: "2.0"
+    mem_limit: 2g
+    blkio_config:
+      weight: 300
+    healthcheck:
+      # The image ships no curl: the binary probes its own /healthz over the
+      # loopback interface, using the same INTERN_LISTEN and TLS settings.
+      test: ["CMD", "/usr/local/bin/intern-web", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  mysql-data:
+  mysql-run:
+  intern-metadata:
+  intern-backups:
+  intern-work:
+
+secrets:
+  intern_kek:
+    file: ${INTERN_KEK_FILE_HOST:?create the KEK file and set INTERN_KEK_FILE_HOST in .env}
+  intern_tls_cert:
+    file: ${INTERN_TLS_CERT_HOST:?set INTERN_TLS_CERT_HOST to the TLS certificate PEM in .env}
+  intern_tls_key:
+    file: ${INTERN_TLS_KEY_HOST:?set INTERN_TLS_KEY_HOST to the TLS private key PEM in .env}

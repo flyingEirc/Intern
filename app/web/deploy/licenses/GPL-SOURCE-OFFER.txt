@@ -1,0 +1,40 @@
+Intern Web image - GPL source provision statement (for this exact image)
+
+This image bundles binaries of GPL-licensed components: MySQL Community Server
+(mysqld, mysqladmin and the client/server layout of the base image) and Percona
+XtraBackup (xtrabackup, xbstream and its private library directory). Both are
+GNU GPL version 2 software with additional permissions; the license text that
+each upstream shipped inside its own pinned image is copied unmodified into this
+image:
+
+  /usr/share/licenses/intern/mysql-community-server/LICENSE
+  /usr/share/licenses/intern/percona-xtrabackup/COPYING
+  /usr/share/licenses/intern/NOTICE-WEB.txt (third-party notice of this image)
+
+The exact component versions, the exact base-image digests and the Intern source
+revision this image was built from are recorded in:
+
+  /usr/share/licenses/intern/VERSIONS.txt
+
+Complete corresponding source for each bundled component is published by its
+upstream project:
+
+  MySQL Community Server  https://downloads.mysql.com/archives/community/
+                          https://github.com/mysql/mysql-server
+  Percona XtraBackup      https://downloads.percona.com/downloads/
+                            Percona-XtraBackup/
+                          https://github.com/percona/percona-xtrabackup
+
+Intern itself is not GPL. Its source is the repository
+https://github.com/flyingEirc/Intern at the revision named in VERSIONS.txt;
+that repository is currently private, so it is not a public source offer.
+
+Scope of this notice: the repository's CI builds and exercises a private
+candidate image only. It does not publish this image and does not by itself
+complete a redistributor's GPL source-provision obligation. Before any external
+distribution of this image or of any binary extracted from it, the distributor
+must supply the corresponding source (or a written offer to do so) for the exact
+binaries distributed, together with these notices. A link alone is not claimed
+to satisfy every redistribution obligation. See
+docs/roadmap/Web备份控制面与流式管道-2026-10-17.md section 2.4, and
+docs/roadmap/数据库备份与恢复-2026-10-17.md sections 10 and 15.

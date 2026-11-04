@@ -14,6 +14,7 @@ import (
 	"modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
+	"github.com/flyingEirc/Intern/internal/storage/ftp"
 )
 
 // SecretSealer seals and opens a secret bound to table:id:field. It is the
@@ -27,13 +28,20 @@ type SecretSealer interface {
 // secretField is the single sealed column name on repositories and sources.
 const secretField = "secret_ciphertext"
 
-// Resource kinds and the only TLS mode each supports. FTPS is not implemented.
+// Resource kinds and the transport each supports. An FTP repository selects one
+// of three modes explicitly; there is no default and no negotiation:
+//
+//	plain     – cleartext FTP, credentials included (S1)
+//	explicit  – FTPS over AUTH TLS, control and data channels encrypted (S2)
+//	implicit  – FTPS over a TLS-only listener, both channels encrypted (S2)
 const (
 	RepositoryLocal = "local"
 	RepositoryFTP   = "ftp"
 
-	TLSModeNone  = "none"
-	TLSModePlain = "plain"
+	TLSModeNone     = "none"
+	TLSModePlain    = "plain"
+	TLSModeExplicit = "explicit"
+	TLSModeImplicit = "implicit"
 )
 
 // LocalRepositoryConfig is the stored and returned configuration of a local
@@ -42,13 +50,16 @@ type LocalRepositoryConfig struct {
 	Root string `json:"root"`
 }
 
-// FTPRepositoryConfig is the stored and returned configuration of a plain FTP
-// repository. The password is never part of it.
+// FTPRepositoryConfig is the stored and returned configuration of an FTP or
+// FTPS repository. The password is never part of it. CAPem is public data, not a
+// secret: the PEM bundle of the CA that signed the server certificate, empty for
+// plain (nothing would use it) and for FTPS that trusts the system roots.
 type FTPRepositoryConfig struct {
 	Host     string `json:"host"`
 	Port     int64  `json:"port"`
 	BasePath string `json:"base_path"`
 	Username string `json:"username"`
+	CAPem    string `json:"ca_pem,omitempty"`
 }
 
 // Address is the host:port form ftp.Open accepts.
@@ -204,28 +215,70 @@ func repositoryFromRow(row storesql.Repository) (Repository, error) {
 			return Repository{}, fmt.Errorf("decode FTP repository config: %w", err)
 		}
 		repository.FTP = &config
-		repository.PlaintextCredentials = true
+		// Only cleartext FTP carries a credential unencrypted. An FTPS row's
+		// password travels inside the TLS session the mode names, so the
+		// warning the interface draws from this flag must not appear there.
+		repository.PlaintextCredentials = row.TlsMode == TLSModePlain
 	default:
 		return Repository{}, fmt.Errorf("unknown repository kind %q", row.Kind)
 	}
 	return repository, nil
 }
 
+// configJSON encodes the configuration one row stores, after checking the shape
+// rules the schema cannot express. Every create and every full replacement
+// passes through here, so no caller can write an FTPS bundle onto a plain
+// repository or a bundle nothing can parse onto any repository.
 func (in RepositoryInput) configJSON() (string, error) {
+	if err := in.validateShape(); err != nil {
+		return "", err
+	}
 	var config any
 	switch in.Kind {
 	case RepositoryLocal:
 		config = LocalRepositoryConfig{Root: in.Root}
 	case RepositoryFTP:
-		if in.FTP == nil {
-			return "", errors.New("FTP repository requires a configuration")
-		}
 		config = *in.FTP
 	default:
 		return "", fmt.Errorf("unknown repository kind %q", in.Kind)
 	}
 	encoded, err := json.Marshal(config)
 	return string(encoded), err
+}
+
+func (in RepositoryInput) validateShape() error {
+	switch in.Kind {
+	case RepositoryLocal:
+		if in.FTP != nil {
+			return errors.New("a local repository has no FTP configuration")
+		}
+		return nil
+	case RepositoryFTP:
+		return in.validateFTPShape()
+	default:
+		return fmt.Errorf("unknown repository kind %q", in.Kind)
+	}
+}
+
+func (in RepositoryInput) validateFTPShape() error {
+	if in.FTP == nil {
+		return errors.New("FTP repository requires a configuration")
+	}
+	switch in.TLSMode {
+	case TLSModePlain, TLSModeExplicit, TLSModeImplicit:
+	default:
+		return fmt.Errorf("unknown FTP tls_mode %q", in.TLSMode)
+	}
+	if in.FTP.CAPem == "" {
+		return nil
+	}
+	if in.TLSMode == TLSModePlain {
+		return errors.New("a plain FTP repository has no CA bundle")
+	}
+	if !ftp.ValidCAPem(in.FTP.CAPem) {
+		return fmt.Errorf("ftp.ca_pem must be one or more PEM certificates within %d bytes", ftp.MaxCAPemBytes)
+	}
+	return nil
 }
 
 func sourceFromRow(row storesql.Source) (Source, error) {

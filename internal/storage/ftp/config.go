@@ -1,11 +1,15 @@
-// Package ftp stores immutable objects on an explicitly selected plain FTP
-// server. Credentials are sent in cleartext: use a dedicated account, a trusted
-// network and server-side confinement. Reported symlinks are refused, but FTP
-// cannot prove physical filesystem confinement against a dishonest server.
+// Package ftp stores immutable objects on an explicitly selected FTP or FTPS
+// server. TLSMode "plain" sends credentials in cleartext: use a dedicated
+// account, a trusted network and server-side confinement. TLSMode "explicit"
+// (AUTH TLS) and "implicit" encrypt both channels, verify the server
+// certificate against the address host and never fall back to plaintext.
+// Reported symlinks are refused, but FTP cannot prove physical filesystem
+// confinement against a dishonest server.
 package ftp
 
 import (
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"io/fs"
 	"net"
@@ -18,7 +22,11 @@ import (
 const markerName = ".intern-instance"
 
 // Config selects one instance namespace beneath an existing FTP directory.
-// Only TLSMode "plain" is implemented; there is no implicit downgrade.
+// TLSMode is required and exact: "plain", "explicit" or "implicit". There is no
+// negotiation and no implicit downgrade; anything else is refused before dial.
+// CAPem is the FTPS-only trust bundle: PEM certificates for the issuing CA and
+// any intermediates. Empty means the system roots. Supplying it for plain is a
+// configuration error, because nothing would use it.
 // Zero timeouts select 10-second dial and 30-second rolling idle deadlines.
 // Path components may contain internal spaces and glob characters literally,
 // but not C0/DEL control bytes or leading/trailing ASCII spaces.
@@ -29,13 +37,20 @@ type Config struct {
 	BasePath    string
 	InstanceID  string
 	TLSMode     string
+	CAPem       string
 	DialTimeout time.Duration
 	IdleTimeout time.Duration
 }
 
-func normalizeConfig(cfg Config) (Config, error) {
+// normalizeConfig validates the selection and builds the transport settings a
+// Repository keeps for its whole life. The returned tls.Config is nil for plain.
+func normalizeConfig(cfg Config) (Config, *tls.Config, error) {
 	if err := validateConfig(cfg); err != nil {
-		return Config{}, failure("configure", err)
+		return Config{}, nil, failure("configure", err)
+	}
+	roots, err := rootPool(cfg.CAPem)
+	if err != nil {
+		return Config{}, nil, failure("configure", err)
 	}
 	if cfg.DialTimeout == 0 {
 		cfg.DialTimeout = 10 * time.Second
@@ -43,12 +58,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = 30 * time.Second
 	}
-	return cfg, nil
+	return cfg, buildTLS(cfg, addressHost(cfg.Address), roots), nil
 }
 
 func validateConfig(cfg Config) error {
-	if cfg.TLSMode != "plain" || cfg.DialTimeout < 0 || cfg.IdleTimeout < 0 {
-		return fs.ErrInvalid
+	if err := validateTransport(cfg); err != nil {
+		return err
 	}
 	for _, value := range []string{cfg.Address, cfg.Username, cfg.Password} {
 		if !protocolText(value) {
@@ -58,7 +73,30 @@ func validateConfig(cfg Config) error {
 	if err := validateAddress(cfg.Address, cfg.Username); err != nil {
 		return err
 	}
+	if cfg.TLSMode != TLSModePlain && addressHost(cfg.Address) == "" {
+		return fs.ErrInvalid
+	}
 	return validateNamespace(cfg.BasePath, cfg.InstanceID)
+}
+
+// validateTransport judges the selection itself: one of the three modes, a trust
+// bundle only where a bundle is used, a bundle the transport will accept at all,
+// and timeouts that can be turned into deadlines. A host name an FTPS selection
+// cannot derive a server identity from is judged with the address, in
+// validateConfig, because that is where the address is parsed.
+func validateTransport(cfg Config) error {
+	switch cfg.TLSMode {
+	case TLSModePlain, TLSModeExplicit, TLSModeImplicit:
+	default:
+		return fs.ErrInvalid
+	}
+	if len(cfg.CAPem) > maxCAPemBytes || cfg.DialTimeout < 0 || cfg.IdleTimeout < 0 {
+		return fs.ErrInvalid
+	}
+	if cfg.TLSMode == TLSModePlain && cfg.CAPem != "" {
+		return fs.ErrInvalid
+	}
+	return nil
 }
 
 func validateAddress(address, username string) error {
