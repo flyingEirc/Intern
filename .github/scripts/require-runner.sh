@@ -10,7 +10,8 @@
 #   require-runner.sh [--cc] [--docker] [--compose]
 #     --cc       a C compiler (go test -race needs cgo)
 #     --docker   the Docker CLI reaches a native linux/amd64 engine
-#     --compose  --docker plus the Compose plugin (the D1 deployment job)
+#     --compose  --docker plus the Compose plugin and a kernel that can apply the
+#                cgroup I/O weight compose.yaml asks for (the D1 deployment job)
 set -euo pipefail
 
 want_cc=0 want_docker=0 want_compose=0
@@ -48,8 +49,26 @@ if ((want_docker)); then
 	elif platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>&1); then
 		[[ "$platform" == linux/amd64 ]] ||
 			need "the Docker engine reports ${platform}; the gates accept only a native linux/amd64 engine"
-		if ((want_compose)) && ! docker compose version >/dev/null 2>&1; then
-			need 'the Docker Compose plugin is not installed (docker-compose-plugin)'
+		if ((want_compose)); then
+			docker compose version >/dev/null 2>&1 ||
+				need 'the Docker Compose plugin is not installed (docker-compose-plugin)'
+			# compose.yaml sets blkio_config.weight. runc applies it by writing io.bfq.weight
+			# (or io.weight) in the container's cgroup, so the kernel has to provide one of
+			# them. A kernel without it (the WSL2 default: its bfq is a module that is not
+			# loaded) fails `compose up` only after the image build, so probe it here, with
+			# the MySQL image the D1 job pulls anyway.
+			if [[ "$platform" == linux/amd64 ]] && ((${#problems[@]} == 0)); then
+				compat=$(dirname "$0")/../../internal/physical/compat.json
+				probe_image=$(jq -r '.[0].mysql_image // empty' "$compat" 2>/dev/null || true)
+				if [[ -z "$probe_image" ]]; then
+					need "no mysql_image in ${compat}"
+				elif ! docker image inspect "$probe_image" >/dev/null 2>&1 && ! docker pull --quiet "$probe_image" >/dev/null 2>&1; then
+					need "cannot pull ${probe_image} (internal/physical/compat.json), which the D1 job needs anyway"
+				elif ! probe=$(docker run --rm --blkio-weight=300 --entrypoint true "$probe_image" 2>&1); then
+					probe=${probe//$'\n'/ }
+					need "the engine cannot apply a cgroup I/O weight, which compose.yaml's blkio_config.weight needs: ${probe} -> fix: the kernel must provide io.bfq.weight or io.weight; on the WSL2 kernel run 'sudo modprobe bfq' and put 'bfq' in /etc/modules-load.d/bfq.conf"
+				fi
+			fi
 		fi
 	else
 		platform=${platform//$'\n'/ }
