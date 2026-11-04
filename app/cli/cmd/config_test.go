@@ -6,28 +6,60 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
+// cleanConfigEnv isolates a test from the machine that runs it. The loader reads
+// every INTERN_ variable and counts an empty one as set, so all of them are
+// removed instead of a list that can drift from the configuration keys. The user
+// directories that supply the default backup and state paths move into a
+// temporary home, so no default can reach the real one.
 func cleanConfigEnv(t *testing.T) {
 	t.Helper()
-	keys := []string{
-		"INTERN_CONFIG", "INTERN_HOST", "INTERN_PORT", "INTERN_SOCKET", "INTERN_USERNAME", "INTERN_PASSWORD", "INTERN_PASSWORD_ENV", "INTERN_DB", "INTERN_TLS_MODE", "INTERN_TLS_CA",
-		"INTERN_DIRECTORY", "INTERN_STATE_DIRECTORY", "INTERN_PROJECT", "INTERN_COMPRESS", "INTERN_ENCRYPT", "INTERN_KEY_FILE", "INTERN_MAX_RESTORE_BYTES",
-		"INTERN_SCHEDULE_FULL_AT", "INTERN_SCHEDULE_INCREMENTAL_EVERY", "INTERN_SCHEDULE_TIMEZONE",
-		"INTERN_CONNECTION_PASSWORD", "INTERN_CONNECTION_PASSWORD_ENV",
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.HasPrefix(key, "INTERN_") {
+			continue
+		}
+		t.Setenv(key, "") // Registers the restore of the original value.
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, key := range keys {
-		value, existed := os.LookupEnv(key)
-		t.Cleanup(func() {
-			if existed {
-				os.Setenv(key, value)
-			} else {
-				os.Unsetenv(key)
-			}
-		})
-		os.Unsetenv(key)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("AppData", filepath.Join(home, "AppData"))
+}
+
+// TestCleanConfigEnvIsolatesTheMachine pins what every configuration test relies
+// on: no ambient INTERN_ variable reaches the loader, and the default directories
+// resolve inside a temporary home.
+func TestCleanConfigEnvIsolatesTheMachine(t *testing.T) {
+	// Variables the loader really reads; the empty one counts as set as well.
+	t.Setenv("INTERN_BACKUP_DIRECTORY", "/ambient/backups")
+	t.Setenv("INTERN_CONNECTION_USERNAME", "ambient")
+	t.Setenv("INTERN_BACKUP_PROJECT", "")
+	realHome, _ := os.UserHomeDir() // An unset HOME is a case the sandbox repairs, not a test error.
+	cleanConfigEnv(t)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "INTERN_") {
+			t.Errorf("ambient variable survived: %s", entry)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home == realHome || !strings.HasPrefix(configDir, home) {
+		t.Errorf("home = %q, config directory = %q; want a temporary home that is not %q", home, configDir, realHome)
 	}
 }
 
