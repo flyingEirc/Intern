@@ -157,6 +157,15 @@ jobs:
           persist-credentials: false
       - name: Runner prerequisites
         run: .github/scripts/require-runner.sh --docker
+      # Self-test of the cleanup below, with a fake docker: proves the script
+      # removes only this runner's labelled resources and old candidate images.
+      - name: CLI quality cleanup accept and reject cases
+        timeout-minutes: 5
+        run: .github/scripts/cli-quality-clean-cases.sh
+      # Clear leftovers of an earlier cancelled job before starting new ones.
+      - name: Remove CLI quality leftovers of earlier jobs
+        timeout-minutes: 5
+        run: .github/scripts/cli-quality-clean.sh
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
@@ -171,6 +180,16 @@ jobs:
           go run ./app/cli/cmd/quality-gate verify \
             --directory "$INTERN_TEST_REPORT_DIR" --profile "$INTERN_TEST_PROFILE" \
             --source "$INTERN_TEST_SOURCE_SHA" --platform "$INTERN_TEST_PLATFORM" --ci
+      # A cancelled job never reaches t.Cleanup: its labelled containers,
+      # networks and volumes survive until these steps run.
+      - name: Remove this job's CLI quality resources
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/cli-quality-clean.sh
+      - name: Fail if any labelled CLI quality resource remains
+        if: always()
+        timeout-minutes: 2
+        run: .github/scripts/cli-quality-clean.sh --inventory
       - name: Retain only approved diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
