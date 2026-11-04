@@ -30,7 +30,7 @@
     "empty_database": ["plan-only-no-schema","empty-restored"],
     "codec_matrix": ["codec-plain","codec-encrypted","codec-compressed","codec-both"],
     "checkpoint_chain": ["parent-chain","source-past-checkpoint","plan-does-not-write","restored-S2-not-S3","restored-S1"],
-    "recovery_guards": ["reject-wrong_key","reject-oversized","reject-tampered","reject-missing","reject-escape","source-uuid","source-empty-target-preserved","source-guard-no-damage","nonempty-target","nonempty-preserved","reject-duplicate"],
+    "recovery_guards": ["reject-wrong_key","reject-oversized","reject-tampered","reject-missing","reject-escape","unchanged-wrong_key","unchanged-oversized","unchanged-tampered","unchanged-missing","unchanged-escape","source-uuid","source-empty-target-preserved","source-guard-no-damage","nonempty-target","nonempty-preserved","reject-duplicate","unchanged-duplicate"],
     "source_discontinuity": ["purged-source","purge-not-published","reset-gtid","reset-not-published","new-source-identity","identity-not-joined"],
     "permissions_tls": ["wrong-tls-hostname","wrong-tls-ca","tls-required","missing-snapshot-privilege","missing-log-privilege","permission-errors-not-published","scoped-restore-role"],
     "interruptions": ["stopped-database","stop-not-published","disconnected-database","network-not-published","interrupted-dump-not-published-TERM","restart-after-TERM","interrupted-dump-not-published-KILL","restart-after-KILL"],
