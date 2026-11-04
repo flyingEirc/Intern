@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moby/moby/client"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/network"
 
@@ -53,7 +54,7 @@ func (s *Suite) NewCase(t *testing.T, id string) *Case {
 	var err error
 	c.CA, err = newAuthority()
 	c.Must(err)
-	c.Network, err = network.New(ctx, network.WithLabels(map[string]string{"intern.quality.case": c.prefix}))
+	c.Network, err = network.New(ctx, network.WithLabels(c.labels()))
 	c.ownNetwork()
 	c.Must(err)
 	c.Source, err = c.NewDatabase("source", s.Profile, true)
@@ -120,7 +121,7 @@ func (c *Case) ownNetwork() {
 	})
 }
 
-func (c *Case) ownContainer(ctr tc.Container, role string, volumes ...string) {
+func (c *Case) ownContainer(ctr tc.Container, role string) {
 	if ctr == nil {
 		return
 	}
@@ -128,7 +129,32 @@ func (c *Case) ownContainer(ctr tc.Container, role string, volumes ...string) {
 	c.T.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		c.removed(tc.TerminateContainer(ctr, tc.StopContext(ctx), tc.StopTimeout(5*time.Second), tc.RemoveVolumes(volumes...)), role)
+		// Named volumes stay: c.volume registered their removal before this
+		// container, so LIFO cleanup removes the container first and then them.
+		c.removed(tc.TerminateContainer(ctr, tc.StopContext(ctx), tc.StopTimeout(5*time.Second)), role)
+	})
+}
+
+// labels returns the suite-wide scope plus this case. Every resource the case
+// creates carries them, so a cancelled job's leftovers stay identifiable.
+func (c *Case) labels() map[string]string { return caseScope(c.Suite.Labels, c.prefix) }
+
+// volume creates a named volume explicitly: testcontainers v0.44.0 does not
+// create named volumes (it passes the name to the daemon, which creates it
+// unlabelled), and only an explicitly labelled volume can be found and removed
+// by the cleanup script after a killed run.
+func (c *Case) volume(name string) {
+	c.T.Helper()
+	ctx, cancel := context.WithTimeout(c.Ctx, 20*time.Second)
+	defer cancel()
+	_, err := c.Suite.Docker.VolumeCreate(ctx, client.VolumeCreateOptions{Name: name, Labels: c.labels()})
+	c.Must(err)
+	c.addResource()
+	c.T.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, err := c.Suite.Docker.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true})
+		c.removed(err, "volume "+name)
 	})
 }
 
@@ -165,22 +191,11 @@ func (c *Case) RestartDatabase(db *Database) {
 
 func (c *Case) Await(description string, check func() (bool, error)) {
 	c.T.Helper()
-	ctx, cancel := context.WithTimeout(c.Ctx, 90*time.Second)
-	defer cancel()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		ready, err := check()
-		c.Must(err)
-		if ready {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			c.T.Fatal(fmt.Errorf("observation timed out: %s: %w", description, ctx.Err()))
-		case <-ticker.C:
-		}
+	err := await(c.Ctx, 90*time.Second, check)
+	if errors.Is(err, errAwaitTimeout) {
+		c.T.Fatal(fmt.Errorf("observation timed out: %s: %w", description, err))
 	}
+	c.Must(err)
 }
 
 func (c *Case) SafeError(err error) error {

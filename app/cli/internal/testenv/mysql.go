@@ -36,9 +36,10 @@ func (c *Case) NewDatabase(alias string, profile qualitygate.Profile, gtid bool)
 	config := c.databaseConfig(gtid)
 	files := []tc.ContainerFile{{Reader: bytes.NewReader(c.CA.PEM), ContainerFilePath: "/tmp/intern-ca.pem", FileMode: 0o600}, {Reader: bytes.NewReader(cert), ContainerFilePath: "/tmp/intern-cert.pem", FileMode: 0o600}, {Reader: bytes.NewReader(key), ContainerFilePath: "/tmp/intern-key.pem", FileMode: 0o600}, {Reader: strings.NewReader(config), ContainerFilePath: "/etc/mysql/conf.d/intern.cnf", FileMode: 0o644}}
 	volume := c.prefix + "-" + alias + "-data"
-	ctr, err := mysql.Run(c.Ctx, profile.Image, mysql.WithUsername("root"), mysql.WithPassword(c.rootPassword), mysql.WithDatabase("fixture"), tc.WithEnv(map[string]string{"MYSQL_ROOT_HOST": "%"}), tc.WithFiles(files...), network.WithNetwork([]string{alias, "wrong-" + alias}, c.Network), tc.WithImagePlatform(c.Suite.Candidate.Platform), tc.WithMounts(tc.VolumeMount(volume, "/var/lib/mysql")), tc.WithEntrypoint("/bin/sh", "-c", "chown mysql:mysql /tmp/intern-ca.pem /tmp/intern-cert.pem /tmp/intern-key.pem; exec /usr/local/bin/docker-entrypoint.sh mysqld"), tc.WithCmd(), tc.WithHostConfigModifier(boundedHost), tc.WithWaitStrategy(wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(90*time.Second)))
+	c.volume(volume)
+	ctr, err := mysql.Run(c.Ctx, profile.Image, mysql.WithUsername("root"), mysql.WithPassword(c.rootPassword), mysql.WithDatabase("fixture"), tc.WithEnv(map[string]string{"MYSQL_ROOT_HOST": "%"}), tc.WithFiles(files...), network.WithNetwork([]string{alias, "wrong-" + alias}, c.Network), tc.WithImagePlatform(c.Suite.Candidate.Platform), tc.WithMounts(tc.VolumeMount(volume, "/var/lib/mysql")), tc.WithLabels(c.labels()), tc.WithEntrypoint("/bin/sh", "-c", "chown mysql:mysql /tmp/intern-ca.pem /tmp/intern-cert.pem /tmp/intern-key.pem; exec /usr/local/bin/docker-entrypoint.sh mysqld"), tc.WithCmd(), tc.WithHostConfigModifier(boundedHost), tc.WithWaitStrategy(wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(90*time.Second)))
 	if ctr != nil {
-		c.ownContainer(ctr.Container, "database-"+alias, volume)
+		c.ownContainer(ctr.Container, "database-"+alias)
 	}
 	if err != nil {
 		return nil, c.SafeError(err)

@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +29,8 @@ type Suite struct {
 	Candidate       qualitygate.Candidate
 	Root, ReportDir string
 	Image           string
+	Docker          *tc.DockerClient
+	Labels          map[string]string
 	slots           chan struct{}
 }
 
@@ -105,19 +106,25 @@ func prepareReportDir(dir string) error {
 	return os.Mkdir(filepath.Join(dir, "receipts"), 0o700)
 }
 
-func (s *Suite) preflight(ctx context.Context) (retErr error) {
+func (s *Suite) preflight(ctx context.Context) error {
 	if os.Getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" {
 		return errors.New("quality gate requires Ryuk cleanup")
 	}
-	docker, err := tc.NewDockerClientWithOpts(ctx)
+	labels, err := runnerScope()
 	if err != nil {
-		return fmt.Errorf("docker provider unavailable: %w", err)
+		return err
 	}
-	defer fsutil.Close(&retErr, docker)
-	info, err := docker.Info(ctx, client.InfoOptions{})
+	s.Labels = labels
+	docker, info, err := probeDocker(ctx)
 	if err != nil {
-		return fmt.Errorf("docker provider unavailable: %w", err)
+		return err
 	}
+	s.Docker = docker
+	s.T.Cleanup(func() {
+		if closeErr := docker.Close(); closeErr != nil {
+			s.T.Errorf("close Docker client: %v", closeErr)
+		}
+	})
 	platform, err := nativePlatform(info.Info.OSType, info.Info.Architecture)
 	if err != nil {
 		return err
@@ -131,6 +138,12 @@ func (s *Suite) preflight(ctx context.Context) (retErr error) {
 	}
 	s.Candidate = qualitygate.Candidate{FormatVersion: 1, SourceSHA: source, SourceDirty: dirty, Profile: s.Profile.ID, Platform: platform, HarnessPlatform: runtime.GOOS + "/" + runtime.GOARCH, GoVersion: runtime.Version(), RuntimeVersion: info.Info.ServerVersion, TestcontainersVersion: s.Contract.TestcontainersVersion, BuilderImage: s.Contract.BuilderImage, DatabaseImage: s.Profile.Image, ToolVersions: map[string]string{}, CIURL: ciURL()}
 	return nil
+}
+
+// probeDocker connects to the native daemon under the short probe deadline and
+// returns the client it used, so the suite can create labelled volumes.
+func probeDocker(ctx context.Context) (*tc.DockerClient, client.SystemInfoResult, error) {
+	return probeDockerWithin(ctx, dockerProbeTimeout)
 }
 
 func nativePlatform(osType, architecture string) (string, error) {
