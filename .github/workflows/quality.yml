@@ -1,30 +1,46 @@
 name: Intern quality
 
-# Runs on the repository's self-hosted Linux x86_64 runner: a WSL2 Ubuntu 24.04
-# with a native Docker Engine on a Windows machine (prerequisites in
-# docs/guide/quality.md, "CI execution environment"). That is the host layout of
-# the CircleCI machine executor (ubuntu-2404 with Docker), so go test runs on the
-# host and the harness assumptions (Linux paths, uid, bind mount ownership) hold
-# unchanged. Every job starts with .github/scripts/require-runner.sh, which fails
-# explicitly and names whatever the runner lacks.
+# The only CI for this repository, and the merge gate. Runs on the repository's
+# self-hosted Linux x86_64 runner: a WSL2 Ubuntu 24.04 with a native Docker
+# Engine on a Windows machine (prerequisites in docs/guide/quality.md, "CI
+# execution environment"). That is the host layout the harness was written for
+# (Linux paths, uid, bind-mount ownership; same shape as the former CircleCI
+# machine executor ubuntu-2404 and the hosted ubuntu-24.04 runner), so go test
+# runs on the host unchanged. Jobs that use the runner's tooling start with
+# .github/scripts/require-runner.sh, which fails explicitly and names whatever
+# the runner lacks.
 #
-# Automatic triggers are disabled: CircleCI (.circleci/config.yml) is the active
-# CI and this workflow is manual-only (workflow_dispatch) until the whole matrix
-# passes on this runner for one SHA (switch conditions in docs/guide/quality.md).
-# It must be kept in sync with .circleci/config.yml. Differences from the old
-# hosted-runner form: runs-on; the require-runner.sh step; setup-go with
-# cache: false (the runner keeps its module and build caches between jobs); and
-# timeouts raised by 15 minutes (scope 20, quality-fast 45) because the first run
-# on a runner pulls every pinned image and module cold.
+# Triggers: push on every branch and tag, the nightly schedule on the default
+# branch, and workflow_dispatch. No pull_request trigger: with one serial runner
+# it would repeat every ~52-minute run for a same-repo PR branch push; the PR
+# head SHA's push run is the merge-gate evidence. Concurrency does not cancel
+# main runs (each merge commit needs its own green run) and cancels superseded
+# branch and tag runs. GitHub also emits a push event when a branch or tag is
+# deleted (a branch deletion's run is attached to the default branch); CircleCI
+# ran nothing on deletion. The scope and quality-gate jobs skip deleted events,
+# so a deletion neither starts a matrix nor produces a gate result. A push that
+# only changes documentation skips the heavy jobs; quality-gate confirms that
+# outcome.
+#
+# Differences from the former hosted-runner form: runs-on; the require-runner.sh
+# step; setup-go with cache: false (the runner keeps its module and build caches
+# between jobs); and timeouts raised by 15 minutes (scope 20, quality-fast 45)
+# because the first run on a runner pulls every pinned image and module cold.
 on:
+  push:
+  schedule:
+    - cron: '23 3 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: intern-quality-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # main runs get one group per commit, so a merge commit's run is never
+  # canceled or replaced by a later pending run; a newer push to any other
+  # branch or tag cancels that ref's superseded run.
+  group: intern-quality-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
   run:
@@ -36,6 +52,7 @@ env:
 
 jobs:
   scope:
+    if: github.event.deleted != true
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     outputs:
@@ -75,20 +92,20 @@ jobs:
         run: go build ./internal/... ./app/cli/... ./app/web/...
       - name: Behavior and race tests
         run: go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...
-      # Same step as the CircleCI quality-fast job: the gates' own accept and
-      # reject cases, including an empty GITHUB_SHA, run here too.
+      # The gates' own accept and reject cases, including an empty GITHUB_SHA,
+      # run here too.
       - name: W4 evidence gate accept and reject cases
         run: .github/scripts/w4-gate-cases.sh
-      # Same gate self-test as the CircleCI quality-fast job, for the P4 gate.
+      # Self-test of the P4 gate.
       - name: P4 evidence gate accept and reject cases
         run: .github/scripts/p4-gate-cases.sh
-      # Same gate self-test as the CircleCI quality-fast job, for the W5 gate.
+      # Self-test of the W5 gate.
       - name: W5 evidence gate accept and reject cases
         run: .github/scripts/w5-gate-cases.sh
-      # Same gate self-test as the CircleCI quality-fast job, for the D1 gate.
+      # Self-test of the D1 gate.
       - name: D1 evidence gate accept and reject cases
         run: .github/scripts/d1-gate-cases.sh
-      # Same gate self-test as the CircleCI quality-fast job, for the S2 gate.
+      # Self-test of the S2 gate.
       - name: S2 evidence gate accept and reject cases
         run: .github/scripts/s2-gate-cases.sh
       - name: Candidate artifact gate accept and reject cases
@@ -470,7 +487,7 @@ jobs:
   quality-gate:
     name: quality-gate
     needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch, container-restore, container-restore-api, container-deploy, container-ftps]
-    if: always()
+    if: always() && github.event.deleted != true
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:

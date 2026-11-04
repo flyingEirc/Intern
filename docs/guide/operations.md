@@ -1,6 +1,6 @@
 # Intern Web 运维使用说明
 
-本文面向部署和值守 Intern Web 控制面的人，只描述**仓库里真实存在的入口**：命令、flag、路径、端口、错误码都对照 `app/web/cmd/`、`app/web/deploy/`、`app/web/api/openapi.yaml` 和 `.circleci/config.yml` 写出，不含设想中的功能。
+本文面向部署和值守 Intern Web 控制面的人，只描述**仓库里真实存在的入口**：命令、flag、路径、端口、错误码都对照 `app/web/cmd/`、`app/web/deploy/`、`app/web/api/openapi.yaml` 和 `.github/workflows/quality.yml` 写出，不含设想中的功能。
 
 产品范围、版本决策和验收边界不在这里重复，见 [Web 备份控制面与流式管道](../roadmap/Web备份控制面与流式管道-2026-10-17.md)（部署模型第 2 节、预检第 3.2 节、恢复第 5 节、测试与验收第 13 节）与 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md)（阶段表第 3 节、证据第 5 节）。检查与验收规则见 [质量规范](quality.md)。
 
@@ -348,7 +348,7 @@ docker save "intern:${INTERN_VERSION:-local}-mysql8.4" | sha256sum
 sha256sum bin/intern-web
 ```
 
-上述留痕正是门禁 G 要绑定的字段。`.circleci/config.yml` 的 `container-deploy` job 跑 `TestD1NativeContainers`，导出 `INTERN_D1_ARTIFACT_DIR`，产出 `.cache/quality/deploy/candidate-artifact.json` 与 `events.jsonl` 并 `store_artifacts`；`.github/scripts/verify-d1-evidence.sh` 把镜像 ID / 标签 / `docker save` 摘要 / `intern-web` 摘要 / 源 SHA 与 `GITHUB_SHA` 绑定，`.github/scripts/verify-candidate-artifact.sh` 再打开 `candidate-artifact.json`，要求其中的身份与同一次运行日志一致、固定镜像与版本与 `internal/physical/compat.json` 一致；`d1-gate-cases.sh` 与 `candidate-artifact-cases.sh` 守住两个门禁不被悄悄放宽。quality-fast 把 `app/web/api/openapi.yaml`（`info.version` 0.3.0）连同 SHA-256 作为 `contract-openapi` 制品发布。D1 部分已在候选 `9e05e52` 验收；候选制品门禁与契约发布（[#44](https://github.com/flyingEirc/Intern/issues/44)）尚未验收，这些改动都**还没有合入 main**。**CI 只构建私有候选，没有公开发布镜像**；镜像内的 `/usr/share/licenses/intern/`（`NOTICE`、`VERSIONS.txt`、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本）是 GPL 材料，不等于源码提供安排已完成。
+上述留痕正是门禁 G 要绑定的字段。`.github/workflows/quality.yml` 的 `container-deploy` job 跑 `TestD1NativeContainers`，导出 `INTERN_D1_ARTIFACT_DIR`，产出 `.cache/quality/deploy/candidate-artifact.json` 与 `events.jsonl`，再用 `actions/upload-artifact` 上传为 `deploy-d1-${{ github.sha }}` 制品；`.github/scripts/verify-d1-evidence.sh` 把镜像 ID / 标签 / `docker save` 摘要 / `intern-web` 摘要 / 源 SHA 与 `GITHUB_SHA` 绑定，`.github/scripts/verify-candidate-artifact.sh` 再打开 `candidate-artifact.json`，要求其中的身份与同一次运行日志一致、固定镜像与版本与 `internal/physical/compat.json` 一致；`d1-gate-cases.sh` 与 `candidate-artifact-cases.sh` 守住两个门禁不被悄悄放宽。quality-fast 把 `app/web/api/openapi.yaml`（`info.version` 0.3.0）连同 SHA-256 作为 `contract-openapi` 制品发布。D1 部分已在候选 `9e05e52` 验收；候选制品门禁与契约发布（[#44](https://github.com/flyingEirc/Intern/issues/44)）尚未验收，这些改动都**还没有合入 main**。**CI 只构建私有候选，没有公开发布镜像**；镜像内的 `/usr/share/licenses/intern/`（`NOTICE`、`VERSIONS.txt`、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本）是 GPL 材料，不等于源码提供安排已完成。
 
 ## 11. 故障处理
 
@@ -422,7 +422,7 @@ V1-A1 的最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复�
 | 接口契约（唯一） | [`app/web/api/openapi.yaml`](../../app/web/api/openapi.yaml) |
 | 部署文件 | [`app/web/deploy/compose.yaml`](../../app/web/deploy/compose.yaml)、[`.env.example`](../../app/web/deploy/.env.example)、[`Dockerfile`](../../app/web/deploy/Dockerfile) |
 | 命令行入口 | [`app/web/cmd/flags.go`](../../app/web/cmd/flags.go)、[`root.go`](../../app/web/cmd/root.go)、[`user.go`](../../app/web/cmd/user.go)、[`healthcheck.go`](../../app/web/cmd/healthcheck.go) |
-| 部署验收用例 | [`app/web/integration/d1_test.go`](../../app/web/integration/d1_test.go)、[`.circleci/config.yml`](../../.circleci/config.yml) 的 `container-deploy` |
+| 部署验收用例 | [`app/web/integration/d1_test.go`](../../app/web/integration/d1_test.go)、[`.github/workflows/quality.yml`](../../.github/workflows/quality.yml) 的 `container-deploy` |
 | 版本矩阵 | [`internal/physical/compat.json`](../../internal/physical/compat.json) |
 | 阶段与证据 | [总路线第 3、5 节](../roadmap/Web优先与多应用架构-2026-10-17.md)；门禁 [#44](https://github.com/flyingEirc/Intern/issues/44) |
 | 开发与检查命令 | [开发规范](development.md)、[质量规范](quality.md) |
