@@ -14,8 +14,11 @@ var (
 	ErrCommitUncertain = errors.New("FTP publication outcome uncertain")
 	ErrCleanupPending  = errors.New("FTP temporary object cleanup pending")
 	// ErrTLS reports that an FTPS channel was refused: the server certificate
-	// failed verification, or TLS itself was never negotiated. It never carries
-	// the peer's message, which can name a host or an authority.
+	// failed verification, or TLS itself was never negotiated, because the
+	// handshake failed or the server declined AUTH TLS. A server that completes
+	// TLS and then turns the FTP session away in its greeting is not a TLS
+	// refusal. It never carries the peer's message, which can name a host or an
+	// authority.
 	ErrTLS = errors.New("FTP TLS refused")
 )
 
