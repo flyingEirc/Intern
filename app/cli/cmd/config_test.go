@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func cleanConfigEnv(t *testing.T) {
@@ -37,33 +38,67 @@ func execute(t *testing.T, out io.Writer, args ...string) error {
 	return command.ExecuteContext(t.Context())
 }
 
-// TestConfigDirectoryRejected pins that a directory passed as the configuration
-// path is a configuration error, not an empty configuration that runs the command.
-func TestConfigDirectoryRejected(t *testing.T) {
-	for _, useEnv := range []bool{false, true} {
-		name := "flag"
-		if useEnv {
-			name = "env"
-		}
-		t.Run(name, func(t *testing.T) {
-			cleanConfigEnv(t)
-			configDir := t.TempDir()
-			backupDir := filepath.Join(t.TempDir(), "backups")
-			stateDir := filepath.Join(t.TempDir(), "state")
-			args := []string{"backup", "list", "--directory", backupDir, "--state-directory", stateDir}
-			if useEnv {
-				t.Setenv("INTERN_CONFIG", configDir)
-			} else {
-				args = append(args, "--config", configDir)
-			}
-			err := execute(t, io.Discard, args...)
-			want := fmt.Sprintf("cannot read YAML configuration %q: not a regular file", configDir)
-			if err == nil || err.Error() != want {
-				t.Fatalf("error = %v, want %q", err, want)
-			}
-			assertNotCreated(t, backupDir, stateDir)
-		})
+// configDeadline bounds a command that must fail before it reads the configuration.
+const configDeadline = 5 * time.Second
+
+// executeBounded fails the test instead of hanging when the command blocks, as
+// opening a FIFO configuration in blocking mode does.
+func executeBounded(t *testing.T, args ...string) error {
+	t.Helper()
+	errCh := make(chan error, 1)
+	go func() { errCh <- execute(t, io.Discard, args...) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(configDeadline):
+		t.Fatalf("command still blocked after %v", configDeadline)
+		return nil
 	}
+}
+
+// TestConfigNonRegularRejected pins that a configuration path that is not a
+// regular file is a configuration error, not an empty configuration that runs the
+// command. The FIFO has no writer, so opening it in blocking mode never returns.
+func TestConfigNonRegularRejected(t *testing.T) {
+	kinds := []struct {
+		name string
+		path func(*testing.T) string
+	}{
+		{"directory", func(t *testing.T) string { return t.TempDir() }},
+		{"fifo", configFIFO},
+	}
+	for _, kind := range kinds {
+		for _, useEnv := range []bool{false, true} {
+			source := "flag"
+			if useEnv {
+				source = "env"
+			}
+			t.Run(kind.name+" "+source, func(t *testing.T) {
+				assertNonRegularRejected(t, kind.path(t), useEnv)
+			})
+		}
+	}
+}
+
+// assertNonRegularRejected selects configPath by flag or by INTERN_CONFIG and
+// expects the not-a-regular-file error before the command touches its directories.
+func assertNonRegularRejected(t *testing.T, configPath string, useEnv bool) {
+	t.Helper()
+	cleanConfigEnv(t)
+	backupDir := filepath.Join(t.TempDir(), "backups")
+	stateDir := filepath.Join(t.TempDir(), "state")
+	args := []string{"backup", "list", "--directory", backupDir, "--state-directory", stateDir}
+	if useEnv {
+		t.Setenv("INTERN_CONFIG", configPath)
+	} else {
+		args = append(args, "--config", configPath)
+	}
+	err := executeBounded(t, args...)
+	want := fmt.Sprintf("cannot read YAML configuration %q: not a regular file", configPath)
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	assertNotCreated(t, backupDir, stateDir)
 }
 
 func TestConfigFileLoads(t *testing.T) {

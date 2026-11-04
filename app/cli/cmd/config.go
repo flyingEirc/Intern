@@ -66,7 +66,8 @@ func (l *configLoader) load() (configuration, error) {
 }
 
 func (l *configLoader) readConfig(path string) (retErr error) {
-	f, err := fsutil.Open(path)
+	// openConfig uses O_NONBLOCK on Unix so a FIFO with no writer cannot block in open(2).
+	f, err := openConfig(path)
 	if err != nil {
 		return fmt.Errorf("cannot open YAML configuration %q", path)
 	}
@@ -79,6 +80,9 @@ func (l *configLoader) readConfig(path string) (retErr error) {
 	}
 	if !st.Mode().IsRegular() {
 		return fmt.Errorf("cannot read YAML configuration %q: not a regular file", path)
+	}
+	if err = setConfigBlocking(f); err != nil {
+		return fmt.Errorf("cannot read YAML configuration %q: %w", path, err)
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
