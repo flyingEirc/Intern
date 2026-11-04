@@ -18,8 +18,10 @@ name: Intern quality
 # branch and tag runs. GitHub also emits a push event when a branch or tag is
 # deleted (a branch deletion's run is attached to the default branch); CircleCI
 # ran nothing on deletion. The scope and quality-gate jobs skip deleted events,
-# so a deletion neither starts a matrix nor produces a gate result. A push that
-# only changes documentation skips the heavy jobs; quality-gate confirms that
+# so a deletion neither starts a matrix nor produces a gate result. scope skips
+# the heavy jobs only for documentation-only changes: on main the push delta,
+# on other branches everything the branch has over main; never for tags,
+# schedule or workflow_dispatch (quality-scope.sh). quality-gate confirms that
 # outcome.
 #
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
@@ -69,7 +71,8 @@ jobs:
         working-directory: .
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          REF: ${{ github.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: .github/scripts/quality-scope.sh
 
@@ -110,6 +113,8 @@ jobs:
         run: .github/scripts/s2-gate-cases.sh
       - name: Candidate artifact gate accept and reject cases
         run: .github/scripts/candidate-artifact-cases.sh
+      - name: Scope selection accept and reject cases
+        run: .github/scripts/quality-scope-cases.sh
       - name: Publish the OpenAPI contract with its digest
         run: |
           set -euo pipefail

@@ -91,6 +91,6 @@ W5 恢复 API 的裁定边界：`verify_sql` 由恢复引擎唯一裁定，API �
 
 panic 发生在响应输出前时，可以丢弃部分缓冲并返回统一 `500`；字节已发送后无法收回或改写状态，只记录错误，不能把这类情形描述为已回滚。改密事务成功后若 token 轮换失败，密码与成功审计仍保留，旧会话不得被提升到新 epoch，需要用新密码重新登录。
 
-`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：活跃 CI 为 GitHub Actions（`.github/workflows/quality.yml`），在仓库的 Linux 自托管 runner（Windows 主机上的 WSL2）上，对每次分支/tag 推送与每日定时运行同一矩阵和全部 `verify-*-evidence.sh` 门禁；纯文档推送由 `scope` job 判定并跳过重型 job（`quality-gate` 仍须成功）。runner 的前置条件见 [质量规范](quality.md) 的「CI 执行环境」。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或合并门禁已通过验收。
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：活跃 CI 为 GitHub Actions（`.github/workflows/quality.yml`），在仓库的 Linux 自托管 runner（Windows 主机上的 WSL2）上，对每次分支/tag 推送与每日定时运行同一矩阵和全部 `verify-*-evidence.sh` 门禁；`scope` job 判定能否跳过重型 job：main 按这次推送的增量，其他分支按整条分支相对 main 的累计差异，只改 `*.md` 才跳过（`quality-gate` 仍须成功），tag、定时与手动运行总是整套，规则见 [质量规范](quality.md)。runner 的前置条件见 [质量规范](quality.md) 的「CI 执行环境」。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪。workflow 已提交不代表真实容器矩阵或合并门禁已通过验收。
 
 项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。
