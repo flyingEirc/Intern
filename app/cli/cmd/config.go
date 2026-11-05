@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -65,23 +66,36 @@ func (l *configLoader) load() (configuration, error) {
 }
 
 func (l *configLoader) readConfig(path string) (retErr error) {
-	f, err := fsutil.Open(path)
+	// openConfig uses O_NONBLOCK on Unix so a FIFO with no writer cannot block in open(2).
+	f, err := openConfig(path)
 	if err != nil {
 		return fmt.Errorf("cannot open YAML configuration %q", path)
 	}
 	defer fsutil.Close(&retErr, f)
+	// Stat the opened descriptor before reading. Viper drops reader errors, so a
+	// non-regular file would otherwise be treated as an empty configuration.
+	st, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("cannot read YAML configuration %q: %w", path, err)
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("cannot read YAML configuration %q: not a regular file", path)
+	}
+	if err = setConfigBlocking(f); err != nil {
+		return fmt.Errorf("cannot read YAML configuration %q: %w", path, err)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return fmt.Errorf("cannot read YAML configuration %q: %w", path, err)
+	}
 	l.v.SetConfigType("yaml")
-	if err = l.v.ReadConfig(f); err != nil {
+	if err = l.v.ReadConfig(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("cannot read YAML configuration %q (unreadable or invalid syntax)", path)
 	}
 	if !l.v.InConfig("connection.password") {
 		return nil
 	}
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0o077 != 0 {
+	if st.Mode().Perm()&0o077 != 0 {
 		return errors.New("YAML containing connection.password must be a regular private file (chmod 600); password_env is recommended")
 	}
 	return nil
