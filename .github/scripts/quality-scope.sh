@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Decides whether the heavy business and container jobs must run, and prints
-# the locked profile matrix. required=false means every path changed since the
-# base is documentation; anything else, and anything this script cannot prove,
-# is required=true. The classification itself, including its case list, is
-# docs-only.sh; this script only picks the base and reports the verdict.
+# the locked profile matrix. required=false means no path changed since the
+# base needs CI: all of them are documentation or the CI's own files;
+# anything else, and anything this script cannot prove, is required=true. The
+# classification itself, including its case list, is needs-ci.sh; this script
+# only picks the base and reports the verdict.
 #
 # The base depends on the ref, because the workflow's concurrency rule decides
 # whose verdict still stands:
@@ -14,8 +15,8 @@
 #   push to any other branch
 #       git merge-base origin/main HEAD, so the whole branch over main is
 #       judged. A newer push cancels the previous run (or follows its failure);
-#       judging only the delta would let a docs-only follow-up push pass a head
-#       whose code never had a completed matrix.
+#       judging only the delta would let a documentation/CI-only follow-up push
+#       pass a head whose code never had a completed matrix.
 #   tag, schedule, workflow_dispatch, any other event
 #       no base: always required=true.
 # A base that is missing or unusable (zero or unreachable before, no
@@ -25,7 +26,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-docs_only=$here/docs-only.sh
+needs_ci=$here/needs-ci.sh
 
 main_ref=refs/remotes/origin/main
 
@@ -64,14 +65,14 @@ case "${EVENT_NAME}:${REF:-}" in
 esac
 if [[ -n "$base" ]]; then
     status=0
-    detail=$("$docs_only" "$base" "$HEAD_SHA") || status=$?
+    detail=$("$needs_ci" "$base" "$HEAD_SHA") || status=$?
     case $status in
         0)
             required=false
-            why="${how} ${base}: only documentation changed"
+            why="${how} ${base}: no business change (documentation or CI files only)"
             ;;
         1)
-            why="${how} ${base}: $(printf '%q' "$detail") is not documentation"
+            why="${how} ${base}: $(printf '%q' "$detail") needs CI"
             ;;
         *)
             why="no usable base, git diff ${base} ${HEAD_SHA} failed"

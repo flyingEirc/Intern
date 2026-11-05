@@ -4,9 +4,9 @@
 # fetch-depth 0 does, runs the script with the environment the scope job
 # passes, and compares the required output. The cases cover the base selection
 # of each ref kind, the unusable bases and the failed diff that must end in
-# required=true with exit status 0 and one logged reason, and the docs-only
-# follow-up push that the push delta used to pass for a head whose code never
-# had a completed matrix.
+# required=true with exit status 0 and one logged reason, and the
+# documentation/CI-only follow-up push that the push delta used to pass for a
+# head whose code never had a completed matrix.
 #
 # SCOPE_SCRIPT and SCOPE_CONTRACT point the cases at another script or
 # contract.json than the ones next to this file.
@@ -120,10 +120,13 @@ fresh_repo main-delta
 M1=$(commit code internal/a.go)
 M2=$(commit docs docs/a.md)
 scope push refs/heads/main "$M1" "$M2"
-expect '3 main push, docs-only delta' false
+expect '3 main push, docs-only delta' false 'no business change \(documentation or CI files only\)'
+C1=$(commit ci .github/scripts/x.sh)
+scope push refs/heads/main "$M2" "$C1"
+expect '3b main push, .github-only delta' false 'no business change \(documentation or CI files only\)'
 M3=$(commit code internal/a.go)
-scope push refs/heads/main "$M2" "$M3"
-expect '4 main push, code delta' true
+scope push refs/heads/main "$C1" "$M3"
+expect '4 main push, code delta' true 'internal/a\.go needs CI'
 scope push refs/heads/main "$zero" "$M3"
 expect '5 main push, zero before' true
 
@@ -205,6 +208,14 @@ git checkout -q -b feat
 D1=$(commit notes internal/notes.md)
 scope push refs/heads/feat "$C0" "$D1"
 expect '12b branch changes only internal/notes.md' true
+
+# 12c. The CI's own files need no run either: everything under .github/ is
+# non-business, its Markdown included.
+fresh_repo ci-files
+git checkout -q -b ci
+D1=$(commit ci .github/workflows/quality.yml .github/scripts/x.sh .github/pull_request_template.md)
+scope push refs/heads/ci "$zero" "$D1"
+expect '12c branch changing only .github files' false 'no business change \(documentation or CI files only\)'
 
 # 13. Only the branch's own changes count: main moving on does not force a run.
 fresh_repo main-moves
