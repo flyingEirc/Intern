@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -30,7 +31,7 @@ func (s *Suite) buildCandidate(buildCtx context.Context) error {
 	for key, value := range values {
 		args[key] = &value
 	}
-	request := tc.ContainerRequest{FromDockerfile: tc.FromDockerfile{Context: s.Root, Dockerfile: "Dockerfile", Repo: "intern-quality", Tag: s.Profile.ID + "-" + s.Candidate.SourceSHA[:12] + "-" + arch, BuildArgs: args, KeepImage: true}, Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, ImagePlatform: s.Candidate.Platform, ConfigModifier: rootUser, HostConfigModifier: boundedHost, WaitingFor: wait.ForExec([]string{"/usr/bin/test", "-x", "/usr/local/bin/intern"}).WithStartupTimeout(30 * time.Second)}
+	request := tc.ContainerRequest{FromDockerfile: tc.FromDockerfile{Context: s.Root, Dockerfile: "Dockerfile", Repo: "intern-quality", Tag: s.Profile.ID + "-" + s.Candidate.SourceSHA[:12] + "-" + arch, BuildArgs: args, KeepImage: true}, Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Labels: maps.Clone(s.Labels), ImagePlatform: s.Candidate.Platform, ConfigModifier: rootUser, HostConfigModifier: boundedHost, WaitingFor: wait.ForExec([]string{"/usr/bin/test", "-x", "/usr/local/bin/intern"}).WithStartupTimeout(30 * time.Second)}
 	probe, err := tc.GenericContainer(buildCtx, tc.GenericContainerRequest{ContainerRequest: request, Started: true})
 	tc.CleanupContainer(s.T, probe, tc.StopTimeout(5*time.Second))
 	if err != nil {

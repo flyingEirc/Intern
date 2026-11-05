@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/flyingEirc/Intern/internal/fsutil"
@@ -17,9 +18,14 @@ import (
 
 const IntegrationPackage = "github.com/flyingEirc/Intern/app/cli/integration"
 
+// checkpointChainBackups is the number of backups the checkpoint_chain
+// scenario records: the full backup followed by two incrementals.
+const checkpointChainBackups = 3
+
 var (
-	checksum = regexp.MustCompile(`^[a-f0-9]{64}$`)
-	sourceID = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+	checksum   = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	sourceID   = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
+	binlogFile = regexp.MustCompile(`^binlog\.[0-9]{6}$`)
 )
 
 type Verification struct {
@@ -62,16 +68,46 @@ func validateCandidate(c Contract, got Candidate, want Verification) error {
 	if err != nil {
 		return err
 	}
+	if err = validateCandidateIdentity(c, got, want); err != nil {
+		return err
+	}
+	if want.RequireClean {
+		if err = validateCIProvenance(got); err != nil {
+			return err
+		}
+	}
+	return validateToolchain(c, profile, got)
+}
+
+func validateCandidateIdentity(c Contract, got Candidate, want Verification) error {
 	if got.FormatVersion != 1 || !sourceID.MatchString(want.SourceSHA) || got.SourceSHA != want.SourceSHA {
 		return errors.New("candidate source identity mismatch")
 	}
 	if got.Profile != want.Profile || got.Platform != want.Platform || !slices.Contains(c.Platforms, want.Platform) {
 		return errors.New("candidate matrix identity mismatch")
 	}
-	if want.RequireClean && got.SourceDirty {
+	return nil
+}
+
+func validateCIProvenance(got Candidate) error {
+	if got.SourceDirty {
 		return errors.New("CI candidate was built from an uncommitted tree")
 	}
-	return validateToolchain(c, profile, got)
+	return validateCIURL(got.CIURL)
+}
+
+// validateCIURL binds the evidence to this workflow run. The integration
+// emitter records the same URL from the engine-provided variables, so absent,
+// empty or reused evidence from another run cannot satisfy --ci.
+func validateCIURL(got string) error {
+	server, repo, run := os.Getenv("GITHUB_SERVER_URL"), os.Getenv("GITHUB_REPOSITORY"), os.Getenv("GITHUB_RUN_ID")
+	if server == "" || repo == "" || run == "" {
+		return errors.New("CI gate requires GITHUB_SERVER_URL, GITHUB_REPOSITORY and GITHUB_RUN_ID")
+	}
+	if want := server + "/" + repo + "/actions/runs/" + run; got != want {
+		return fmt.Errorf("candidate evidence belongs to another run: %q, want %q", got, want)
+	}
+	return nil
 }
 
 func validateToolchain(c Contract, p Profile, got Candidate) error {
@@ -142,7 +178,7 @@ func validateReceipts(c Contract, candidate Candidate, receipts []Receipt, passe
 			return errors.New("unknown or duplicate scenario receipt")
 		}
 		seen[r.CaseID] = true
-		if err := validateReceipt(candidate, r); err != nil {
+		if err := validateReceipt(c, candidate, r); err != nil {
 			return fmt.Errorf("%s: %w", r.CaseID, err)
 		}
 		for _, assertion := range c.Assertions[r.CaseID] {
@@ -159,8 +195,12 @@ func validateReceipts(c Contract, candidate Candidate, receipts []Receipt, passe
 	return nil
 }
 
-func validateReceipt(c Candidate, r Receipt) error {
-	if !matchesCandidate(c, r) {
+func validateReceipt(c Contract, candidate Candidate, r Receipt) error {
+	profile, err := c.Profile(r.Profile)
+	if err != nil {
+		return err
+	}
+	if !matchesCandidate(candidate, r) {
 		return errors.New("scenario belongs to another source, matrix or candidate")
 	}
 	if !completedReceipt(r) {
@@ -169,7 +209,13 @@ func validateReceipt(c Candidate, r Receipt) error {
 	if len(r.Assertions) == 0 || len(r.Instances) < 2 {
 		return errors.New("scenario lacks database/oracle evidence")
 	}
-	return validateInstances(r.Instances)
+	if err = validateInstances(profile, r.Instances); err != nil {
+		return err
+	}
+	if r.CaseID == "checkpoint_chain" {
+		return validateCheckpointChain(r.Checkpoints)
+	}
+	return nil
 }
 
 func matchesCandidate(c Candidate, r Receipt) bool {
@@ -180,18 +226,97 @@ func completedReceipt(r Receipt) bool {
 	return r.Status == "passed" && r.Stage == "verified" && !r.StartedAt.IsZero() && !r.FinishedAt.Before(r.StartedAt) && r.CleanupComplete && r.ResourcesCreated >= 4 && r.ResourcesCreated == r.ResourcesRemoved
 }
 
-func validateInstances(instances []Instance) error {
+// validateInstances binds the source and target databases to the locked
+// profile image instead of accepting any well-formed local image. Other roles
+// stay unbound: version_refusal deliberately starts the other locked server
+// version to prove the CLI refuses it.
+func validateInstances(p Profile, instances []Instance) error {
+	roles, err := validateInstanceIdentities(instances)
+	if err != nil {
+		return err
+	}
+	if !roles["source"] || !roles["target"] {
+		return errors.New("scenario lacks an identified source and target database")
+	}
+	return validateLockedInstances(p, instances)
+}
+
+func validateInstanceIdentities(instances []Instance) (map[string]bool, error) {
 	identities := map[string]bool{}
+	roles := map[string]bool{}
 	for _, i := range instances {
 		if i.Role == "" || i.UUID == "" || i.Version == "" || !validImageID(i.ImageID) {
-			return errors.New("incomplete database identity evidence")
+			return nil, errors.New("incomplete database identity evidence")
 		}
 		if identities[i.UUID] {
-			return errors.New("source and target did not use independent instances")
+			return nil, errors.New("source and target did not use independent instances")
 		}
 		identities[i.UUID] = true
+		roles[i.Role] = true
+	}
+	return roles, nil
+}
+
+func validateLockedInstances(p Profile, instances []Instance) error {
+	digest, err := imageDigest(p.Image)
+	if err != nil {
+		return err
+	}
+	for _, i := range instances {
+		if (i.Role == "source" || i.Role == "target") && (i.Version != p.Version || i.ImageID != digest) {
+			return fmt.Errorf("%s database differs from the locked profile", i.Role)
+		}
 	}
 	return nil
+}
+
+// validateCheckpointChain requires the full and two incremental checkpoints of
+// the checkpoint_chain scenario, in the order the source binary log advanced.
+// Dropping or reversing them would otherwise pass with the remaining oracles.
+func validateCheckpointChain(checkpoints []Checkpoint) error {
+	if len(checkpoints) != checkpointChainBackups {
+		return fmt.Errorf("checkpoint chain recorded %d of %d checkpoints", len(checkpoints), checkpointChainBackups)
+	}
+	seen := make(map[string]bool, len(checkpoints))
+	lastFile, lastPosition := 0, int64(0)
+	for index, checkpoint := range checkpoints {
+		file, err := validateCheckpoint(checkpoint, seen)
+		if err != nil {
+			return err
+		}
+		if index > 0 && (file < lastFile || (file == lastFile && checkpoint.Position < lastPosition)) {
+			return errors.New("checkpoint chain is not in source binary log order")
+		}
+		lastFile, lastPosition = file, checkpoint.Position
+	}
+	return nil
+}
+
+func validateCheckpoint(checkpoint Checkpoint, seen map[string]bool) (int, error) {
+	file, err := binlogSequence(checkpoint.File)
+	if err != nil {
+		return 0, err
+	}
+	if checkpoint.BackupID == "" || checkpoint.Position <= 0 || seen[checkpoint.BackupID] {
+		return 0, errors.New("invalid checkpoint chain evidence")
+	}
+	seen[checkpoint.BackupID] = true
+	return file, nil
+}
+
+func binlogSequence(name string) (int, error) {
+	if !binlogFile.MatchString(name) {
+		return 0, fmt.Errorf("checkpoint file is not a source binary log: %q", name)
+	}
+	return strconv.Atoi(strings.TrimPrefix(name, "binlog."))
+}
+
+func imageDigest(image string) (string, error) {
+	_, digest, found := strings.Cut(image, "@")
+	if !found || !validImageID(digest) {
+		return "", errors.New("locked database image has no digest")
+	}
+	return digest, nil
 }
 
 func ReadJSON(path string, dst any) (retErr error) {

@@ -32,7 +32,7 @@ PR 汇总对应 [Issue](issue.md) 的交付和验收，具体背景、分析与�
 
 GitHub 不做技术强制：本仓库是用户账号下的私有仓库，分支保护与 rulesets 需要 GitHub Pro 或公开仓库（当前返回 403），GitHub merge queue 仅面向组织仓库开放。合并门禁因此按以下流程执行，不依赖 GitHub 的强制检查。
 
-- 合并 PR 前：该 PR head SHA 对应的 GitHub Actions `Intern quality` 运行（`push` 事件）必须已完成，`quality-gate` 与全部 job 成功；运行 URL 附在 PR 中。`scope` 判定为不需要重型检查（`required=false`）时，`quality-gate` 成功只在符合下一条 `scope` 规则时才视为通过。没有对应运行或结果不完整时不得合并。
+- 合并 PR 前：该 PR head SHA 对应的 GitHub Actions `Intern quality` 运行（`push` 事件）必须已完成，`quality-gate` 与全部 job 成功；运行 URL 附在 PR 中。同一 SHA 重跑时只以最新 attempt 的完整结果为准，且最新 attempt 必须重跑 `quality-gate`、汇总全部配置（只重跑单个容器腿时汇总 job 一并重跑）；`container-*` 证据制品按 job 以 `overwrite: true` 替换，被取消 attempt 留下的同名制品不得参与判定，历史 attempt 的日志与结论仍保留在运行记录中，不得删除该运行或改写结论。重跑只用于已在 PR/Issue 定位并记录的非产品 flake（runner/基础设施抖动或被外部取消）；产品或测试代码导致的失败必须先修复再重跑，一次重跑不能删除原失败证据，不用无限重试把红色洗绿。`scope` 判定为不需要重型检查（`required=false`）时，`quality-gate` 成功只在符合下一条 `scope` 规则时才视为通过。没有对应运行或结果不完整时不得合并。
 - `scope` 规则：main 的 `push` 按该提交自己的推送增量（`github.event.before` 到该提交）判定，main 上每个提交都有不被取消的独立运行；其他分支的 `push` 按整条分支相对 main 的累计差异（`git merge-base origin/main <head>` 到 head）判定，不看最后一次推送的增量，所以后续的纯文档推送不会掩盖此前被取消、失败或没跑完的代码推送；tag、定时与手动运行总是整套。判定范围内只有 `*.md` 才是 `required=false`；基点缺失或无法解析一律整套（`required=true`）。核对时看 `scope` job 日志里的 `quality-scope:` 行，它写明基点与结论。完整规则见 [质量规范](../guide/quality.md)。
 - 合并后：main 上合并提交对应的 `Intern quality` 运行必须为绿色，其 URL 记录在对应 PR/Issue 中；main 变红时先修复，再合并任何后续 PR。main 上 `required=false` 的绿色运行只表示该提交相对上一个 main 提交没有代码改动，不能算作此前变红的 main 已修复。
 - PR 与提交上还可能显示一条失败的 `CircleCI Pipeline` 状态（`No configuration was found`）：CircleCI 已退役，但仓库的 CircleCI webhook 尚未移除。它不是合并门禁，判定只以 `Intern quality` 运行的 `quality-gate` 与全部 job 为准；移除该 webhook（或在 CircleCI 停止构建该项目）属于仓库所有者操作，尚未执行。

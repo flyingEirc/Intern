@@ -59,9 +59,12 @@ func (c *Case) startRunner() error {
 		return err
 	}
 	volumes := []string{c.prefix + "-backups", c.prefix + "-state", c.prefix + "-secrets"}
-	req := tc.ContainerRequest{Image: c.Suite.Image, ImagePlatform: c.Suite.Candidate.Platform, Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, ConfigModifier: rootUser, HostConfigModifier: boundedHost, Networks: []string{c.Network.Name}, NetworkAliases: map[string][]string{c.Network.Name: {"runner"}}, Mounts: tc.ContainerMounts{tc.VolumeMount(volumes[0], "/work/backups"), tc.VolumeMount(volumes[1], "/work/state"), tc.VolumeMount(volumes[2], "/run/secrets")}, Tmpfs: map[string]string{"/limited": "rw,size=1048576,mode=0700,uid=10001,gid=10001"}, Files: []tc.ContainerFile{{Reader: bytes.NewReader(source), ContainerFilePath: "/run/secrets/source.yaml", FileMode: 0o600}, {Reader: bytes.NewReader(target), ContainerFilePath: "/run/secrets/target.yaml", FileMode: 0o600}, {Reader: bytes.NewReader(c.CA.PEM), ContainerFilePath: "/run/secrets/ca.pem", FileMode: 0o600}}, WaitingFor: wait.ForExec([]string{"/usr/bin/test", "-x", "/usr/local/bin/intern"}).WithStartupTimeout(30 * time.Second)}
+	for _, volume := range volumes {
+		c.volume(volume)
+	}
+	req := tc.ContainerRequest{Image: c.Suite.Image, ImagePlatform: c.Suite.Candidate.Platform, Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, ConfigModifier: rootUser, HostConfigModifier: boundedHost, Labels: c.labels(), Networks: []string{c.Network.Name}, NetworkAliases: map[string][]string{c.Network.Name: {"runner"}}, Mounts: tc.ContainerMounts{tc.VolumeMount(volumes[0], "/work/backups"), tc.VolumeMount(volumes[1], "/work/state"), tc.VolumeMount(volumes[2], "/run/secrets")}, Tmpfs: map[string]string{"/limited": "rw,size=1048576,mode=0700,uid=10001,gid=10001"}, Files: []tc.ContainerFile{{Reader: bytes.NewReader(source), ContainerFilePath: "/run/secrets/source.yaml", FileMode: 0o600}, {Reader: bytes.NewReader(target), ContainerFilePath: "/run/secrets/target.yaml", FileMode: 0o600}, {Reader: bytes.NewReader(c.CA.PEM), ContainerFilePath: "/run/secrets/ca.pem", FileMode: 0o600}}, WaitingFor: wait.ForExec([]string{"/usr/bin/test", "-x", "/usr/local/bin/intern"}).WithStartupTimeout(30 * time.Second)}
 	c.Runner, err = tc.GenericContainer(c.Ctx, tc.GenericContainerRequest{ContainerRequest: req, Started: true})
-	c.ownContainer(c.Runner, "CLI runner", volumes...)
+	c.ownContainer(c.Runner, "CLI runner")
 	if err != nil {
 		return c.SafeError(err)
 	}
@@ -101,8 +104,11 @@ func (c *Case) OK(args ...string) []byte {
 
 func (c *Case) Refuse(id string, args ...string) {
 	c.T.Helper()
-	_, code := c.Command(args...)
-	c.Assert(id, code != 0)
+	output, code := c.Command(args...)
+	if !refusalExit(code) {
+		c.T.Fatalf("CLI %s exited %d, want the business-refusal exit %d (a panic, a signal, a timeout, or success is not a refusal): %s", args[0], code, refusalExitCode, c.Redact(string(output)))
+	}
+	c.Assert(id, true)
 }
 
 func (c *Case) Backup(kind string, flags ...string) backup.Result {

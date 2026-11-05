@@ -53,7 +53,7 @@ func Load() (Contract, error) {
 	}
 	profiles := make([]string, 0, len(c.Profiles))
 	for _, p := range c.Profiles {
-		if !strings.Contains(p.Image, "@sha256:") {
+		if _, err = imageDigest(p.Image); err != nil {
 			return c, errors.New("unlocked database image")
 		}
 		profiles = append(profiles, p.ID)
