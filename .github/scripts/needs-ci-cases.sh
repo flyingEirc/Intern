@@ -3,10 +3,12 @@
 # classification single-sourced.
 #
 # Every case builds a scratch Git repository, commits the paths under test and
-# compares the script's exit status and exact stdout. The last two checks
-# compare quality.yml with the expected on.push.paths list and assert that
-# quality-scope.sh delegates to needs-ci.sh instead of carrying its own copy of
-# the case list, so the workflow filter and the script cannot silently diverge.
+# compares the script's exit status and exact stdout, which for a business
+# change is the tier (cli, web or all) and the path that settled it. The last
+# two checks compare quality.yml with the expected on.push.paths list and
+# assert that quality-scope.sh delegates to needs-ci.sh instead of carrying its
+# own copy of the case list, so the workflow filter and the script cannot
+# silently diverge.
 #
 # NEEDS_CI_SCRIPT, QUALITY_WORKFLOW and SCOPE_SCRIPT point the cases at another
 # script or workflow than the ones next to this file.
@@ -131,15 +133,15 @@ head=$(commit notes .github/notes.md)
 classify "$base" "$head"
 expect '.github/notes.md is a CI file' 0 "needs-ci: $base..$head: no business change (documentation or CI files only)"
 
-# 4-5. Markdown under a business path needs CI.
+# 4-5. Markdown under a shared business path needs the full set.
 fresh_repo internal-md
 head=$(commit notes internal/notes.md)
 classify "$base" "$head"
-expect 'internal/notes.md needs CI' 1 'internal/notes.md'
+expect 'internal/notes.md needs CI' 1 'all internal/notes.md'
 fresh_repo hooks-md
 head=$(commit notes .githooks/notes.md)
 classify "$base" "$head"
-expect '.githooks/notes.md needs CI' 1 '.githooks/notes.md'
+expect '.githooks/notes.md needs CI' 1 'all .githooks/notes.md'
 
 # 6. A business file renamed to markdown: the diff lists both rename sides, and
 # the deleted business path decides.
@@ -147,26 +149,26 @@ fresh_repo rename
 git mv internal/a.go docs/moved.md
 git commit -q -m rename
 classify "$base" "$(git rev-parse HEAD)"
-expect 'business file renamed to markdown' 1 'internal/a.go'
+expect 'business file renamed to markdown' 1 'all internal/a.go'
 
 # 7. A documentation file renamed into a business path needs CI.
 fresh_repo rename-in
 git mv docs/a.md internal/moved.md
 git commit -q -m rename
 classify "$base" "$(git rev-parse HEAD)"
-expect 'documentation renamed to a business path' 1 'internal/moved.md'
+expect 'documentation renamed to a business path' 1 'all internal/moved.md'
 
-# 8. Documentation mixed with business code.
+# 8. Documentation mixed with Web code.
 fresh_repo mixed
 head=$(commit mixed docs/c.md app/web/x.go)
 classify "$base" "$head"
-expect 'documentation and business code' 1 'app/web/x.go'
+expect 'documentation and Web code' 1 'web app/web/x.go'
 
-# 9. The first business path is reported.
+# 9. A shared path after a Web path settles all, and is the one reported.
 fresh_repo first
 head=$(commit first app/web/a.go internal/z.go)
 classify "$base" "$head"
-expect 'first business path' 1 'app/web/a.go'
+expect 'shared path after a Web path' 1 'all internal/z.go'
 
 # 10. An empty diff needs no CI.
 fresh_repo empty
@@ -189,7 +191,7 @@ expect_unusable 'no arguments'
 fresh_repo go-md
 head=$(commit notes go.md)
 classify "$base" "$head"
-expect 'root go.md needs CI' 1 'go.md'
+expect 'root go.md needs CI' 1 'all go.md'
 
 # 16. docs/go.md is documentation: the go.* arm is root-only (like GitHub's
 # go.*), so the *.md rule decides; 21f covers a path below a go.* directory.
@@ -209,39 +211,39 @@ expect 'Dockerfile.md is documentation' 0 "needs-ci: $base..$head: no business c
 fresh_repo other
 head=$(commit notes notes.txt)
 classify "$base" "$head"
-expect 'a path outside the case list' 1 'notes.txt'
+expect 'a path outside the case list' 1 'all notes.txt'
 
 # 19. A path with a space is reported verbatim; the caller quotes it.
 fresh_repo space
 head=$(commit notes 'internal/my file.go')
 classify "$base" "$head"
-expect 'a path with a space' 1 'internal/my file.go'
+expect 'a path with a space' 1 'all internal/my file.go'
 
 # 20. A root file named .github is not under .github/ and needs CI, matching
 # the filter's !.github/** which cannot match it either.
 fresh_repo dot-github
 head=$(commit notes .github)
 classify "$base" "$head"
-expect 'a root file named .github needs CI' 1 '.github'
+expect 'a root file named .github needs CI' 1 'all .github'
 
 # 21. CI files mixed with business code: the .github arm must not consume the
 # change, so the business path still needs CI.
 fresh_repo ci-and-business
 head=$(commit mixed .github/scripts/x.sh internal/z.go)
 classify "$base" "$head"
-expect 'CI files mixed with business code' 1 'internal/z.go'
+expect 'CI files mixed with business code' 1 'all internal/z.go'
 
 # 21b. CI Markdown mixed with Markdown below app/.
 fresh_repo ci-md-and-app-md
 head=$(commit mixed .github/notes.md app/web/notes.md)
 classify "$base" "$head"
-expect 'CI Markdown mixed with app Markdown' 1 'app/web/notes.md'
+expect 'CI Markdown mixed with app Markdown' 1 'web app/web/notes.md'
 
-# 21c. Markdown below app/ needs CI even as the only change.
+# 21c. Markdown below app/web needs the Web tier even as the only change.
 fresh_repo app-md
 head=$(commit notes app/web/notes.md)
 classify "$base" "$head"
-expect 'app/web/notes.md needs CI' 1 'app/web/notes.md'
+expect 'app/web/notes.md needs CI' 1 'web app/web/notes.md'
 
 # 21d. Non-ASCII paths survive the -z diff unchanged: without it git quotes the
 # path, which would be judged business and printed escaped.
@@ -251,7 +253,7 @@ classify "$base" "$head"
 expect 'non-ASCII documentation' 0 "needs-ci: $base..$head: no business change (documentation or CI files only)"
 head=$(commit notes 'internal/数据库.md')
 classify "$head~1" "$head"
-expect 'non-ASCII business path' 1 'internal/数据库.md'
+expect 'non-ASCII business path' 1 'all internal/数据库.md'
 
 # 21e. A failed diff is unusable input, never a no-business verdict.
 fresh_repo broken-tree
@@ -269,9 +271,70 @@ classify "$base" "$head"
 expect 'go.d/x.md is documentation' 0 "needs-ci: $base..$head: no business change (documentation or CI files only)"
 head=$(commit notes go.d/x.txt)
 classify "$head~1" "$head"
-expect 'go.d/x.txt needs CI' 1 'go.d/x.txt'
+expect 'go.d/x.txt needs CI' 1 'all go.d/x.txt'
 
-# The on.push.paths list that mirrors the case list, in workflow order:
+# 22. CLI-only paths, Markdown below app/cli included.
+fresh_repo cli-only
+head=$(commit cli app/cli/main.go app/cli/integration/x_test.go)
+classify "$base" "$head"
+expect 'CLI code only, first path reported' 1 'cli app/cli/integration/x_test.go'
+head=$(commit notes app/cli/README.md)
+classify "$head~1" "$head"
+expect 'app/cli/README.md is CLI-only' 1 'cli app/cli/README.md'
+
+# 23. Web-only paths: code, migrations, fixtures and the deployment files.
+fresh_repo web-only
+head=$(commit web app/web/internal/store/migrations/00010_x.sql app/web/deploy/Dockerfile app/web/integration/ftp.Dockerfile)
+classify "$base" "$head"
+expect 'Web migrations and images only' 1 'web app/web/deploy/Dockerfile'
+
+# 24. Both modules: the first path of the second module settles all.
+fresh_repo both-modules
+head=$(commit both docs/a.md app/cli/a.go app/cli/b.go app/web/a.go app/web/b.go)
+classify "$base" "$head"
+expect 'CLI and Web code' 1 'all app/web/a.go'
+
+# 25. A CLI path followed by a shared path: the shared path settles all.
+fresh_repo cli-and-shared
+head=$(commit mixed app/cli/a.go internal/z.go)
+classify "$base" "$head"
+expect 'CLI code and a shared path' 1 'all internal/z.go'
+
+# 26. Files below a module that the other module reads are shared: both
+# Dockerfiles copy every module's go.mod and go.sum, and the Web physical and
+# W3 scenarios read the CLI contract.json.
+for shared in app/cli/go.mod app/cli/go.sum app/web/go.mod app/web/go.sum app/cli/internal/qualitygate/contract.json; do
+	fresh_repo "shared-$(printf '%s' "$shared" | tr '/.' '--')"
+	head=$(commit shared "$shared")
+	classify "$base" "$head"
+	expect "$shared is shared" 1 "all $shared"
+done
+
+# 27. The root image inputs are shared: the Web physical scenario builds the
+# root Dockerfile's client-tools stage as well.
+for shared in Dockerfile .dockerignore THIRD_PARTY_NOTICES mise.toml .golangci.yml go.work; do
+	fresh_repo "root-$(printf '%s' "$shared" | tr '/.' '--')"
+	head=$(commit shared "$shared")
+	classify "$base" "$head"
+	expect "root $shared is shared" 1 "all $shared"
+done
+
+# 28. Another directory below app/ is not proven to reach one module.
+fresh_repo app-site
+head=$(commit site app/site/index.html)
+classify "$base" "$head"
+expect 'app/site is shared' 1 'all app/site/index.html'
+
+# 29. A file moved from app/cli to app/web: both rename sides count.
+fresh_repo cross-rename
+head=$(commit cli app/cli/moved.go)
+git mv app/cli/moved.go app/web/moved.go
+git commit -q -m move
+classify "$head" "$(git rev-parse HEAD)"
+expect 'a file moved from app/cli to app/web' 1 'all app/web/moved.go'
+
+# The on.push.paths list that mirrors the none/business split of the case list,
+# in workflow order:
 #   '**'            a push that changes anything ...
 #   '!**.md'        ... except Markdown, which needs-ci.sh calls documentation
 #   '!.github/**'   ... and the CI's own files, which never need a run
@@ -283,9 +346,9 @@ expect 'go.d/x.txt needs CI' 1 'go.d/x.txt'
 # Dockerfile, .dockerignore, THIRD_PARTY_NOTICES, mise.toml and .golangci.yml
 # cannot be *.md and are not under .github, so no entry is needed for them; a
 # *.md variant is documentation for both the script and the filter. Nothing may
-# re-include .github/**: it has to stay excluded, its Markdown included. Any
-# change to this list is a change to the classification and needs the cases
-# above.
+# re-include .github/**: it has to stay excluded, its Markdown included. The
+# cli/web/all tiers do not change the list: any tier creates a run. Any change
+# to this list is a change to the classification and needs the cases above.
 expected_paths='**
 !**.md
 !.github/**

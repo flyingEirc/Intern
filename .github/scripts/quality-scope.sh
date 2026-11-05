@@ -1,28 +1,39 @@
 #!/usr/bin/env bash
-# Decides whether the heavy business and container jobs must run, and prints
-# the locked profile matrix. required=false means no path changed since the
-# base needs CI: all of them are documentation or the CI's own files;
-# anything else, and anything this script cannot prove, is required=true. The
-# classification itself, including its case list, is needs-ci.sh; this script
-# only picks the base and reports the verdict.
+# Decides which job tiers of this run execute, and prints the locked profile
+# matrix. Three outputs, each exactly true or false:
+#   fast  quality-fast (build, race tests, lint, the gate self-tests)
+#   cli   container-mysql, the locked CLI matrix, and its aggregate gate
+#   web   the nine Web container jobs (container-physical ... container-ftps)
+# cli or web implies fast. The classification itself, including its case list
+# and the cli/web/all tiers, is needs-ci.sh; this script only picks the base,
+# applies the rule of the event and reports the verdict.
 #
-# The base depends on the ref, because the workflow's concurrency rule decides
-# whose verdict still stands:
+# The rule and the base depend on the event and the ref, because the workflow's
+# concurrency rule decides whose verdict still stands:
 #   push to main
-#       github.event.before. Every main commit has its own run, never canceled,
-#       so the commits before the push have their own verdicts and the push
-#       delta is enough.
+#       base github.event.before. Any business change runs every tier, whatever
+#       its needs-ci.sh tier: every merge commit gets a complete run of its own,
+#       never canceled, so the commits before the push have their own verdicts
+#       and the push delta is enough.
 #   push to any other branch
-#       git merge-base origin/main HEAD, so the whole branch over main is
-#       judged. A newer push cancels the previous run (or follows its failure);
-#       judging only the delta would let a documentation/CI-only follow-up push
-#       pass a head whose code never had a completed matrix.
-#   tag, schedule, workflow_dispatch, any other event
-#       no base: always required=true.
+#       base git merge-base origin/main HEAD, so the whole branch over main is
+#       judged; a newer push cancels the previous run, and judging only the
+#       delta would let a documentation/CI-only follow-up push skip a head
+#       whose code never had a completed run. A business change runs fast
+#       only: container jobs never run for a branch push, so a push run is not
+#       merge-gate evidence.
+#   workflow_dispatch on any other branch
+#       the pre-merge run (docs/workflow/pr.md). Same merge base as a branch
+#       push; a business change runs fast plus the container tiers of its
+#       needs-ci.sh tier (cli, web, or both for all). The full input (true)
+#       runs every tier regardless of the diff.
+#   workflow_dispatch on main, tag, schedule, any other event
+#       no base: every tier.
 # A base that is missing or unusable (zero or unreachable before, no
-# origin/main, no merge base, failed diff) is required=true with the reason
-# logged; it never fails the job. The scope job checks out with fetch-depth 0,
-# which fetches every branch into refs/remotes/origin/*, so origin/main exists.
+# origin/main, no merge base, failed diff) is the widest verdict of that event
+# with the reason logged: every tier, or fast for a branch push. It never fails
+# the job. The scope job checks out with fetch-depth 0, which fetches every
+# branch into refs/remotes/origin/*, so origin/main exists.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -30,12 +41,33 @@ needs_ci=$here/needs-ci.sh
 
 main_ref=refs/remotes/origin/main
 
-required=true
+# rule: main (business runs every tier), push (business runs fast only) or
+# dispatch (business runs fast plus its tier). Empty: no base, every tier.
+rule=''
 base=''
 how=''
 why=''
+fast=true
+cli=true
+web=true
+
+# merge_base sets base and how, or why when origin/main or the merge base is
+# missing.
+merge_base() {
+    local found
+    if ! git rev-parse --verify --quiet "${main_ref}^{commit}" > /dev/null; then
+        why="no usable base, ${main_ref} is not in this clone"
+    elif found=$(git merge-base "$main_ref" "$HEAD_SHA"); then
+        base=$found
+        how='branch diff from the merge base with origin/main'
+    else
+        why="no usable base, git merge-base origin/main ${HEAD_SHA} failed"
+    fi
+}
+
 case "${EVENT_NAME}:${REF:-}" in
     push:refs/heads/main)
+        rule=main
         before=${BEFORE_SHA:-}
         if [[ ! $before =~ ^[0-9a-f]{40}$ || $before == 0000000000000000000000000000000000000000 ]]; then
             why='no usable base, github.event.before is not a commit id (empty or all zeros)'
@@ -47,32 +79,57 @@ case "${EVENT_NAME}:${REF:-}" in
         fi
         ;;
     push:refs/heads/*)
-        if ! git rev-parse --verify --quiet "${main_ref}^{commit}" > /dev/null; then
-            why="no usable base, ${main_ref} is not in this clone"
-        elif merge_base=$(git merge-base "$main_ref" "$HEAD_SHA"); then
-            base=$merge_base
-            how='branch diff from the merge base with origin/main'
+        rule=push
+        cli=false
+        web=false
+        merge_base
+        ;;
+    workflow_dispatch:refs/heads/main)
+        why='workflow_dispatch on main, always every tier'
+        ;;
+    workflow_dispatch:refs/heads/*)
+        if [[ ${FULL_INPUT:-} == true ]]; then
+            why='workflow_dispatch with full=true, always every tier'
         else
-            why="no usable base, git merge-base origin/main ${HEAD_SHA} failed"
+            rule=dispatch
+            merge_base
         fi
         ;;
     push:*)
-        why="${REF:-an unknown ref} is not a branch, always the full set"
+        why="${REF:-an unknown ref} is not a branch, always every tier"
         ;;
     *)
-        why="${EVENT_NAME} events have no base, always the full set"
+        why="${EVENT_NAME} events have no base, always every tier"
         ;;
 esac
-if [[ -n "$base" ]]; then
+if [[ -n $base ]]; then
     status=0
     detail=$("$needs_ci" "$base" "$HEAD_SHA") || status=$?
     case $status in
         0)
-            required=false
+            fast=false
+            cli=false
+            web=false
             why="${how} ${base}: no business change (documentation or CI files only)"
             ;;
         1)
-            why="${how} ${base}: $(printf '%q' "$detail") needs CI"
+            tier=${detail%% *}
+            path=${detail#* }
+            case $rule in
+                main)
+                    why="${how} ${base}: $(printf '%q' "$path") needs CI (${tier}), main runs every tier"
+                    ;;
+                push)
+                    why="${how} ${base}: $(printf '%q' "$path") needs CI (${tier}), a branch push runs the fast checks only"
+                    ;;
+                dispatch)
+                    case $tier in
+                        cli) web=false ;;
+                        web) cli=false ;;
+                    esac
+                    why="${how} ${base}: $(printf '%q' "$path") needs the ${tier} tier"
+                    ;;
+            esac
             ;;
         *)
             why="no usable base, git diff ${base} ${HEAD_SHA} failed"
@@ -80,6 +137,6 @@ if [[ -n "$base" ]]; then
     esac
 fi
 matrix=$(jq -c '{profile: [.profiles[].id]}' app/cli/internal/qualitygate/contract.json)
-printf 'required=%s\nmatrix=%s\n' "$required" "$matrix" >> "$GITHUB_OUTPUT"
+printf 'fast=%s\ncli=%s\nweb=%s\nmatrix=%s\n' "$fast" "$cli" "$web" "$matrix" >> "$GITHUB_OUTPUT"
 printf 'quality-scope: %s\n' "$why"
-printf 'Business/container checks required: %s\n' "$required"
+printf 'Fast checks: %s; CLI container matrix: %s; Web container jobs: %s\n' "$fast" "$cli" "$web"

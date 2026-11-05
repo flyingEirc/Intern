@@ -13,30 +13,39 @@ name: Intern quality
 # Triggers: push on every branch and tag, the nightly schedule on the default
 # branch, and workflow_dispatch. Branch pushes are filtered with on.push.paths:
 # a push that changes only documentation or the CI's own files creates no run
-# at all, so it cannot queue a ~52-minute run behind the single serial runner.
-# CI validates business code, not its own scripts: a change confined to
-# .github/** (this workflow, the scripts, their self-tests, the templates)
-# never starts a run. Those scripts must pass their self-tests locally before
-# the push (docs/workflow/pr.md) and still execute in the next business run or
-# nightly, so a broken gate script is only exercised there. The filter mirrors
-# the case list of .github/scripts/needs-ci.sh (needs-ci-cases.sh fails when
-# they drift). GitHub does not evaluate path filters for pushes of tags, always
-# runs a push it cannot diff (>1,000 commits or a diff timeout) and sees only
-# the first 3,000 files of a larger diff, so scope keeps its own
-# classification as the backstop of every run that is created. A PR whose
-# trailing commits need no run is judged by the run of the newest commit that
-# has one (docs/workflow/pr.md). No pull_request trigger: with one serial
-# runner it would repeat every ~52-minute run for a same-repo PR branch push;
-# the PR head SHA's push run is the merge-gate evidence. Concurrency does not
-# cancel main runs (each merge commit needs its own green run) and cancels
-# superseded branch and tag runs. GitHub also emits a push event when a branch
-# or tag is deleted (a branch deletion's run is attached to the default
+# at all. CI validates business code, not its own scripts: a change confined
+# to .github/** (this workflow, the scripts, their self-tests, the templates)
+# never starts a push run. Those scripts must pass their self-tests locally
+# before the push (docs/workflow/pr.md) and still execute in the next business
+# run or nightly, so a broken gate script is only exercised there. The filter
+# mirrors the none/business split of .github/scripts/needs-ci.sh
+# (needs-ci-cases.sh fails when they drift). GitHub does not evaluate path
+# filters for pushes of tags, always runs a push it cannot diff (>1,000 commits
+# or a diff timeout) and sees only the first 3,000 files of a larger diff, so
+# scope keeps its own classification as the backstop of every run that is
+# created. A push whose head commit message carries [skip ci] (or GitHub's
+# other skip instructions) creates no push run; that never affects
+# workflow_dispatch or schedule.
+#
+# Job tiers (scope, from quality-scope.sh): fast is quality-fast, cli is the
+# container-mysql matrix with its aggregate gate, web is the nine Web container
+# jobs. A push to a branch other than main runs fast only, so the single serial
+# runner is not held ~52 minutes per branch push, and a push run is never
+# merge-gate evidence. The pre-merge run is a workflow_dispatch on the PR branch
+# at its head (docs/workflow/pr.md): it runs fast plus the container tiers the
+# branch's diff over main reaches (needs-ci.sh tier cli, web or all), or every
+# tier with the full input. main pushes with a business change, tags, the
+# schedule and workflow_dispatch on main run every tier. Any of them with no
+# business change since its base runs none, and quality-gate confirms each
+# tier's outcome. No pull_request trigger: the dispatch run at the PR head SHA
+# is the merge-gate evidence. Concurrency groups by event as well as ref, so a
+# branch push never cancels that branch's dispatch run; it does not cancel main
+# runs (each merge commit needs its own green run) and cancels superseded
+# branch and tag runs of the same event. GitHub also emits a push event when a
+# branch or tag is deleted (a branch deletion's run is attached to the default
 # branch); CircleCI ran nothing on deletion. The scope and quality-gate jobs
 # skip deleted events, so a deletion neither starts a matrix nor produces a
-# gate result. scope skips the heavy jobs only when no changed path needs CI:
-# on main the push delta, on other branches everything the branch has over
-# main; never for tags, schedule or workflow_dispatch (quality-scope.sh).
-# quality-gate confirms that outcome.
+# gate result.
 #
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
 # step; setup-go with cache: false (the runner keeps its module and build caches
@@ -64,15 +73,21 @@ on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run every container tier, whatever the branch changes (a branch run otherwise runs only the tiers its diff over main reaches)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   # main runs get one group per commit, so a merge commit's run is never
-  # canceled or replaced by a later pending run; a newer push to any other
-  # branch or tag cancels that ref's superseded run.
-  group: intern-quality-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
+  # canceled or replaced by a later pending run; on any other branch or tag a
+  # newer run of the same event cancels that ref's superseded run, and a branch
+  # push does not cancel the branch's workflow_dispatch run.
+  group: intern-quality-${{ github.event_name }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
@@ -89,7 +104,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     outputs:
-      required: ${{ steps.scope.outputs.required }}
+      fast: ${{ steps.scope.outputs.fast }}
+      cli: ${{ steps.scope.outputs.cli }}
+      web: ${{ steps.scope.outputs.web }}
       matrix: ${{ steps.scope.outputs.matrix }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,11 +122,12 @@ jobs:
           REF: ${{ github.ref }}
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          FULL_INPUT: ${{ inputs.full }}
         run: .github/scripts/quality-scope.sh
 
   quality-fast:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.fast == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     steps:
@@ -172,7 +190,7 @@ jobs:
 
   container-mysql:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.cli == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
     strategy:
@@ -271,7 +289,7 @@ jobs:
 
   container-physical:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 40
     steps:
@@ -303,7 +321,7 @@ jobs:
 
   container-ftp:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 35
     steps:
@@ -337,7 +355,7 @@ jobs:
 
   container-replication:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 50
     steps:
@@ -369,7 +387,7 @@ jobs:
 
   container-web:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 50
     steps:
@@ -401,7 +419,7 @@ jobs:
 
   container-dispatch:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
     steps:
@@ -433,7 +451,7 @@ jobs:
 
   container-restore:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 70
     steps:
@@ -465,7 +483,7 @@ jobs:
 
   container-restore-api:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 70
     steps:
@@ -507,7 +525,7 @@ jobs:
   # and after it with always().
   container-deploy:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 75
     env:
@@ -561,7 +579,7 @@ jobs:
   # brand-new pinned MySQL 8.4.11 container by the harness itself.
   container-ftps:
     needs: scope
-    if: needs.scope.outputs.required == 'true'
+    if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 105
     steps:
@@ -598,10 +616,15 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Validate job outcomes and no-business-change scope
+      # Every job of a tier the scope selected must succeed and every job of
+      # the other tiers must be skipped, so a tier can neither be dropped
+      # silently nor run outside its scope.
+      - name: Validate job outcomes against the scope tiers
         env:
           SCOPE: ${{ needs.scope.result }}
-          REQUIRED: ${{ needs.scope.outputs.required }}
+          NEED_FAST: ${{ needs.scope.outputs.fast }}
+          NEED_CLI: ${{ needs.scope.outputs.cli }}
+          NEED_WEB: ${{ needs.scope.outputs.web }}
           FAST: ${{ needs.quality-fast.result }}
           CONTAINERS: ${{ needs.container-mysql.result }}
           PHYSICAL: ${{ needs.container-physical.result }}
@@ -616,27 +639,58 @@ jobs:
         working-directory: .
         run: |
           test "$SCOPE" = success
-          case "$REQUIRED" in
-            true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success; test "$WEB" = success; test "$DISPATCH" = success; test "$RESTORE" = success; test "$RESTORE_API" = success; test "$DEPLOY" = success; test "$FTPS" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; test "$RESTORE" = skipped; test "$RESTORE_API" = skipped; test "$DEPLOY" = skipped; test "$FTPS" = skipped; echo 'quality-gate: not-required (no business change)' ;;
-            *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
-          esac
+          for need in "$NEED_FAST" "$NEED_CLI" "$NEED_WEB"; do
+            case $need in
+              true|false) ;;
+              *) echo 'quality-gate: invalid scope tier output' >&2; exit 1 ;;
+            esac
+          done
+          if [[ $NEED_FAST == false && ( $NEED_CLI == true || $NEED_WEB == true ) ]]; then
+            echo 'quality-gate: a container tier without the fast checks' >&2
+            exit 1
+          fi
+          # expect NEED JOB RESULT: success when the tier runs, skipped otherwise.
+          expect() {
+            local want=skipped
+            [[ $1 == true ]] && want=success
+            if [[ $3 != "$want" ]]; then
+              printf 'quality-gate: %s is %s, want %s\n' "$2" "${3:-<none>}" "$want" >&2
+              exit 1
+            fi
+          }
+          expect "$NEED_FAST" quality-fast "$FAST"
+          expect "$NEED_CLI" container-mysql "$CONTAINERS"
+          expect "$NEED_WEB" container-physical "$PHYSICAL"
+          expect "$NEED_WEB" container-ftp "$FTP"
+          expect "$NEED_WEB" container-replication "$REPLICATION"
+          expect "$NEED_WEB" container-web "$WEB"
+          expect "$NEED_WEB" container-dispatch "$DISPATCH"
+          expect "$NEED_WEB" container-restore "$RESTORE"
+          expect "$NEED_WEB" container-restore-api "$RESTORE_API"
+          expect "$NEED_WEB" container-deploy "$DEPLOY"
+          expect "$NEED_WEB" container-ftps "$FTPS"
+          printf 'quality-gate: tiers fast=%s cli=%s web=%s\n' "$NEED_FAST" "$NEED_CLI" "$NEED_WEB"
+          if [[ $NEED_FAST == false ]]; then
+            echo 'quality-gate: not-required (no business change)'
+          elif [[ $NEED_CLI == false && $NEED_WEB == false ]]; then
+            echo 'quality-gate: fast checks only, no container tier ran (not merge-gate evidence)'
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: needs.scope.outputs.required == 'true'
+        if: needs.scope.outputs.cli == 'true'
         with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: needs.scope.outputs.required == 'true'
+        if: needs.scope.outputs.cli == 'true'
         with:
           go-version: '1.27.0'
           cache: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.scope.outputs.required == 'true'
+        if: needs.scope.outputs.cli == 'true'
         with:
           pattern: container-*
           path: .cache/downloaded
       - name: Verify the entire locked matrix for this exact commit
-        if: needs.scope.outputs.required == 'true'
+        if: needs.scope.outputs.cli == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
           SCOPE: ${{ needs.scope.result }}
