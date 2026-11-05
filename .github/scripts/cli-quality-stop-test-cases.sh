@@ -178,14 +178,36 @@ if [[ -z $problem && -e $file ]]; then problem="the record was kept"; fi
 report "4 the caller's own group is refused" "$problem"
 
 # 5. A pid below 2, or anything that is not a group id, is refused: a corrupt
-# record must never become a host-wide kill.
+# record must never become a host-wide kill. `kill` is shadowed for this case:
+# a stub first on PATH records its arguments and never signals, and BASH_ENV
+# disables the shell builtin so the script under test really resolves the stub.
+# A guard regression therefore cannot send SIGTERM to pid 1, to this script's
+# own group (record 0) or anywhere else on the host, while the case still
+# proves the refusal by exit status, log and an untouched record.
+mkdir -p "$work/stub"
+cat > "$work/stub/kill" <<'KILL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STOP_CASES_KILL_LOG"
+exit 0
+KILL
+cat > "$work/stub/disable-kill-builtin" <<'ENV'
+enable -n kill
+ENV
+chmod +x "$work/stub/kill"
+kill_calls=$work/kill-calls
 problem=''
 for record in 1 0 -5 garbage '12 13' ''; do
 	file=$work/refused.pgid
 	printf '%s\n' "$record" > "$file"
-	stop "$file"
+	rm -f "$kill_calls"
+	if log=$(PATH="$work/stub:$PATH" BASH_ENV=$work/stub/disable-kill-builtin STOP_CASES_KILL_LOG=$kill_calls "$script" "$file" 2>&1); then
+		status=0
+	else
+		status=$?
+	fi
 	if ((status != 1)); then problem=${problem:+$problem; }"record '$record': exit status $status, want 1"; fi
 	if [[ $log != *"refusing to kill process group"* ]]; then problem=${problem:+$problem; }"record '$record': the log does not report the refusal"; fi
+	if [[ -s $kill_calls ]]; then problem=${problem:+$problem; }"record '$record': the script signalled: $(<"$kill_calls")"; fi
 	if [[ -e $file ]]; then problem=${problem:+$problem; }"record '$record': the record was kept"; fi
 done
 report '5 pid 1, 0 and garbage records are refused' "$problem"
@@ -246,9 +268,12 @@ mutant() {
 }
 
 if [[ ${STOP_CASES_MUTANTS:-1} == 1 ]]; then
-	mutant 'host-wide kill by process name' \
+	# The pattern is derived from this run's record file, i.e. its own $work
+	# directory: a host-global pkill -f 'stop-cases-' would also kill the
+	# fixtures of a concurrent instance of these cases.
+	mutant 'kill by process name instead of the recorded group' \
 		'kill -TERM -- "-$pgid" 2>/dev/null || true' \
-		"pkill -TERM -f 'stop-cases-' 2>/dev/null || true" \
+		'pkill -TERM -f "${file%/*}/stop-cases-" 2>/dev/null || true' \
 		'^FAIL 3 '
 	mutant 'SIGKILL escalation removed' \
 		'kill -KILL -- "-$pgid" 2>/dev/null || true' \
