@@ -12,7 +12,7 @@
 | 新增或修改功能、排障、拆分任务、记录交付 | [docs/workflow/issue.md](docs/workflow/issue.md) |
 | 暂存、提交、准备 PR、汇总 Issue 验收 | [docs/workflow/pr.md](docs/workflow/pr.md) |
 | 新增或迁移文档、命名路线、解决文档冲突 | [docs/guide/documentation.md](docs/guide/documentation.md) |
-| 部署与值守 Web：镜像与 Compose 参考部署、首次管理员、TLS 与反向代理、KEK、备份与恢复 API 操作、升级回滚、故障处理、内网实测记录 | [docs/guide/operations.md](docs/guide/operations.md) |
+| 部署与值守 Web：镜像与 Compose 参考部署、首次管理员、TLS 与反向代理、KEK、备份与恢复 API 操作、升级回滚、故障处理、自有 FTP/FTPS 服务器自测清单 | [docs/guide/operations.md](docs/guide/operations.md) |
 
 所有任务先读产品路线与适用 guide；涉及功能变更时先落实对应 GitHub Issue，再按 Issue/PR 流程推进。纯文档整理按文档规范和对应流程检查。未决方案与未验证内容保持明确状态；运维说明只描述仓库中真实存在的入口，不代替验收结论。
 
