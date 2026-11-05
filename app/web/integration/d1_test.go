@@ -276,7 +276,7 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 	fixture := &d1Fixture{
 		t: t, root: root, source: source, dirty: dirty, saw: map[string]bool{},
 		containers: map[string]string{},
-		project:    "d1" + strconv.FormatInt(time.Now().UnixNano(), 16),
+		project:    d1Project(),
 		candidate:  "intern:" + d1Tag(source, dirty) + "-mysql8.4",
 	}
 	fixture.upgrade = strings.ReplaceAll(fixture.candidate, "-mysql8.4", "-upgrade-mysql8.4")
@@ -353,6 +353,21 @@ func d1Tag(source string, dirty bool) string {
 	return source[:12]
 }
 
+// d1Project names the Compose project. On a GitHub runner the name starts with
+// d1 and the first 8 hex digits of sha256(RUNNER_NAME), so that
+// .github/scripts/d1-compose-clean.sh can find the stacks this runner's jobs
+// left behind: a cancelled job ends this process without running t.Cleanup.
+// Elsewhere the name is d1 and the start time. Both are d1 plus hex digits, the
+// shape the D1 evidence gate pins.
+func d1Project() string {
+	prefix := "d1"
+	if runner := os.Getenv("RUNNER_NAME"); runner != "" && os.Getenv("GITHUB_ACTIONS") == "true" {
+		sum := sha256.Sum256([]byte(runner))
+		prefix += hex.EncodeToString(sum[:4])
+	}
+	return prefix + strconv.FormatInt(time.Now().UnixNano(), 16)
+}
+
 // writeOverride is the only test-side Compose document. It publishes loopback
 // ports, sizes MySQL for the CI machine, and binds the refusal fixtures
 // read-only; it declares no deployment semantics of its own.
@@ -379,7 +394,9 @@ func (f *d1Fixture) writeOverride() error {
 }
 
 // teardown removes the stack, its one-off containers and every named volume it
-// created, so a failed run never leaves a locked metadata volume behind.
+// created, so a failed run never leaves a locked metadata volume behind. A run
+// that is killed never gets here; the job runs .github/scripts/d1-compose-clean.sh
+// before and after the test for that case.
 func (f *d1Fixture) teardown(ctx context.Context) {
 	if f.override == "" {
 		return
