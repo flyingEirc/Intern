@@ -39,6 +39,16 @@ for tool in git jq curl tar sha256sum timeout; do
 	command -v "$tool" >/dev/null 2>&1 || need "$tool is not installed"
 done
 
+# The container-mysql test step starts `go test | tee` in a session and process
+# group of its own through setsid, and the stop step and its cases read live
+# process groups with ps (procps).
+if ! command -v setsid >/dev/null 2>&1; then
+	need 'setsid is not installed (util-linux): the container-mysql test step starts its test pipeline in a session and process group with it'
+fi
+if ! command -v ps >/dev/null 2>&1; then
+	need 'ps is not installed (procps): the container-mysql stop step and its cases find the recorded process group with it'
+fi
+
 if ((want_cc)) && ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
 	need 'no C compiler (cc or gcc): go test -race needs cgo; install build-essential'
 fi
