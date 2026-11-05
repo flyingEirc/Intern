@@ -17,7 +17,7 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 | 压缩与加密 | 可配置 Zstandard 压缩和 Tink AES-128-GCM 认证加密，密钥独立保存。 |
 | 配置与自动化 | YAML、环境变量、命令行 flags；结果以 JSON 输出，状态与目录索引存入本地 SQLite。 |
 
-已有验证记录覆盖 macOS arm64、MySQL 与官方客户端 9.7.1 下的真实原生进程备份恢复。该记录不代表所有版本、平台或生产环境已验收；详见 [路线第 14 节](docs/roadmap/数据库备份与恢复-2026-10-17.md)。真实容器矩阵和持续质量门禁现由 [收尾与验收 #1](https://github.com/flyingEirc/Intern/issues/1) 及其子任务跟踪，是否通过以对应提交与实际 CI 证据为准。
+已有验证记录覆盖 macOS arm64、MySQL 与官方客户端 9.7.1 下的真实原生进程备份恢复。该记录不代表所有版本、平台或生产环境已验收；详见 [路线第 14 节](docs/roadmap/数据库备份与恢复-2026-10-17.md)。真实容器矩阵已在 Linux amd64 的 GitHub Actions 自托管 runner 上，对 MySQL 9.7.1 与 8.4.11 两个锁定配置各 14 个场景通过：`main` `2a2040d` 的 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890)，门禁加固分支 `c5ebc93` 第 2 次尝试的 [run 41907540485](https://github.com/flyingEirc/Intern/actions/runs/41907540485)。这是该矩阵与平台的证据，仍不外推到其他版本、平台或生产环境；剩余项与逐 Issue 结论见 [收尾与验收 #1](https://github.com/flyingEirc/Intern/issues/1) 及 #2–#4。
 
 **Web 后端能力（阶段 B–D 已原生验收并合入 `main`；无前端）**
 
