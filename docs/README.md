@@ -5,14 +5,14 @@
 | 目录 / 文档 | 内容与阅读时机 |
 | --- | --- |
 | [roadmap/Web优先与多应用架构-2026-10-17.md](roadmap/Web优先与多应用架构-2026-10-17.md) | 当前总路线：Web 优先、CLI 暂停扩展、app/internal 目录和 Web 推进阶段。所有开发先阅读。 |
-| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B、C、D 均已原生验收并合入 main：C 的子任务 #27–#32（P2、S1、P3、R1、W3、W4，验收 C-A1–C-A5），D 的 P4 #36 与 W5 #37（含仅从 FTP 副本的实际恢复与 prepare、导出由新 MySQL 8.4.11 容器启动）。阶段 E（[#15](https://github.com/flyingEirc/Intern/issues/15)：D1 #41 镜像与 Compose、S2 #42 FTPS、V1 #43 内网实测、G #44 门禁与运维说明）在 `feat/web-stage-e` 上的候选 `9489f6c` 已验收 D1、S2 与 G（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)，14 个 job 全绿），并已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 main（merge `2a2040d`）；后续修正经 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收后走后续 PR；V1 内网实测仍 BLOCKED。实施 Web 任何子任务前阅读。 |
+| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B、C、D 均已原生验收并合入 main：C 的子任务 #27–#32（P2、S1、P3、R1、W3、W4，验收 C-A1–C-A5），D 的 P4 #36 与 W5 #37（含仅从 FTP 副本的实际恢复与 prepare、导出由新 MySQL 8.4.11 容器启动）。阶段 E（[#15](https://github.com/flyingEirc/Intern/issues/15)）的 D1 #41、S2 #42 与 G #44 已在候选 `9489f6c` 验收（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)，14 个 job 全绿）并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 main（merge `2a2040d`）；V1 #43 内网实测于 2026-11-05 取消，FTP/FTPS 由每次 push 的固定 Pure-FTPd 1.0.54 容器 CI 覆盖，阶段 E 已关闭。前端 F #19 暂缓，Web 首版与物理 PITR 未交付。实施 Web 任何子任务前阅读。 |
 | [roadmap/数据库备份与恢复-2026-10-17.md](roadmap/数据库备份与恢复-2026-10-17.md) | 备份恢复详细方案：范围、选型、逻辑/物理设计、CLI 基线和历史验证；开发顺序与当前应用职责以 Web 优先总路线为准。 |
 | [workflow/issue.md](workflow/issue.md) | 以 GitHub Issue 跟踪背景、功能、步骤、验收、交付；含 harness/模型和 UI/UX 证据要求。开始或调整任务时阅读。 |
 | [workflow/pr.md](workflow/pr.md) | 小功能提交、提交前检查、PR 的关联 Issue 与逐项验收汇总。提交或提 PR 前阅读。 |
 | [guide/development.md](guide/development.md) | 模块职责、组件复用、实现和安全约束、工作区协作、开发命令。修改代码时阅读。 |
 | [guide/quality.md](guide/quality.md) | 本地与 CI 检查范围、真实组件门禁、证据和支持声明边界。测试与验收时阅读。 |
 | [guide/documentation.md](guide/documentation.md) | 文档职责、路线命名、变更与冲突处理、链接和文档交付检查。修改文档时阅读。 |
-| [guide/operations.md](guide/operations.md) | 运维使用说明：镜像与 Compose 参考部署、首次管理员、TLS 与反向代理、KEK、备份与恢复的 API 操作、状态与 SSE、升级回滚、故障处理、限制与支持矩阵、内网实测记录字段。部署或值守时阅读；只描述仓库里存在的入口，不代替验收结论。 |
+| [guide/operations.md](guide/operations.md) | 运维使用说明：镜像与 Compose 参考部署、首次管理员、TLS 与反向代理、KEK、备份与恢复的 API 操作、状态与 SSE、升级回滚、故障处理、限制与支持矩阵、自有 FTP/FTPS 服务器自测清单。部署或值守时阅读；只描述仓库里存在的入口，不代替验收结论。 |
 
 ## 维护分工
 

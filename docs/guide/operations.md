@@ -12,11 +12,11 @@
 | 已原生验收 | 该组件组合在 Linux amd64 真实容器 CI 通过：**MySQL 8.4.11 + Percona XtraBackup 8.4.0-7 + Pure-FTPd 1.0.54**（阶段 D 与阶段 E 的 D1/S2 记录，见总路线第 5 节 2026-10-29 与 2026-11-05 条目；矩阵本身仍是 `candidate`，未改为 verified）。 |
 | 未验证 | 本轮没有证据，不得当作支持声明。 |
 
-阶段 E 当前状态（父 Issue [#15](https://github.com/flyingEirc/Intern/issues/15)；子 Issue：[D1 #41](https://github.com/flyingEirc/Intern/issues/41) 镜像与部署验收、[S2 #42](https://github.com/flyingEirc/Intern/issues/42) FTPS、[V1 #43](https://github.com/flyingEirc/Intern/issues/43) 内网实测、[G #44](https://github.com/flyingEirc/Intern/issues/44) 门禁与本文）：阶段 E 的候选提交 `9489f6c` 已在 `feat/web-stage-e` 上原生验收，GitHub Actions [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)（2026-11-04，自托管 runner，14 个 job 全绿，约 48 分钟）同时覆盖 D1、S2 与 G。D1 先在 `9e05e52` 由 CircleCI 流水线 `71202872` 验收（历史记录），再在 `9489f6c` 重新确认，包含 `ed794d2` 的健康检查修复；S2 在 `container-ftps` 用真实 Pure-FTPd 1.0.54 TLS 夹具通过显式与隐式两种模式，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都发生在发送凭据之前，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11`，独立快照一致；G 的候选制品门禁与 `contract-openapi` 契约制品（`info.version` 0.3.0，附 SHA-256）也在同一次运行产出。`9489f6c` 已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 于 2026-11-04 合入 main（merge `2a2040d`），main 上的 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890) 14 个 job 全绿；其后的 F3（FTPS 问候语归类）、范围判定用例、D1 Compose 清理与本文档同步在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收（14 个 job 全绿），经后续 PR 合入 main。阶段 E [#15](https://github.com/flyingEirc/Intern/issues/15) 仍因 V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）保持开启。**验收结论以对应候选提交的运行证据与 Issue 记录为准**，本文不代替它。凡引用 `app/web/integration/d1_test.go` 的行为，都是上述 D1 验收执行的用例断言；引用 S2 用例的行为同样已由 `9489f6c` 的运行执行；能直接对照代码或配置文件的部分另行标注。明确**未交付**：
+阶段 E 状态（父 Issue [#15](https://github.com/flyingEirc/Intern/issues/15)；子 Issue：[D1 #41](https://github.com/flyingEirc/Intern/issues/41) 镜像与部署验收、[S2 #42](https://github.com/flyingEirc/Intern/issues/42) FTPS、[V1 #43](https://github.com/flyingEirc/Intern/issues/43) 内网实测（已取消）、[G #44](https://github.com/flyingEirc/Intern/issues/44) 门禁与本文）：阶段 E 的候选提交 `9489f6c` 已在 `feat/web-stage-e` 上原生验收，GitHub Actions [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)（2026-11-04，自托管 runner，14 个 job 全绿，约 48 分钟）同时覆盖 D1、S2 与 G。D1 先在 `9e05e52` 由 CircleCI 流水线 `71202872` 验收（历史记录），再在 `9489f6c` 重新确认，包含 `ed794d2` 的健康检查修复；S2 在 `container-ftps` 用真实 Pure-FTPd 1.0.54 TLS 夹具通过显式与隐式两种模式，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都发生在发送凭据之前，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11`，独立快照一致；G 的候选制品门禁与 `contract-openapi` 契约制品（`info.version` 0.3.0，附 SHA-256）也在同一次运行产出。`9489f6c` 已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 于 2026-11-04 合入 main（merge `2a2040d`），main 上的 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890) 14 个 job 全绿；其后的 F3（FTPS 问候语归类）、范围判定用例、D1 Compose 清理与本文档同步在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收（14 个 job 全绿），经后续 PR 合入 main。V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）于 2026-11-05 由用户取消，阶段 E [#15](https://github.com/flyingEirc/Intern/issues/15) 因此关闭；最新 main 证据是 merge `7355766` 的 push [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492) 14/14 job 全绿（含 `container-ftp`、`container-replication`、`container-restore`、`container-restore-api`、`container-ftps`、`container-deploy` 与 `quality-gate`；自托管 runner `JackVance`，linux/amd64）。**验收结论以对应候选提交的运行证据与 Issue 记录为准**，本文不代替它。凡引用 `app/web/integration/d1_test.go` 的行为，都是上述 D1 验收执行的用例断言；引用 S2 用例的行为同样已由 `9489f6c` 的运行执行；能直接对照代码或配置文件的部分另行标注。明确**未交付**：
 
-- V1 用户内网 FTP 实测：BLOCKED，等待用户提供运维 FTP 服务器信息（地址/端口/账号/可写目录/是否 FTPS）。第 12 节给出实测要记录的字段。
+- V1 用户内网 FTP 实测：已于 2026-11-05 由用户取消，本项目不再获取第三方或内网服务器证据；FTP/FTPS 由每次 push 的真实容器 CI（固定 Pure-FTPd 1.0.54 夹具）覆盖，运维须按第 12 节自测自有服务器。
 - 前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）：暂缓，无 UI；本文所有操作都是命令行与 API。
-- binlog 归档与完整物理 PITR（N1）、镜像仓库公开发布、自动保留策略（N2）、K8s / Helm 与执行 agent（N3）、FTPS 的内网实测。
+- binlog 归档与完整物理 PITR（N1）、镜像仓库公开发布、自动保留策略（N2）、K8s / Helm 与执行 agent（N3）。
 - 公开镜像发布：CI 只构建私有候选制品；镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt` 与 `GPL-SOURCE-OFFER.txt` 都明确：外部分发前必须完成对应源码提供安排，本仓库未宣称已完成。
 
 ## 1. 前置条件
@@ -380,11 +380,11 @@ sha256sum bin/intern-web
 | 任何 `/api/v1` 请求 | `401 unauthorized` | 没有会话、会话过期（默认 30 分钟空闲 / 12 小时绝对）、改密或管理员吊销后失效。重新 `POST /api/v1/auth/login` 并复用同一个 cookie jar；`GET /api/v1/auth/session` 可确认当前身份与有效权限。 |
 | 某个具体操作 | `403 forbidden` | 角色权限不足（三角色与每项权限见 `app/web/api/openapi.yaml`），或该路由本就限 admin（仓库探测、用户管理、恢复执行与取消）。写拒绝审计；不是重试信号，换角色或换人。 |
 
-## 12. V1 内网实测记录手册
+## 12. 自有 FTP/FTPS 服务器自测（原 V1）
 
-V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）当前 **BLOCKED**：等待用户提供内网运维 FTP 服务器信息。这一节是执行时要填的字段清单，不是结果——**现在没有任何内网实测证据**。执行前提：D1 部署验收已通过、R1 复制与 P4 恢复可用；V1-A2（同服务器 FTPS 实测）的前提 S2 已验收，缺的是同一台用户服务器。
+原 V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）计划对用户的运维 FTP 服务器做内网实测，2026-11-05 由用户取消：本项目**没有**、也不再获取第三方或内网 FTP 服务器上的实测证据。仓库里可复现的 FTP/FTPS 证据只有每次 push 的真实容器 CI 使用的固定夹具：`container-ftp`（Pure-FTPd 1.0.54，19 个明文场景）、`container-replication`（全量 + 两次增量的复制与回读）、`container-restore` / `container-restore-api`（从仅 FTP 副本恢复增量 1、2）、`container-ftps`（显式/隐式 FTPS、四类凭据前拒绝）。服务器软件与版本、被动模式/NAT、带宽与耗时都随环境而异，**运维必须用本节清单自测自己的服务器**，结果留在自己的记录里；未自测前不得把它当作已验证。
 
-每次实测在 Issue 里记录下列字段，全部脱敏（不上传密码、KEK、私钥、完整 SQL dump/raw binlog，也不上传含 secret 的 `docker inspect`；参照[质量规范](quality.md)的证据要求）：
+自测时按下表记录字段，全部脱敏（不上传密码、KEK、私钥、完整 SQL dump/raw binlog，也不上传含 secret 的 `docker inspect`；参照[质量规范](quality.md)的证据要求）：
 
 | 组 | 要记录的字段 |
 | --- | --- |
@@ -394,11 +394,11 @@ V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）当前 **BLOCKED**�
 | 带宽 | 测量方法与数值：宿主机到服务器的上行/下行 Mbps（同一窗口内采样），以及同窗口内一次已知大小传输的用时；注明是否与其他流量共享 |
 | 耗时 | 全量、增量 1、增量 2 各自的：run 时长、载荷字节、`payload_sha256`；每次复制到 FTP 的排队→`uploaded`→`verified` 三段耗时与重试次数；从 FTP 副本恢复的：计划用时、解包、prepare、导出发布、总时长 |
 | 结果 | 每步的 `run_id` / `backup_id` / `restore_id`、`status`、`error_class`、`error_code`、`GET /api/v1/sources/{id}/protection` 的 local 与 remote 两个点、副本 `status` 序列 |
-| 一致性 | FTP 副本来源恢复后由新 mysql 容器启动读取的独立快照与期望快照的比对结果（V1-A1 要求从 FTP 副本完成一次恢复） |
+| 一致性 | FTP 副本来源恢复后由新 mysql 容器启动读取的独立快照与期望快照的比对结果（至少完成一次仅从 FTP/FTPS 副本的恢复） |
 | 脱敏输出 | 命令、API 响应、`docker compose ps` 与日志片段的白名单版本（去掉秘密与可定位地址） |
-| 结论 | 成功/失败/阻塞/未执行，逐项对应 V1-A1、V1-A2；失败时给出最小复现步骤 |
+| 结论 | 成功/失败/未执行，分别对应明文与 FTPS 路径；失败时给出最小复现步骤 |
 
-V1-A1 的最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复制与回读认证，并**从 FTP 副本完成一次恢复**（删掉本地载荷，只从副本恢复）。V1-A2 在同一服务器、S2 通过后重复 FTPS（显式与隐式）路径。在这些问题得到真实证据之前，内网 FTP/FTPS 的表现只能标注为**未验证**。
+最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复制与回读认证，并**从副本完成一次恢复**（删掉本地载荷，只从副本恢复）；同一服务器再重复 FTPS（显式与隐式）路径。任一项没有在本服务器上的真实结果时，只能标注为**未验证**。
 
 ## 13. 限制与支持矩阵
 
@@ -407,8 +407,9 @@ V1-A1 的最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复�
 - **PITR**：首版只有物理全量 + 页增量链的**检查点恢复**；binlog 归档与完整物理 PITR 属 N1，未交付，不得宣称。
 - **仓库后端**：只有本地仓库 + FTP/FTPS 副本；S3/SFTP 未实现。自动保留清理属 N2（未交付），当前保留是手动判定，未 verified 的副本不会被删除。
 - **单所有者**：单实例 SQLite + 单调度所有者；多个 Web 用户不等于多副本调度或高可用；MySQL 与 Intern 不同宿主机、K8s/Helm、跨主机 agent 属 N3，未实现。
-- **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约已实现并在候选 `9489f6c` 验收：最低 TLS 1.2、控制与数据通道都加密（数据通道在传输命令发出后握手）、拒绝降级、校验不受信任 CA/主机名/过期，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都在发送凭据之前。`tls_negotiation` 只表示 TLS 握手失败或服务器拒绝 AUTH TLS；问候语里的拒绝（如 `421 Too many users`，显式模式下在 AUTH 之前、隐式模式下在握手之后）按普通 FTP 回复归类为 `reply` 并保留 `reply_code`，该归类在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验证。GitHub Actions 的 `container-ftps` job（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)）用真实 Pure-FTPd 1.0.54 TLS 夹具跑 `TestS2NativeContainers`（`.github/scripts/verify-s2-evidence.sh` 门禁），显式与隐式两种模式都通过，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11` 比对一致。**内网 FTPS 实测仍未执行（V1-A2，未验证）**：用户服务器上的组合没有证据，不能用夹具结果外推。
-- **明文 FTP**：凭据明文过网，响应里 `plaintext_credentials: true` 常驻标注；只在受控内网按 V1 计划使用。
+- **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约已实现并在候选 `9489f6c` 验收：最低 TLS 1.2、控制与数据通道都加密（数据通道在传输命令发出后握手）、拒绝降级、校验不受信任 CA/主机名/过期，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都在发送凭据之前。`tls_negotiation` 只表示 TLS 握手失败或服务器拒绝 AUTH TLS；问候语里的拒绝（如 `421 Too many users`，显式模式在 AUTH 之前、隐式模式在握手之后）按普通 FTP 回复归类为 `reply` 并保留 `reply_code`（`c68dee4` 的 run 41876148900）。`container-ftps` 用真实 Pure-FTPd 1.0.54 夹具跑显式与隐式，并从仅 FTPS 副本恢复增量 1、2（run 41859225449）。**内网 FTPS（V1-A2）随 V1 于 2026-11-05 取消，未验证**，不能用夹具结果外推。
+- **明文 FTP**：凭据明文过网，响应里 `plaintext_credentials: true` 常驻标注；只在受控内网使用，且服务器行为须由运维按第 12 节自测。
+- **非夹具 FTP/FTPS 服务器**：FTP/FTPS 证据仅来自固定 Pure-FTPd 1.0.54 夹具；其他服务器软件/版本、被动模式/NAT 后端、带宽与耗时**没有证据**，V1 内网实测已于 2026-11-05 取消，不得把夹具结果外推为任意服务器已验证。
 - **磁盘与明文工作文件**：备份与恢复会在受控目录产生受保护的明文工作文件（`work`、`.pending-*` 导出、解包目录），需要独立磁盘权限治理；恢复认证暂存由清理账本负责，不承诺完全无明文落盘。
 - **镜像许可**：镜像携带 MySQL 与 PXB 二进制属于 GPLv2 分发行为，另含 PXB 私有库目录与 `libprocps.so.8`（LGPL）以及 `intern-web` 静态链接的 Go 模块；CI 只构建私有候选、未公开发布，外部分发前必须完成对应源码提供安排。逐项文本与来源见镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt`、`VERSIONS.txt` 与 `go-internals/GO-MODULES.txt`（`app/web/deploy/licenses/`）。
 
