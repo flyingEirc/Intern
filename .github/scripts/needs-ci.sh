@@ -23,8 +23,9 @@
 #
 # The case list, in order of precedence: .github/** is the CI's own files and
 # never needs a run; paths under the business directories and the pinned tool
-# and build inputs are business even when they end in *.md; any other *.md is
-# documentation; everything else is business.
+# and build inputs are business even when they end in *.md; a root go.* file is
+# business, matching GitHub's go.* which cannot match below the root; any other
+# *.md is documentation; everything else is business.
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
@@ -49,9 +50,22 @@ while IFS= read -r -d '' path; do
     case "$path" in
         .github/*)
             ;; # The CI's own workflow, scripts, self-tests and templates.
-        internal/*|app/*|go.*|Dockerfile|.dockerignore|THIRD_PARTY_NOTICES|mise.toml|.golangci.yml|.githooks/*)
+        internal/*|app/*|Dockerfile|.dockerignore|THIRD_PARTY_NOTICES|mise.toml|.golangci.yml|.githooks/*)
             printf '%s\n' "$path"
             exit 1 ;;
+        go.*)
+            # GitHub's go.* matches a root file only, while this case pattern
+            # also matches a path below a directory whose name starts with
+            # "go.". Keep the script root-only like the filter.
+            if [[ $path != */* ]]; then
+                printf '%s\n' "$path"
+                exit 1
+            fi
+            case "$path" in
+                *.md) ;; # go.d/x.md: not a root go.* input, so documentation.
+                *) printf '%s\n' "$path"; exit 1 ;;
+            esac
+            ;;
         *.md)
             ;; # Documentation outside the business directories.
         *)

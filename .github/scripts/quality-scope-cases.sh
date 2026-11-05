@@ -217,6 +217,13 @@ D1=$(commit ci .github/workflows/quality.yml .github/scripts/x.sh .github/pull_r
 scope push refs/heads/ci "$zero" "$D1"
 expect '12c branch changing only .github files' false 'no business change \(documentation or CI files only\)'
 
+# 12d. CI files mixed with business code still need the heavy checks.
+fresh_repo ci-and-business
+git checkout -q -b ci-mixed
+D1=$(commit mixed .github/scripts/x.sh internal/a.go)
+scope push refs/heads/ci-mixed "$zero" "$D1"
+expect '12d branch with CI files and business code' true 'internal/a\.go needs CI'
+
 # 13. Only the branch's own changes count: main moving on does not force a run.
 fresh_repo main-moves
 git checkout -q -b docs

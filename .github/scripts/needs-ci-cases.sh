@@ -191,7 +191,8 @@ head=$(commit notes go.md)
 classify "$base" "$head"
 expect 'root go.md needs CI' 1 'go.md'
 
-# 16. docs/go.md is documentation because go.* matches the root only.
+# 16. docs/go.md is documentation: the go.* arm is root-only (like GitHub's
+# go.*), so the *.md rule decides; 21f covers a path below a go.* directory.
 fresh_repo docs-go-md
 head=$(commit notes docs/go.md)
 classify "$base" "$head"
@@ -223,6 +224,53 @@ head=$(commit notes .github)
 classify "$base" "$head"
 expect 'a root file named .github needs CI' 1 '.github'
 
+# 21. CI files mixed with business code: the .github arm must not consume the
+# change, so the business path still needs CI.
+fresh_repo ci-and-business
+head=$(commit mixed .github/scripts/x.sh internal/z.go)
+classify "$base" "$head"
+expect 'CI files mixed with business code' 1 'internal/z.go'
+
+# 21b. CI Markdown mixed with Markdown below app/.
+fresh_repo ci-md-and-app-md
+head=$(commit mixed .github/notes.md app/web/notes.md)
+classify "$base" "$head"
+expect 'CI Markdown mixed with app Markdown' 1 'app/web/notes.md'
+
+# 21c. Markdown below app/ needs CI even as the only change.
+fresh_repo app-md
+head=$(commit notes app/web/notes.md)
+classify "$base" "$head"
+expect 'app/web/notes.md needs CI' 1 'app/web/notes.md'
+
+# 21d. Non-ASCII paths survive the -z diff unchanged: without it git quotes the
+# path, which would be judged business and printed escaped.
+fresh_repo non-ascii
+head=$(commit docs 'docs/数据库.md')
+classify "$base" "$head"
+expect 'non-ASCII documentation' 0 "needs-ci: $base..$head: no business change (documentation or CI files only)"
+head=$(commit notes 'internal/数据库.md')
+classify "$head~1" "$head"
+expect 'non-ASCII business path' 1 'internal/数据库.md'
+
+# 21e. A failed diff is unusable input, never a no-business verdict.
+fresh_repo broken-tree
+head=$(commit notes docs/b.md)
+tree=$(git rev-parse "${head}^{tree}")
+rm -f ".git/objects/${tree:0:2}/${tree:2}"
+classify "$base" "$head"
+expect_unusable 'missing tree object (git diff fails)'
+
+# 21f. A path below a go.* directory: GitHub's go.* matches the root only, so
+# go.d/x.md is documentation and go.d/x.txt falls through to business.
+fresh_repo go-dir
+head=$(commit notes go.d/x.md)
+classify "$base" "$head"
+expect 'go.d/x.md is documentation' 0 "needs-ci: $base..$head: no business change (documentation or CI files only)"
+head=$(commit notes go.d/x.txt)
+classify "$head~1" "$head"
+expect 'go.d/x.txt needs CI' 1 'go.d/x.txt'
+
 # The on.push.paths list that mirrors the case list, in workflow order:
 #   '**'            a push that changes anything ...
 #   '!**.md'        ... except Markdown, which needs-ci.sh calls documentation
@@ -230,8 +278,8 @@ expect 'a root file named .github needs CI' 1 '.github'
 #   'internal/**'   re-included: a *.md below a business path needs CI
 #   'app/**'
 #   '.githooks/**'
-#   'go.*'          re-included: go.* also matches a root go.md, which
-#                   needs-ci.sh judges as business before *.md
+#   'go.*'          re-included: it matches a root go.md, which needs-ci.sh
+#                   judges as business before *.md; both are root-only
 # Dockerfile, .dockerignore, THIRD_PARTY_NOTICES, mise.toml and .golangci.yml
 # cannot be *.md and are not under .github, so no entry is needed for them; a
 # *.md variant is documentation for both the script and the filter. Nothing may
