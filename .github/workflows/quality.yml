@@ -162,6 +162,12 @@ jobs:
       - name: CLI quality cleanup accept and reject cases
         timeout-minutes: 5
         run: .github/scripts/cli-quality-clean-cases.sh
+      # Self-test of the stop step below, with real process groups: proves it
+      # stops exactly the recorded group (SIGKILL for a child that ignores
+      # SIGTERM), leaves unrelated processes alone and refuses a corrupt record.
+      - name: CLI quality orphan test group stop cases
+        timeout-minutes: 5
+        run: .github/scripts/cli-quality-stop-test-cases.sh
       # Clear leftovers of an earlier cancelled job before starting new ones.
       - name: Remove CLI quality leftovers of earlier jobs
         timeout-minutes: 5
@@ -171,9 +177,32 @@ jobs:
           go-version: '1.27.0'
           cache: false
       - name: Real CLI and database container scenarios
+        env:
+          # Process group of the test pipeline, recorded by its leader for the
+          # stop step below. RUNNER_TEMP is per job.
+          INTERN_TEST_PGID_FILE: ${{ runner.temp }}/intern-cli-quality-test.pgid
         run: |
           mkdir -p "$INTERN_TEST_REPORT_DIR"
-          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          # setsid starts `go test | tee` in a session and process group of its
+          # own; the leader records that group id, and `wait` keeps this step's
+          # exit status and evidence exactly as before (pipefail: a failing
+          # go test fails the step even though tee succeeds). A cancelled step
+          # leaves the group running; the always() step below stops that group.
+          rm -f "$INTERN_TEST_PGID_FILE"
+          setsid --wait bash -eo pipefail -c '
+            printf "%s\n" "$$" > "$1"
+            go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          ' _ "$INTERN_TEST_PGID_FILE" &
+          wait $!
+      # A cancelled test step leaves its process group running: stop exactly
+      # that group before anything reads the evidence or the Docker resources.
+      # After a completed test its group has already exited, which is a no-op.
+      - name: Stop a test process group orphaned by a cancelled job
+        if: always()
+        timeout-minutes: 2
+        env:
+          INTERN_TEST_PGID_FILE: ${{ runner.temp }}/intern-cli-quality-test.pgid
+        run: .github/scripts/cli-quality-stop-test.sh "$INTERN_TEST_PGID_FILE"
       - name: Reject incomplete or skipped scenario evidence
         if: always()
         run: |
