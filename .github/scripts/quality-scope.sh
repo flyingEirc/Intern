@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Decides whether the heavy business and container jobs must run, and prints
-# the locked profile matrix. required=false means every path changed since the
-# base is documentation; anything else, and anything this script cannot prove,
-# is required=true.
+# the locked profile matrix. required=false means no path changed since the
+# base needs CI: all of them are documentation or the CI's own files;
+# anything else, and anything this script cannot prove, is required=true. The
+# classification itself, including its case list, is needs-ci.sh; this script
+# only picks the base and reports the verdict.
 #
 # The base depends on the ref, because the workflow's concurrency rule decides
 # whose verdict still stands:
@@ -13,8 +15,8 @@
 #   push to any other branch
 #       git merge-base origin/main HEAD, so the whole branch over main is
 #       judged. A newer push cancels the previous run (or follows its failure);
-#       judging only the delta would let a docs-only follow-up push pass a head
-#       whose code never had a completed matrix.
+#       judging only the delta would let a documentation/CI-only follow-up push
+#       pass a head whose code never had a completed matrix.
 #   tag, schedule, workflow_dispatch, any other event
 #       no base: always required=true.
 # A base that is missing or unusable (zero or unreachable before, no
@@ -22,6 +24,9 @@
 # logged; it never fails the job. The scope job checks out with fetch-depth 0,
 # which fetches every branch into refs/remotes/origin/*, so origin/main exists.
 set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+needs_ci=$here/needs-ci.sh
 
 main_ref=refs/remotes/origin/main
 
@@ -59,29 +64,20 @@ case "${EVENT_NAME}:${REF:-}" in
         ;;
 esac
 if [[ -n "$base" ]]; then
-    changes=$(mktemp)
-    trap 'rm -f "$changes"' EXIT
-    # --no-renames lists both sides of a rename; the default shows only the
-    # new name, which would hide a code file renamed to *.md.
-    if git diff --name-only --no-renames -z "$base" "$HEAD_SHA" -- > "$changes"; then
-        required=false
-        while IFS= read -r -d '' path; do
-            case "$path" in
-                internal/*|app/*|go.*|Dockerfile|.dockerignore|THIRD_PARTY_NOTICES|mise.toml|.golangci.yml|.githooks/*|.github/*)
-                    required=true; break ;;
-                *.md)
-                    ;; # Pure documentation is explicitly not a container-test pass.
-                *) required=true; break ;;
-            esac
-        done < "$changes"
-        if [[ $required == true ]]; then
-            why="${how} ${base}: $(printf '%q' "$path") is not documentation"
-        else
-            why="${how} ${base}: only documentation changed"
-        fi
-    else
-        why="no usable base, git diff ${base} ${HEAD_SHA} failed"
-    fi
+    status=0
+    detail=$("$needs_ci" "$base" "$HEAD_SHA") || status=$?
+    case $status in
+        0)
+            required=false
+            why="${how} ${base}: no business change (documentation or CI files only)"
+            ;;
+        1)
+            why="${how} ${base}: $(printf '%q' "$detail") needs CI"
+            ;;
+        *)
+            why="no usable base, git diff ${base} ${HEAD_SHA} failed"
+            ;;
+    esac
 fi
 matrix=$(jq -c '{profile: [.profiles[].id]}' app/cli/internal/qualitygate/contract.json)
 printf 'required=%s\nmatrix=%s\n' "$required" "$matrix" >> "$GITHUB_OUTPUT"

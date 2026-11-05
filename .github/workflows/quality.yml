@@ -11,18 +11,32 @@ name: Intern quality
 # the runner lacks.
 #
 # Triggers: push on every branch and tag, the nightly schedule on the default
-# branch, and workflow_dispatch. No pull_request trigger: with one serial runner
-# it would repeat every ~52-minute run for a same-repo PR branch push; the PR
-# head SHA's push run is the merge-gate evidence. Concurrency does not cancel
-# main runs (each merge commit needs its own green run) and cancels superseded
-# branch and tag runs. GitHub also emits a push event when a branch or tag is
-# deleted (a branch deletion's run is attached to the default branch); CircleCI
-# ran nothing on deletion. The scope and quality-gate jobs skip deleted events,
-# so a deletion neither starts a matrix nor produces a gate result. scope skips
-# the heavy jobs only for documentation-only changes: on main the push delta,
-# on other branches everything the branch has over main; never for tags,
-# schedule or workflow_dispatch (quality-scope.sh). quality-gate confirms that
-# outcome.
+# branch, and workflow_dispatch. Branch pushes are filtered with on.push.paths:
+# a push that changes only documentation or the CI's own files creates no run
+# at all, so it cannot queue a ~52-minute run behind the single serial runner.
+# CI validates business code, not its own scripts: a change confined to
+# .github/** (this workflow, the scripts, their self-tests, the templates)
+# never starts a run. Those scripts must pass their self-tests locally before
+# the push (docs/workflow/pr.md) and still execute in the next business run or
+# nightly, so a broken gate script is only exercised there. The filter mirrors
+# the case list of .github/scripts/needs-ci.sh (needs-ci-cases.sh fails when
+# they drift). GitHub does not evaluate path filters for pushes of tags, always
+# runs a push it cannot diff (>1,000 commits or a diff timeout) and sees only
+# the first 3,000 files of a larger diff, so scope keeps its own
+# classification as the backstop of every run that is created. A PR whose
+# trailing commits need no run is judged by the run of the newest commit that
+# has one (docs/workflow/pr.md). No pull_request trigger: with one serial
+# runner it would repeat every ~52-minute run for a same-repo PR branch push;
+# the PR head SHA's push run is the merge-gate evidence. Concurrency does not
+# cancel main runs (each merge commit needs its own green run) and cancels
+# superseded branch and tag runs. GitHub also emits a push event when a branch
+# or tag is deleted (a branch deletion's run is attached to the default
+# branch); CircleCI ran nothing on deletion. The scope and quality-gate jobs
+# skip deleted events, so a deletion neither starts a matrix nor produces a
+# gate result. scope skips the heavy jobs only when no changed path needs CI:
+# on main the push delta, on other branches everything the branch has over
+# main; never for tags, schedule or workflow_dispatch (quality-scope.sh).
+# quality-gate confirms that outcome.
 #
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
 # step; setup-go with cache: false (the runner keeps its module and build caches
@@ -30,6 +44,23 @@ name: Intern quality
 # because the first run on a runner pulls every pinned image and module cold.
 on:
   push:
+    # A push that changes only documentation or the CI's own files creates no
+    # run. The patterns mirror the case list of .github/scripts/needs-ci.sh:
+    # every path is in scope, Markdown is out, .github/** is out, and the
+    # business directories, the hook directory and the root go.* files are
+    # re-included because a *.md below them needs CI (go.* also matches a root
+    # go.md). Nothing re-includes .github/**, its Markdown included. A later
+    # positive pattern re-includes a path an earlier ! pattern excluded. Tags
+    # are not filtered: GitHub does not evaluate path filters for pushes of
+    # tags.
+    paths:
+      - '**'
+      - '!**.md'
+      - '!.github/**'
+      - 'internal/**'
+      - 'app/**'
+      - '.githooks/**'
+      - 'go.*'
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
@@ -113,6 +144,8 @@ jobs:
         run: .github/scripts/s2-gate-cases.sh
       - name: Candidate artifact gate accept and reject cases
         run: .github/scripts/candidate-artifact-cases.sh
+      - name: Needs-CI classification accept and reject cases
+        run: .github/scripts/needs-ci-cases.sh
       - name: Scope selection accept and reject cases
         run: .github/scripts/quality-scope-cases.sh
       - name: Publish the OpenAPI contract with its digest
@@ -565,7 +598,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Validate job outcomes and documentation-only scope
+      - name: Validate job outcomes and no-business-change scope
         env:
           SCOPE: ${{ needs.scope.result }}
           REQUIRED: ${{ needs.scope.outputs.required }}
@@ -585,7 +618,7 @@ jobs:
           test "$SCOPE" = success
           case "$REQUIRED" in
             true) test "$FAST" = success; test "$CONTAINERS" = success; test "$PHYSICAL" = success; test "$FTP" = success; test "$REPLICATION" = success; test "$WEB" = success; test "$DISPATCH" = success; test "$RESTORE" = success; test "$RESTORE_API" = success; test "$DEPLOY" = success; test "$FTPS" = success ;;
-            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; test "$RESTORE" = skipped; test "$RESTORE_API" = skipped; test "$DEPLOY" = skipped; test "$FTPS" = skipped; echo 'quality-gate: not-required (documentation-only)' ;;
+            false) test "$FAST" = skipped; test "$CONTAINERS" = skipped; test "$PHYSICAL" = skipped; test "$FTP" = skipped; test "$REPLICATION" = skipped; test "$WEB" = skipped; test "$DISPATCH" = skipped; test "$RESTORE" = skipped; test "$RESTORE_API" = skipped; test "$DEPLOY" = skipped; test "$FTPS" = skipped; echo 'quality-gate: not-required (no business change)' ;;
             *) echo 'quality-gate: invalid change classification' >&2; exit 1 ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
