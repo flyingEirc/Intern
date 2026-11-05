@@ -1,6 +1,7 @@
 package ftp
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/textproto"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	client "github.com/jlaffaye/ftp"
@@ -29,6 +31,9 @@ type session struct {
 	closeErr      error
 	once          sync.Once
 	controlDialed bool
+	// authAsked is set once the SDK has sent AUTH TLS on the explicit control
+	// channel; see authProbe.
+	authAsked atomic.Bool
 }
 
 type deadlineConn struct {
@@ -66,6 +71,27 @@ func (c *deadlineConn) Close() error {
 	return c.closeErr
 }
 
+// authCommand starts the explicit upgrade: the SDK writes it as its first
+// command once it has accepted the greeting.
+var authCommand = []byte("AUTH ")
+
+// authProbe is the explicit control channel until the SDK upgrades it. It
+// forwards every byte untouched and only records that AUTH went out. The SDK
+// reports a refused greeting and a refused AUTH TLS as the same
+// *textproto.Error, yet only the second is a server declining TLS, and whether
+// AUTH was sent is the one fact that tells them apart.
+type authProbe struct {
+	net.Conn
+	asked *atomic.Bool
+}
+
+func (p *authProbe) Write(b []byte) (int, error) {
+	if !p.asked.Load() && bytes.HasPrefix(b, authCommand) {
+		p.asked.Store(true)
+	}
+	return p.Conn.Write(b)
+}
+
 func (r *Repository) connect(ctx context.Context) (*session, error) {
 	r.mu.Lock()
 	if r.closed {
@@ -93,14 +119,11 @@ func (r *Repository) connect(ctx context.Context) (*session, error) {
 	if err == nil {
 		s.conn = conn
 		err = conn.Login(r.cfg.Username, r.cfg.Password)
-	} else if r.tlsConfig != nil {
+	} else if s.upgradeRefused(err) {
 		// AUTH TLS is the first command the SDK sends, before USER and PASS. A
 		// server that answers at all but refuses the upgrade therefore fails
 		// strictly before any credential left this process.
-		var reply *textproto.Error
-		if errors.As(err, &reply) {
-			err = errors.Join(err, ErrTLS)
-		}
+		err = errors.Join(err, ErrTLS)
 	}
 	if err != nil {
 		err = s.result(err)
@@ -128,11 +151,15 @@ func (s *session) dial(network, address string) (net.Conn, error) {
 	s.sockets[wrapped] = struct{}{}
 	s.mu.Unlock()
 	// The SDK upgrades the control channel itself after AUTH TLS, so explicit
-	// mode leaves that one connection alone. Every data channel, and both
-	// channels of an implicit server, are encrypted here: the library skips its
-	// own wrapping whenever a custom dial function is supplied.
-	if s.repo.tlsConfig == nil || (first && s.repo.cfg.TLSMode == TLSModeExplicit) {
+	// mode leaves that one connection alone apart from noting the command. Every
+	// data channel, and both channels of an implicit server, are encrypted here:
+	// the library skips its own wrapping whenever a custom dial function is
+	// supplied.
+	if s.repo.tlsConfig == nil {
 		return wrapped, nil
+	}
+	if first && s.repo.cfg.TLSMode == TLSModeExplicit {
+		return &authProbe{Conn: wrapped, asked: &s.authAsked}, nil
 	}
 	channel := tls.Client(wrapped, s.repo.tlsConfig)
 	if !first {
@@ -154,6 +181,16 @@ func (s *session) dial(network, address string) (net.Conn, error) {
 		return nil, errors.Join(err, ErrTLS, wrapped.Close())
 	}
 	return channel, nil
+}
+
+// upgradeRefused reports whether err is a server's answer to AUTH TLS, the only
+// reply that is a TLS refusal. A reply that arrived before AUTH was sent is the
+// greeting, and an implicit server's greeting always follows a completed
+// handshake: a refusal there (421 Too many users) is a plain FTP reply and
+// keeps the classification plaintext gives it.
+func (s *session) upgradeRefused(err error) bool {
+	var reply *textproto.Error
+	return s.authAsked.Load() && errors.As(err, &reply)
 }
 
 func (s *session) interrupt() {

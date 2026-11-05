@@ -3,9 +3,10 @@
 # repository, provides refs/remotes/origin/main the way actions/checkout with
 # fetch-depth 0 does, runs the script with the environment the scope job
 # passes, and compares the required output. The cases cover the base selection
-# of each ref kind, the unusable bases that must end in required=true with exit
-# status 0 and one logged reason, and the docs-only follow-up push that the push
-# delta used to pass for a head whose code never had a completed matrix.
+# of each ref kind, the unusable bases and the failed diff that must end in
+# required=true with exit status 0 and one logged reason, and the docs-only
+# follow-up push that the push delta used to pass for a head whose code never
+# had a completed matrix.
 #
 # SCOPE_SCRIPT and SCOPE_CONTRACT point the cases at another script or
 # contract.json than the ones next to this file.
@@ -69,10 +70,12 @@ scope() {
 	required=$(sed -n 's/^required=//p' "$out")
 }
 
-# expect NAME REQUIRED checks the last scope call: exit status 0, the wanted
-# required output and exactly one quality-scope line.
+# expect NAME REQUIRED [REASON] checks the last scope call: exit status 0, the
+# wanted required output, exactly one quality-scope line and, when REASON is
+# given, that the line matches it as a regular expression, so a case proves
+# which branch produced the verdict and not only the verdict.
 expect() {
-	local name=$1 want=$2 reasons problem=''
+	local name=$1 want=$2 pattern=${3:-} reasons problem=''
 	cases=$((cases + 1))
 	reasons=$(printf '%s\n' "$log" | grep -c '^quality-scope: ' || true)
 	if [[ $status -ne 0 ]]; then
@@ -81,6 +84,8 @@ expect() {
 		problem="required=${required:-<none>}, want $want"
 	elif [[ $reasons -ne 1 ]]; then
 		problem="$reasons quality-scope lines, want 1"
+	elif [[ -n $pattern && ! $(printf '%s\n' "$log" | grep '^quality-scope: ') =~ $pattern ]]; then
+		problem="the quality-scope line does not match: $pattern"
 	fi
 	if [[ -z $problem ]]; then
 		printf 'ok   %s: required=%s\n       %s\n' "$name" "$required" "$(printf '%s\n' "$log" | grep '^quality-scope: ')"
@@ -139,6 +144,12 @@ scope push refs/heads/main "$X" "$D1"
 expect '6a main force-push, before pruned from the clone' true
 scope push refs/heads/main "$missing" "$D1"
 expect '6b main push, before is not an object' true
+
+# 6c. A usable before and a head the diff cannot read: the base is accepted, then
+# git diff itself fails. That is the last unusable-base branch, and it must end
+# in a full run with exit status 0 like the others, never in required=false.
+scope push refs/heads/main "$C0" "$missing"
+expect '6c main push, valid before, git diff fails (head is not an object)' true 'no usable base, git diff .* failed'
 
 # 7. A branch push without origin/main cannot be judged: full run, no failure.
 fresh_repo no-origin-main

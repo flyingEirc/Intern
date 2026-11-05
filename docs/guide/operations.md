@@ -9,10 +9,10 @@
 | 标记 | 含义 |
 | --- | --- |
 | 已实现 | 代码在仓库中，可用 `read`/`grep` 对照；不等于已验收。 |
-| 已原生验收 | 该组件组合在 Linux amd64 真实容器 CI 通过：**MySQL 8.4.11 + Percona XtraBackup 8.4.0-7 + Pure-FTPd 1.0.54**（阶段 D 记录，见总路线第 5 节 2026-10-29 条目；矩阵本身仍是 `candidate`，未改为 verified）。 |
+| 已原生验收 | 该组件组合在 Linux amd64 真实容器 CI 通过：**MySQL 8.4.11 + Percona XtraBackup 8.4.0-7 + Pure-FTPd 1.0.54**（阶段 D 与阶段 E 的 D1/S2 记录，见总路线第 5 节 2026-10-29 与 2026-11-05 条目；矩阵本身仍是 `candidate`，未改为 verified）。 |
 | 未验证 | 本轮没有证据，不得当作支持声明。 |
 
-阶段 E 当前状态（父 Issue [#15](https://github.com/flyingEirc/Intern/issues/15)；子 Issue：[D1 #41](https://github.com/flyingEirc/Intern/issues/41) 镜像与部署验收、[S2 #42](https://github.com/flyingEirc/Intern/issues/42) FTPS、[V1 #43](https://github.com/flyingEirc/Intern/issues/43) 内网实测、[G #44](https://github.com/flyingEirc/Intern/issues/44) 门禁与本文）：D1 已在 `feat/web-stage-e` 的候选提交 `9e05e52` 上原生验收（CircleCI 流水线 `71202872`，`container-deploy` 与 `quality-gate` 全绿），尚未合入 main；FTPS（S2）与候选制品门禁（G）仍在该分支实施中。**验收结论以对应候选提交的 CircleCI 证据与 Issue 记录为准**，本文不代替它。凡引用 `app/web/integration/d1_test.go` 的行为，都是上述 D1 验收所执行的用例断言；引用 S2 用例的行为在 S2 验收前仍是候选断言；能直接对照代码或配置文件的部分另行标注。明确**未交付**：
+阶段 E 当前状态（父 Issue [#15](https://github.com/flyingEirc/Intern/issues/15)；子 Issue：[D1 #41](https://github.com/flyingEirc/Intern/issues/41) 镜像与部署验收、[S2 #42](https://github.com/flyingEirc/Intern/issues/42) FTPS、[V1 #43](https://github.com/flyingEirc/Intern/issues/43) 内网实测、[G #44](https://github.com/flyingEirc/Intern/issues/44) 门禁与本文）：阶段 E 的候选提交 `9489f6c` 已在 `feat/web-stage-e` 上原生验收，GitHub Actions [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)（2026-11-04，自托管 runner，14 个 job 全绿，约 48 分钟）同时覆盖 D1、S2 与 G。D1 先在 `9e05e52` 由 CircleCI 流水线 `71202872` 验收（历史记录），再在 `9489f6c` 重新确认，包含 `ed794d2` 的健康检查修复；S2 在 `container-ftps` 用真实 Pure-FTPd 1.0.54 TLS 夹具通过显式与隐式两种模式，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都发生在发送凭据之前，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11`，独立快照一致；G 的候选制品门禁与 `contract-openapi` 契约制品（`info.version` 0.3.0，附 SHA-256）也在同一次运行产出。`9489f6c` 已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 于 2026-11-04 合入 main（merge `2a2040d`），main 上的 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890) 14 个 job 全绿；其后的 F3（FTPS 问候语归类）、范围判定用例、D1 Compose 清理与本文档同步在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收（14 个 job 全绿），经后续 PR 合入 main。阶段 E [#15](https://github.com/flyingEirc/Intern/issues/15) 仍因 V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）保持开启。**验收结论以对应候选提交的运行证据与 Issue 记录为准**，本文不代替它。凡引用 `app/web/integration/d1_test.go` 的行为，都是上述 D1 验收执行的用例断言；引用 S2 用例的行为同样已由 `9489f6c` 的运行执行；能直接对照代码或配置文件的部分另行标注。明确**未交付**：
 
 - V1 用户内网 FTP 实测：BLOCKED，等待用户提供运维 FTP 服务器信息（地址/端口/账号/可写目录/是否 FTPS）。第 12 节给出实测要记录的字段。
 - 前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）：暂缓，无 UI；本文所有操作都是命令行与 API。
@@ -336,9 +336,9 @@ docker compose up -d intern
 docker compose exec -T intern intern-web migrate status   # 三个 *_pending 都为 0、current==latest 即 Ready
 ```
 
-回滚是对称操作：把 `INTERN_VERSION` 改回旧标签（旧镜像仍在宿主机上时 `docker compose build` 可跳过），再 `docker compose up -d intern`。**回滚的证据边界**：升级方向已由 D1 验收覆盖（同 Dockerfile 构建第二个不同 `SOURCE_SHA` 标签、替换后 `migrate status` 为 Ready、用户/资源/备份/恢复记录与 KEK 均保留、可继续增量且 parent 指向上一次头；候选 `9e05e52`），但升级后没有再做一次载荷恢复；**降级到更早的迁移版本没有任何证据**——若新版本已经前推 metadata 迁移，回滚旧镜像可能读到更高的 `current_version`，回滚前请先备份 `intern-metadata` 卷。
+回滚是对称操作：把 `INTERN_VERSION` 改回旧标签（旧镜像仍在宿主机上时 `docker compose build` 可跳过），再 `docker compose up -d intern`。**回滚的证据边界**：升级方向已由 D1 验收覆盖（同 Dockerfile 构建第二个不同 `SOURCE_SHA` 标签、替换后 `migrate status` 为 Ready、用户/资源/备份/恢复记录与 KEK 均保留、可继续增量且 parent 指向上一次头；候选 `9e05e52`，`9489f6c` 的运行再次通过），但升级后没有再做一次载荷恢复；**降级到更早的迁移版本没有任何证据**——若新版本已经前推 metadata 迁移，回滚旧镜像可能读到更高的 `current_version`，回滚前请先备份 `intern-metadata` 卷。
 
-`docker compose restart intern` 与 `docker compose up --force-recreate intern` 保留卷与 KEK 已由 D1 验收断言（候选 `9e05e52`）；数据只存在卷与 file secret 里、镜像层不含业务数据，这一点也可由 `compose.yaml` 的卷声明直接对照。同一 `intern-metadata` 卷上启动第二个容器会被独占锁拒绝：`metadata directory is already in use by another intern process`（`app/web/internal/store/files.go`），且不影响第一个容器（单实例 SQLite、单调度所有者）。
+`docker compose restart intern` 与 `docker compose up --force-recreate intern` 保留卷与 KEK 已由 D1 验收断言（候选 `9e05e52`，`9489f6c` 再次通过）；数据只存在卷与 file secret 里、镜像层不含业务数据，这一点也可由 `compose.yaml` 的卷声明直接对照。同一 `intern-metadata` 卷上启动第二个容器会被独占锁拒绝：`metadata directory is already in use by another intern process`（`app/web/internal/store/files.go`），且不影响第一个容器（单实例 SQLite、单调度所有者）。
 
 制品留痕（CI 的做法，运维需要自备候选制品时同样适用）：
 
@@ -348,7 +348,7 @@ docker save "intern:${INTERN_VERSION:-local}-mysql8.4" | sha256sum
 sha256sum bin/intern-web
 ```
 
-上述留痕正是门禁 G 要绑定的字段。`.github/workflows/quality.yml` 的 `container-deploy` job 跑 `TestD1NativeContainers`，导出 `INTERN_D1_ARTIFACT_DIR`，产出 `.cache/quality/deploy/candidate-artifact.json` 与 `events.jsonl`，再用 `actions/upload-artifact` 上传为 `deploy-d1-${{ github.sha }}` 制品；`.github/scripts/verify-d1-evidence.sh` 把镜像 ID / 标签 / `docker save` 摘要 / `intern-web` 摘要 / 源 SHA 与 `GITHUB_SHA` 绑定，`.github/scripts/verify-candidate-artifact.sh` 再打开 `candidate-artifact.json`，要求其中的身份与同一次运行日志一致、固定镜像与版本与 `internal/physical/compat.json` 一致；`d1-gate-cases.sh` 与 `candidate-artifact-cases.sh` 守住两个门禁不被悄悄放宽。quality-fast 把 `app/web/api/openapi.yaml`（`info.version` 0.3.0）连同 SHA-256 作为 `contract-openapi` 制品发布。D1 部分已在候选 `9e05e52` 验收；候选制品门禁与契约发布（[#44](https://github.com/flyingEirc/Intern/issues/44)）尚未验收，这些改动都**还没有合入 main**。**CI 只构建私有候选，没有公开发布镜像**；镜像内的 `/usr/share/licenses/intern/`（`NOTICE`、`VERSIONS.txt`、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本）是 GPL 材料，不等于源码提供安排已完成。
+上述留痕正是门禁 G 要绑定的字段。`.github/workflows/quality.yml` 的 `container-deploy` job 跑 `TestD1NativeContainers`，导出 `INTERN_D1_ARTIFACT_DIR`，产出 `.cache/quality/deploy/candidate-artifact.json` 与 `events.jsonl`，再用 `actions/upload-artifact` 上传为 `deploy-d1-${{ github.sha }}` 制品；`.github/scripts/verify-d1-evidence.sh` 把镜像 ID / 标签 / `docker save` 摘要 / `intern-web` 摘要 / 源 SHA 与 `GITHUB_SHA` 绑定，`.github/scripts/verify-candidate-artifact.sh` 再打开 `candidate-artifact.json`，要求其中的身份与同一次运行日志一致、固定镜像与版本与 `internal/physical/compat.json` 一致；`d1-gate-cases.sh` 与 `candidate-artifact-cases.sh` 守住两个门禁不被悄悄放宽。quality-fast 把 `app/web/api/openapi.yaml`（`info.version` 0.3.0）连同 SHA-256 作为 `contract-openapi` 制品发布。D1 先在候选 `9e05e52` 验收；`9489f6c` 的 [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449) 同时通过 D1、候选制品门禁与契约发布（[#44](https://github.com/flyingEirc/Intern/issues/44)），该次运行的 `candidate-artifact.json` 记录镜像 ID `sha256:781526c4…`，`contract-openapi` 记录 `info.version=0.3.0`、`sha256=a30145b3…489b`。这些改动已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 main（merge `2a2040d`，main 上 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890) 14 个 job 全绿）；之后的 F3、范围判定用例、D1 Compose 清理与文档同步在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收，经后续 PR 合入 main。**CI 只构建私有候选，没有公开发布镜像**；镜像内的 `/usr/share/licenses/intern/`（`NOTICE`、`VERSIONS.txt`、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本）是 GPL 材料，不等于源码提供安排已完成。
 
 ## 11. 故障处理
 
@@ -382,7 +382,7 @@ sha256sum bin/intern-web
 
 ## 12. V1 内网实测记录手册
 
-V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）当前 **BLOCKED**：等待用户提供内网运维 FTP 服务器信息。这一节是执行时要填的字段清单，不是结果——**现在没有任何内网实测证据**。执行前提：D1 部署验收通过、R1 复制与 P4 恢复可用；V1-A2（同服务器 FTPS 实测）还要等 S2 通过。
+V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）当前 **BLOCKED**：等待用户提供内网运维 FTP 服务器信息。这一节是执行时要填的字段清单，不是结果——**现在没有任何内网实测证据**。执行前提：D1 部署验收已通过、R1 复制与 P4 恢复可用；V1-A2（同服务器 FTPS 实测）的前提 S2 已验收，缺的是同一台用户服务器。
 
 每次实测在 Issue 里记录下列字段，全部脱敏（不上传密码、KEK、私钥、完整 SQL dump/raw binlog，也不上传含 secret 的 `docker inspect`；参照[质量规范](quality.md)的证据要求）：
 
@@ -403,11 +403,11 @@ V1-A1 的最小闭环：明文 FTP 完成**一次全量 + 两次增量**的复�
 ## 13. 限制与支持矩阵
 
 - **Web 首版未交付**：没有前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19) 暂缓），只有 API 与命令行；本文不构成首版交付声明。
-- **支持矩阵**：`internal/physical/compat.json` 只有一条记录 —— `mysql-community` 8.4.11 + PXB 8.4.0-7 + `linux/amd64`，`status: "candidate"`、`verified: false`，证据 Issue 是 [#27](https://github.com/flyingEirc/Intern/issues/27)。矩阵外版本、其他 MySQL 版本、arm64、云平台、TLS/最小权限的其他组合都**未验证**，未验证前不得列入已支持范围（[质量规范](quality.md)）。阶段 D 已用上述组件在真实容器中完成恢复与 prepare（已原生验收），阶段 E 的部署形态验收仍以 `container-deploy` 的证据为准。
+- **支持矩阵**：`internal/physical/compat.json` 只有一条记录 —— `mysql-community` 8.4.11 + PXB 8.4.0-7 + `linux/amd64`，`status: "candidate"`、`verified: false`，证据 Issue 是 [#27](https://github.com/flyingEirc/Intern/issues/27)。矩阵外版本、其他 MySQL 版本、arm64、云平台、TLS/最小权限的其他组合都**未验证**，未验证前不得列入已支持范围（[质量规范](quality.md)）。阶段 D 已用上述组件在真实容器中完成恢复与 prepare（已原生验收），阶段 E 的部署形态由 `container-deploy` 在候选 `9e05e52`（CircleCI 历史记录）与 `9489f6c`（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)）验收；矩阵本身未改。
 - **PITR**：首版只有物理全量 + 页增量链的**检查点恢复**；binlog 归档与完整物理 PITR 属 N1，未交付，不得宣称。
 - **仓库后端**：只有本地仓库 + FTP/FTPS 副本；S3/SFTP 未实现。自动保留清理属 N2（未交付），当前保留是手动判定，未 verified 的副本不会被删除。
 - **单所有者**：单实例 SQLite + 单调度所有者；多个 Web 用户不等于多副本调度或高可用；MySQL 与 Intern 不同宿主机、K8s/Helm、跨主机 agent 属 N3，未实现。
-- **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约在本分支实现中，最低 TLS 1.2、控制与数据通道都加密（数据通道在传输命令发出后握手）、拒绝降级、校验不受信任 CA/主机名/过期并在发送凭据前失败。CI 的 `container-ftps` job 用真实 Pure-FTPd 1.0.54 TLS 夹具跑 `TestS2NativeContainers`（`.github/scripts/verify-s2-evidence.sh` 门禁），但**该验收尚未通过，内网 FTPS 实测也未执行（均未验证）**；本节的可用性描述不等于已验收。
+- **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约已实现并在候选 `9489f6c` 验收：最低 TLS 1.2、控制与数据通道都加密（数据通道在传输命令发出后握手）、拒绝降级、校验不受信任 CA/主机名/过期，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都在发送凭据之前。`tls_negotiation` 只表示 TLS 握手失败或服务器拒绝 AUTH TLS；问候语里的拒绝（如 `421 Too many users`，显式模式下在 AUTH 之前、隐式模式下在握手之后）按普通 FTP 回复归类为 `reply` 并保留 `reply_code`，该归类在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验证。GitHub Actions 的 `container-ftps` job（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)）用真实 Pure-FTPd 1.0.54 TLS 夹具跑 `TestS2NativeContainers`（`.github/scripts/verify-s2-evidence.sh` 门禁），显式与隐式两种模式都通过，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11` 比对一致。**内网 FTPS 实测仍未执行（V1-A2，未验证）**：用户服务器上的组合没有证据，不能用夹具结果外推。
 - **明文 FTP**：凭据明文过网，响应里 `plaintext_credentials: true` 常驻标注；只在受控内网按 V1 计划使用。
 - **磁盘与明文工作文件**：备份与恢复会在受控目录产生受保护的明文工作文件（`work`、`.pending-*` 导出、解包目录），需要独立磁盘权限治理；恢复认证暂存由清理账本负责，不承诺完全无明文落盘。
 - **镜像许可**：镜像携带 MySQL 与 PXB 二进制属于 GPLv2 分发行为，另含 PXB 私有库目录与 `libprocps.so.8`（LGPL）以及 `intern-web` 静态链接的 Go 模块；CI 只构建私有候选、未公开发布，外部分发前必须完成对应源码提供安排。逐项文本与来源见镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt`、`VERSIONS.txt` 与 `go-internals/GO-MODULES.txt`（`app/web/deploy/licenses/`）。

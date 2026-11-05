@@ -2,6 +2,7 @@ package ftp
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -111,6 +112,11 @@ type fakeServer struct {
 	certificate tls.Certificate
 	implicit    bool
 	refuseTLS   bool
+	// refusal replaces the 530 line a refuseTLS server answers AUTH TLS with.
+	refusal string
+	// greeting replaces the 220 banner. An implicit server sends it over the
+	// completed handshake, every other server in the clear.
+	greeting string
 	// brokenUpgrade answers AUTH TLS with 234 and then stays in plaintext, the
 	// worst possible server: a client that kept going would leak credentials.
 	brokenUpgrade bool
@@ -147,7 +153,7 @@ func (s *fakeServer) serve(raw net.Conn) {
 	}
 	// A single-line greeting: textproto reads a "220-" banner as the start of a
 	// multi-line reply and would wait for its terminator.
-	if _, err := writer.WriteString("220 Fake Pure-FTPd ready\r\n"); err != nil {
+	if _, err := writer.WriteString(cmp.Or(s.greeting, "220 Fake Pure-FTPd ready") + "\r\n"); err != nil {
 		return
 	}
 	_ = writer.Flush()
@@ -184,7 +190,7 @@ func (s *fakeServer) answer(verb string, conn *net.Conn, writer **bufio.Writer) 
 // stream now runs over TLS and needs a fresh scanner.
 func (s *fakeServer) authTLS(conn *net.Conn, writer **bufio.Writer) (upgraded, ok bool) {
 	if s.refuseTLS {
-		return false, write(*writer, "530 Secured connections are disabled")
+		return false, write(*writer, cmp.Or(s.refusal, "530 Secured connections are disabled"))
 	}
 	if !write(*writer, "234 AUTH TLS successful") {
 		return false, false
@@ -343,6 +349,81 @@ func requireRefusedBeforeCredentials(t *testing.T, mode, bundle, kind string, co
 	}
 	if server.received("USER") || server.received("PASS") {
 		t.Fatal("credentials were transmitted after a TLS refusal")
+	}
+}
+
+// TestGreetingAndUpgradeRefusalsKeepTheirOwnKind pins what ErrTLS means: a TLS
+// handshake that failed, or a server that declined AUTH TLS, and nothing else. A
+// server that completes the handshake (implicit) or has not been asked to
+// upgrade yet (explicit) and then turns the session away in its greeting with
+// 421 Too many users has answered a plain FTP reply, so it is classified as
+// plaintext classifies it: kind reply, the server's code, no TLS identity. The
+// reverse holds as well: a reply to AUTH TLS is the server declining the
+// upgrade whatever its code, so an answer is judged by the exchange it belongs
+// to, never by its number.
+func TestGreetingAndUpgradeRefusalsKeepTheirOwnKind(t *testing.T) {
+	authority := newAuthority(t)
+	for _, testCase := range []struct {
+		name      string
+		mode      string
+		configure func(*fakeServer)
+		kind      string
+		asked     bool // the server must have been asked for AUTH TLS
+	}{
+		{"plain_greeting", TLSModePlain, func(s *fakeServer) {
+			s.greeting = "421 Too many users"
+		}, "reply", false},
+		{"explicit_greeting", TLSModeExplicit, func(s *fakeServer) {
+			s.greeting = "421 Too many users"
+		}, "reply", false},
+		{"implicit_greeting_after_handshake", TLSModeImplicit, func(s *fakeServer) {
+			s.implicit = true
+			s.greeting = "421 Too many users"
+		}, "reply", false},
+		{"explicit_upgrade_refused_with_the_greeting_code", TLSModeExplicit, func(s *fakeServer) {
+			s.refuseTLS = true
+			s.refusal = "421 Service not available"
+		}, "tls_negotiation", true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := startServer(t, func(s *fakeServer) {
+				s.certificate = authority.leaf(t, "127.0.0.1", true, time.Hour)
+				testCase.configure(s)
+			})
+			bundle := authority.caPEM
+			if testCase.mode == TLSModePlain {
+				bundle = ""
+			}
+			repository, err := Open(t.Context(), tlsTestConfig(t, testCase.mode, bundle, server))
+			if repository != nil {
+				_ = repository.Close()
+				t.Fatal("a server that refused the session was accepted")
+			}
+			requireReplyRefusal(t, err, testCase.kind, 421)
+			if got := server.received("AUTH"); got != testCase.asked {
+				t.Fatalf("AUTH TLS requested = %v, want %v", got, testCase.asked)
+			}
+			if server.received("USER") || server.received("PASS") {
+				t.Fatal("credentials were transmitted after the refusal")
+			}
+		})
+	}
+}
+
+// requireReplyRefusal asserts the operation error carries the server's reply
+// code and the wanted kind, and that it claims a TLS identity exactly when the
+// kind is a TLS one.
+func requireReplyRefusal(t *testing.T, err error, kind string, code int) {
+	t.Helper()
+	var operation *Error
+	if !errors.As(err, &operation) {
+		t.Fatalf("error is not an FTP operation error: %v", err)
+	}
+	if operation.Kind != kind || operation.ReplyCode != code {
+		t.Fatalf("kind=%q reply=%d, want kind=%q reply=%d (%v)", operation.Kind, operation.ReplyCode, kind, code, err)
+	}
+	if got, want := errors.Is(err, ErrTLS), strings.HasPrefix(kind, "tls_"); got != want {
+		t.Fatalf("TLS identity = %v, want %v for kind %q (%v)", got, want, kind, err)
 	}
 }
 
