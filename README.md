@@ -34,7 +34,7 @@ Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/road
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线。阶段 B（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）、阶段 C（P2 #27、S1 #28、P3 #29、R1 #30、W3 #31、W4 #32，后端验收 C-A1–C-A5）与阶段 D（P4 #36、W5 #37，验收 P4-A1–A9、W5-A1–A8）均已通过固定候选的 Linux amd64 原生验收并合入 `main`；候选提交、CI 流水线与证据边界见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 E 的 D1、S2 与 G 已在候选 `9489f6c` 验收并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 `main`（merge `2a2040d`），V1 内网实测取消（2026-11-05），阶段 E 已关闭并完成后端首版交付；接口以 [OpenAPI 契约](app/web/api/openapi.yaml) 为唯一契约，前端 F（暂缓）、Web 首版与物理 PITR 均未交付。CI 与合并门禁为 GitHub Actions（[`.github/workflows/quality.yml`](.github/workflows/quality.yml)），运行在 WSL2 里的 Linux 自托管 runner 上，覆盖每次分支/tag 推送与每日定时；只有纯文档改动（main 按每次推送，其他分支按相对 main 的整条分支）才跳过重型矩阵（见 [质量规范](docs/guide/quality.md)）。 |
+| `app/web/` | 当前产品主线。阶段 B（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）、阶段 C（P2 #27、S1 #28、P3 #29、R1 #30、W3 #31、W4 #32，后端验收 C-A1–C-A5）与阶段 D（P4 #36、W5 #37，验收 P4-A1–A9、W5-A1–A8）均已通过固定候选的 Linux amd64 原生验收并合入 `main`；候选提交、CI 流水线与证据边界见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 E 的 D1、S2 与 G 已在候选 `9489f6c` 验收并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 `main`（merge `2a2040d`），V1 内网实测取消（2026-11-05），阶段 E 已关闭并完成后端首版交付；接口以 [OpenAPI 契约](app/web/api/openapi.yaml) 为唯一契约，前端 F（暂缓）、Web 首版与物理 PITR 均未交付。CI 与合并门禁为 GitHub Actions（[`.github/workflows/quality.yml`](.github/workflows/quality.yml)），运行在 WSL2 里的 Linux 自托管 runner 上，覆盖涉及业务代码或配置的分支/tag 推送与每日定时；只改文档或 CI 自身文件（`.github/`）的推送不创建运行，由 `.github/scripts/needs-ci.sh` 判定（见 [质量规范](docs/guide/quality.md)）。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
