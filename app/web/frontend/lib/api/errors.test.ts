@@ -56,6 +56,28 @@ describe("generated SDK with the contract error interceptor", () => {
     });
   });
 
+  it.each([
+    [
+      "an HTML page",
+      new Response("<html>ok</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    ],
+    [
+      "an empty body without a content type",
+      new Response(null, { status: 200 }),
+    ],
+  ])("rejects a 2xx answer with %s instead of rendering it", async (_, response) => {
+    // Every JSON operation of the contract answers application/json; a proxy
+    // login page or an empty 200 must not be taken for a valid session.
+    fetchMock.mockResolvedValue(response);
+    const failure = await currentSession({ throwOnError: true }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ status: 200, code: "contract" });
+  });
+
   it("maps the contract error envelope, including Retry-After", async () => {
     fetchMock.mockResolvedValue(
       json(
