@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -159,18 +160,63 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 	}
 }
 
+// TestPermissionMatrixFixtureNeverRunsSeededRows pins what makes the matrix
+// deterministic: nothing in its fixture claims or executes a row it seeded. A
+// live dispatcher claims a queued run or restore within its one-second worker
+// poll and fails it as unconfigured, so an allowed cancel answers 409 instead of
+// 202; executing a run also opens the policy's repository, which re-creates a
+// root that a finished case's TempDir cleanup is removing. Waiting out two polls
+// separates the stopped dispatcher from a live one.
+func TestPermissionMatrixFixtureNeverRunsSeededRows(t *testing.T) {
+	f := newAuthFixtureWithRuns(t)
+	owner := f.seed(t, "owner", "admin")
+	seeded := f.seedResources(t)
+	runID := f.createRunRow(t, seeded.policyID, seeded.freeSource)
+	restoreID := f.createRestoreRow(t, owner.ID)
+	repository, err := f.database.Repository(t.Context(), seeded.policyRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An absent root is what a finished case leaves behind: opening the
+	// repository for a run would create it again.
+	if err = os.RemoveAll(repository.Local.Root); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	run, err := f.database.Run(t.Context(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore, err := f.database.Restore(t.Context(), restoreID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != store.RunStatusQueued {
+		t.Errorf("seeded run is %q after two worker polls; want it left queued", run.Status)
+	}
+	if restore.Status != store.RestoreStatusQueued {
+		t.Errorf("seeded restore is %q after two worker polls; want it left queued", restore.Status)
+	}
+	if _, err = os.Lstat(repository.Local.Root); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("policy repository root was created again after the case; lstat error = %v", err)
+	}
+}
+
 // exercisePermission runs one route as one role against the shared fixture.
-// Store open, password hashing and dispatcher start run once; each case reseeds
-// the rows it mutates so a 2xx still means the operation ran.
+// Store open, password hashing and the dispatcher's start and stop run once;
+// each case reseeds the rows it mutates so a 2xx still means the operation ran.
 func exercisePermission(t *testing.T, f *authFixture, cookies map[string]*http.Cookie, hash string, target store.User, method, path, role string, row permissionCase, headerKey string) {
 	t.Helper()
-	f.drainRuns(t)
 	f.resetResources(t)
 	f.restoreTarget(t, target, hash)
 	seeded := f.seedResources(t)
+	f.seedRouteRows(t, &seeded, target, path)
 	status := map[string]int{"admin": row.admin, "operator": row.operator, "viewer": row.viewer, "anonymous": row.anonymous}[role]
 	req := f.matrixRequest(t, seeded, target, cookies, method, path, role, row.body, headerKey)
-	assertMatrixStatus(t, f, req, method, status)
+	assertMatrixStatus(t, f, seeded, req, method, status)
+	assertCancelEffect(t, f, seeded, path, status)
 	switch path {
 	case "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/password", "/api/v1/runs/:id/events":
 		f.restoreActor(t, cookies, role, hash)
@@ -182,14 +228,6 @@ func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target
 	var cookie *http.Cookie
 	if role != "anonymous" {
 		cookie = cookies[role]
-	}
-	// Every runs route needs a row: the list must be non-empty for an allowed
-	// role, and detail, logs, cancel and events need a real run id.
-	if strings.HasPrefix(path, "/api/v1/runs") {
-		seeded.runID = f.createRunRow(t, seeded.policyID, seeded.freeSource)
-	}
-	if strings.HasPrefix(path, "/api/v1/restores/") && strings.Contains(path, ":id") {
-		seeded.restoreID = f.createRestoreRow(t, target.ID)
 	}
 	if path == "/api/v1/policies/:id/runs" {
 		// Enable directly: this fixture cannot run the preflight the API path
@@ -207,41 +245,94 @@ func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target
 	return req
 }
 
-func assertMatrixStatus(t *testing.T, f *authFixture, req *http.Request, method string, status int) {
+func assertMatrixStatus(t *testing.T, f *authFixture, seeded seededResources, req *http.Request, method string, status int) {
 	t.Helper()
 	if method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/events") {
-		recorder, err := f.client.roundTripStream(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if recorder.Code != status {
-			t.Fatalf("status = %d, body = %s; want %d", recorder.Code, recorder.Body, status)
-		}
+		assertMatrixStream(t, f, req, status)
 		return
 	}
 	recorder := requestAPI(t, f.client, req, status)
-	if req.URL.Path != "/api/v1/runs" || status != http.StatusOK {
-		return
-	}
-	// An allowed role must see the seeded run: 200 on an empty list would let a
-	// handler that returns nothing at all pass this matrix.
-	var page struct {
-		Items []store.Run `json:"items"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
-		t.Fatalf("runs list body %s: %v", recorder.Body, err)
-	}
-	if len(page.Items) == 0 {
-		t.Fatalf("runs list is empty for %s; want the seeded run", req.URL.Path)
+	if req.URL.Path == "/api/v1/runs" && status == http.StatusOK {
+		assertSeededRunListed(t, recorder.Body.Bytes(), seeded.runID)
 	}
 }
 
-// seededResources holds the rows a matrix case may reference. The policy points
-// at its own source and repository so the "free" pair stays deletable.
+// assertMatrixStream reads one event stream to its end. The seeded run is
+// already terminal, so an allowed role receives the replay and the final end
+// frame instead of a stream that waits for a worker.
+func assertMatrixStream(t *testing.T, f *authFixture, req *http.Request, status int) {
+	t.Helper()
+	recorder, err := f.client.roundTripStream(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != status {
+		t.Fatalf("status = %d, body = %s; want %d", recorder.Code, recorder.Body, status)
+	}
+	if status == http.StatusOK {
+		assertStreamEnd(t, recorder.Body.String(), store.RunStatusCanceled)
+	}
+}
+
+// assertSeededRunListed requires the runs list to name the run this case
+// seeded: 200 on an empty or unrelated list would let a handler that returns
+// nothing at all pass this matrix.
+func assertSeededRunListed(t *testing.T, body []byte, runID string) {
+	t.Helper()
+	var page struct {
+		Items []store.Run `json:"items"`
+	}
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatalf("runs list body %s: %v", body, err)
+	}
+	for _, item := range page.Items {
+		if item.ID == runID {
+			return
+		}
+	}
+	t.Fatalf("runs list %s does not name the seeded run %s", body, runID)
+}
+
+// assertCancelEffect proves what a cancel answer means: a 202 acted on a
+// non-terminal row and left it canceled, and every refusal left it queued.
+func assertCancelEffect(t *testing.T, f *authFixture, seeded seededResources, path string, status int) {
+	t.Helper()
+	var got, queued, canceled string
+	switch path {
+	case "/api/v1/runs/:id/cancel":
+		run, err := f.database.Run(t.Context(), seeded.runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, queued, canceled = run.Status, store.RunStatusQueued, store.RunStatusCanceled
+	case "/api/v1/restores/:id/cancel":
+		restore, err := f.database.Restore(t.Context(), seeded.restoreID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, queued, canceled = restore.Status, store.RestoreStatusQueued, store.RestoreStatusCanceled
+	default:
+		return
+	}
+	want := queued
+	if status == http.StatusAccepted {
+		want = canceled
+	}
+	if got != want {
+		t.Fatalf("after the %d answer the row is %q; want %q", status, got, want)
+	}
+}
+
 // newAuthFixtureWithRuns serves the production engine shape: the runs routes
 // exist only when a dispatcher is attached, so the matrix needs one. The
-// fixture runtime stays unconfigured, which is why an allowed manual trigger
-// answers 503 rather than creating a run.
+// dispatcher is stopped as soon as it has started. The matrix judges permission
+// decisions on rows it seeds itself, so nothing may claim them: a live worker
+// polls every second, fails a queued row as unconfigured (an allowed cancel then
+// answers 409 instead of 202) and opens the policy's repository after the case
+// has finished, writing into a TempDir that is being removed. A stopped
+// dispatcher still serves every control call over the database, the state the
+// run, SSE and restore API fixtures use. The fixture runtime stays unconfigured,
+// which is why an allowed manual trigger answers 503 rather than creating a run.
 func newAuthFixtureWithRuns(t *testing.T) *authFixture {
 	t.Helper()
 	f := newAuthFixture(t)
@@ -252,7 +343,9 @@ func newAuthFixtureWithRuns(t *testing.T) *authFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = dispatcher.Stop() })
+	if err = dispatcher.Stop(); err != nil {
+		t.Fatal(err)
+	}
 	engine, err := NewEngineWithResources(f.database, slog.New(slog.NewJSONHandler(&f.logs, nil)), nil, f.service,
 		&resources.Service{Store: f.database, Settings: settings}, dispatcher, WithRestores(dispatcher))
 	if err != nil {
@@ -271,11 +364,8 @@ func (f *authFixture) seedHashed(t *testing.T, username, role, hash string) stor
 	return user
 }
 
-// resetResources deletes every resource row the previous case left. The whole
-// sweep runs in one write transaction: the backup worker may claim a queued run
-// at any instant, and a run_log it inserts must never land between the child
-// delete and its parent delete, because that is a FOREIGN KEY constraint failure
-// on the sweep rather than anything the case tested.
+// resetResources deletes every resource row the previous case left, children
+// before parents, in one write transaction.
 func (f *authFixture) resetResources(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
@@ -300,63 +390,6 @@ func (f *authFixture) resetResources(t *testing.T) {
 	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// drainRuns cancels queued work and waits out anything the dispatcher is
-// executing, so every matrix case starts with no dispatcher activity from the
-// previous case. It only returns once one full pass found nothing running and
-// nothing left to cancel.
-func (f *authFixture) drainRuns(t *testing.T) {
-	t.Helper()
-	ctx := t.Context()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		busy, pending := f.drainOnce(t, ctx)
-		if !busy && !pending {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the dispatcher never quiesced: busy=%t work still queued", busy)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// drainOnce cancels every queued row and reports whether the dispatcher is
-// executing something. A queued row whose cancel changed nothing was claimed
-// between the read and the cancel: that run is now executing, so the pass must
-// report it busy and wait, instead of declaring the queue quiet and having the
-// next sweep delete a run the worker is still logging.
-func (f *authFixture) drainOnce(t *testing.T, ctx context.Context) (busy, pending bool) {
-	t.Helper()
-	runs, err := f.database.Runs(ctx, store.RunsFilter{Limit: 200})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, run := range runs {
-		switch run.Status {
-		case store.RunStatusQueued:
-			if !f.cancelQueued(t, ctx, run.ID) {
-				busy = true
-			}
-			pending = true
-		case store.RunStatusRunning:
-			busy = true
-		}
-	}
-	return busy, pending
-}
-
-// cancelQueued cancels one queued run and reports whether the row was still
-// cancellable; false means the claim won the race.
-func (f *authFixture) cancelQueued(t *testing.T, ctx context.Context, runID string) bool {
-	t.Helper()
-	changed, err := f.database.CancelQueuedRun(ctx, runID,
-		store.SystemAudit("runs.canceled", store.AuditDetail{}), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return changed
 }
 
 func (f *authFixture) restoreTarget(t *testing.T, target store.User, hash string) {
@@ -384,6 +417,8 @@ func (f *authFixture) restoreActor(t *testing.T, cookies map[string]*http.Cookie
 	cookies[role] = f.login(t, role, testPassword)
 }
 
+// seededResources holds the rows a matrix case may reference. The policy points
+// at its own source and repository so the "free" pair stays deletable.
 type seededResources struct {
 	root             string
 	freeRepository   string
@@ -421,6 +456,24 @@ func (f *authFixture) seedResources(t *testing.T) seededResources {
 	return seeded
 }
 
+// seedRouteRows creates the run or restore a route's :id names. The dispatcher
+// is stopped, so a seeded row keeps the state it was created in until the
+// request under test acts on it. Every runs route needs a row: the list must
+// show it, and detail, logs, cancel and events need a real id. A queued run or
+// restore is what a 202 cancel acts on; the events stream tails its run until
+// the run is terminal, so that route gets one that has already ended.
+func (f *authFixture) seedRouteRows(t *testing.T, seeded *seededResources, target store.User, path string) {
+	t.Helper()
+	switch {
+	case path == "/api/v1/runs/:id/events":
+		seeded.runID = f.createTerminalRunRow(t, seeded.policyID, seeded.freeSource)
+	case strings.HasPrefix(path, "/api/v1/runs"):
+		seeded.runID = f.createRunRow(t, seeded.policyID, seeded.freeSource)
+	case strings.HasPrefix(path, "/api/v1/restores/") && strings.Contains(path, ":id"):
+		seeded.restoreID = f.createRestoreRow(t, target.ID)
+	}
+}
+
 // createRunRow inserts one queued run for the matrix's run-route cases.
 func (f *authFixture) createRunRow(t *testing.T, policyID, sourceID string) string {
 	t.Helper()
@@ -434,14 +487,28 @@ func (f *authFixture) createRunRow(t *testing.T, policyID, sourceID string) stri
 	return run.ID
 }
 
+// createTerminalRunRow inserts one run that has already ended. The events stream
+// tails a run until it is terminal, so a case reads the whole stream only when
+// the run is already canceled; without a worker nothing else would end it.
+func (f *authFixture) createTerminalRunRow(t *testing.T, policyID, sourceID string) string {
+	t.Helper()
+	runID := f.createRunRow(t, policyID, sourceID)
+	changed, err := f.database.CancelQueuedRun(t.Context(), runID,
+		store.SystemAudit("runs.canceled", store.AuditDetail{}),
+		&store.RunLogWrite{Level: "warn", Event: "canceled", Message: "run canceled", Data: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatalf("run %s was not queued", runID)
+	}
+	return runID
+}
+
 // createRestoreRow inserts one queued restore for the matrix's restore-route
-// cases. The row carries a cancel request from the moment it exists, so the
-// running dispatcher's restore worker never claims it (its claim skips
-// requested cancellations) and the row stays queued: the detail, log and
-// cancel cases then always reach the handler instead of racing a worker that
-// would fail an unconfigured execution. CreateRestore has no cancel input, and
-// a second UPDATE would leave a window in which the worker can claim the row,
-// so a trigger sets the flag inside the insert's own transaction.
+// cases. The dispatcher is stopped, so the row stays queued until the request
+// under test acts on it: the detail and log cases read a real row, and a 202
+// cancel can only have acted on a restore that was not terminal.
 func (f *authFixture) createRestoreRow(t *testing.T, userID string) string {
 	t.Helper()
 	id := strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -450,21 +517,10 @@ func (f *authFixture) createRestoreRow(t *testing.T, userID string) string {
 		BackupID: backupID, ChainID: uuid.Must(uuid.NewV7()).String(), SourceID: uuid.Must(uuid.NewV7()).String(),
 		ToolVersion: "8.4.0-7", Links: []store.RestorePlanLink{}, Risks: []string{}, Digest: restoreDigest,
 	}
-	db := f.database.DB()
-	if _, err := db.ExecContext(t.Context(), `CREATE TRIGGER matrix_restore_cancel_requested
-		AFTER INSERT ON restores BEGIN
-			UPDATE restores SET cancel_requested = 1 WHERE id = NEW.id;
-		END`); err != nil {
-		t.Fatal(err)
-	}
-	_, err := f.database.CreateRestore(t.Context(), store.RestoreInput{
+	if _, err := f.database.CreateRestore(t.Context(), store.RestoreInput{
 		ID: id, BackupID: backupID, Plan: plan, PlanDigest: plan.Digest, RequestedBy: userID,
 		Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
-	})
-	if _, dropErr := db.ExecContext(t.Context(), `DROP TRIGGER matrix_restore_cancel_requested`); dropErr != nil {
-		t.Fatal(dropErr)
-	}
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	return id
