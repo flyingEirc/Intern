@@ -23,7 +23,6 @@ func TestEventStreamDeliversPromptlyThenEnds(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "streamer", "operator")
 	_, run := h.seedPolicyWithRun(t, "prompt-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -94,7 +93,6 @@ func TestEventStreamReplaysFromTheStoredLog(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "resumer", "viewer")
 	_, run := h.seedPolicyWithRun(t, "replay-stream")
-	h.stopRuns()
 	for _, event := range []string{"claimed", "preflight"} {
 		h.appendLog(t, run.ID, event)
 	}
@@ -129,7 +127,6 @@ func TestEventStreamHeartbeat(t *testing.T) {
 	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	cookie := h.login(t, "heartbeat", "operator")
 	_, run := h.seedPolicyWithRun(t, "heartbeat-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -166,7 +163,6 @@ func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "slow", "operator")
 	_, run := h.seedPolicyWithRun(t, "slow-consumer")
-	h.stopRuns()
 
 	// A stalled TLS client is attached while the log grows: the run must keep
 	// committing events regardless of what the socket accepts.
@@ -207,7 +203,6 @@ func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 func TestEventStreamDropsFullSubscriberWithoutBlockingIt(t *testing.T) {
 	h := newRunHarness(t)
 	_, run := h.seedPolicyWithRun(t, "overflow")
-	h.stopRuns()
 	// More stored events than the frozen subscriber capacity.
 	for i := range sseBufferCapacity + 20 {
 		h.appendLog(t, run.ID, fmt.Sprintf("stored-%03d", i))
@@ -263,7 +258,6 @@ func TestEventStreamRevokedSessionIsToldAndClosed(t *testing.T) {
 	user := h.fixture.seed(t, "revoked", "operator")
 	cookie := h.fixture.login(t, "revoked", testPassword)
 	_, run := h.seedPolicyWithRun(t, "revoked-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -290,7 +284,6 @@ func TestEventStreamLogoutStopsTheStream(t *testing.T) {
 	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	cookie := h.login(t, "logout-stream", "operator")
 	_, run := h.seedPolicyWithRun(t, "logout-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -317,7 +310,6 @@ func TestEventStreamCaughtUpSubscriberSeesTerminalBeforeEnd(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "terminal-order", "operator")
 	_, run := h.seedPolicyWithRun(t, "terminal-order")
-	h.stopRuns()
 
 	_, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -349,7 +341,6 @@ func TestEventStreamCompletedPayloadIsStructuredAndRedacted(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "completed-payload", "operator")
 	_, run := h.seedPolicyWithRun(t, "completed-payload")
-	h.stopRuns()
 
 	_, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -411,7 +402,6 @@ func TestEventStreamRejectsBeforeHeaders(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "preflight-json", "operator")
 	_, run := h.seedPolicyWithRun(t, "json-errors")
-	h.stopRuns()
 
 	cases := []struct {
 		name    string
@@ -452,7 +442,6 @@ func TestEventStreamNeverWritesJSONAfterTheFirstByte(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "no-json", "viewer")
 	_, run := h.seedPolicyWithRun(t, "no-json-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -479,7 +468,6 @@ func TestEventStreamOutlivesServerWriteTimeout(t *testing.T) {
 	cookie := h.login(t, "deadline", "operator")
 	_, run := h.seedPolicyWithRun(t, "deadline-stream")
 	h.restart(t, 200*time.Millisecond)
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -504,7 +492,6 @@ func TestEventStreamNeverLeaksSecrets(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "scan", "operator")
 	_, run := h.seedPolicyWithRun(t, "secret-stream")
-	h.stopRuns()
 	h.appendLog(t, run.ID, "preflight")
 	body := readStreamFrames(t, h, cookie, "/api/v1/runs/"+run.ID+"/events", nil, 2)
 	for _, secret := range []string{"{{SECRET_sse_source}}", testPassword} {
@@ -539,7 +526,6 @@ func TestEventStreamIsNotBufferedBySession(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "bypass", "viewer")
 	_, run := h.seedPolicyWithRun(t, "bypass-stream")
-	h.stopRuns()
 
 	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
 	defer cleanup()
@@ -570,7 +556,6 @@ func TestEventStreamEndIsSentExactlyOnce(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "once", "viewer")
 	_, run := h.seedPolicyWithRun(t, "once-stream")
-	h.stopRuns()
 	h.appendLog(t, run.ID, "queued")
 	if _, ok, err := h.fixture.database.ClaimRun(t.Context()); err != nil || !ok {
 		t.Fatalf("claim: %v ok=%v", err, ok)
@@ -693,7 +678,6 @@ func TestRunLogsCapMarkerSurvivesTheAPI(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "capped", "viewer")
 	_, run := h.seedPolicyWithRun(t, "capped-stream")
-	h.stopRuns()
 	// Fill the log exactly, then overflow it: the last row must be the one
 	// truncated marker and later events are dropped.
 	for i := range store.MaxRunLogRows {

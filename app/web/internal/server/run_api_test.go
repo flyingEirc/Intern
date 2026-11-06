@@ -139,7 +139,6 @@ func TestCancelQueuedRunOverHTTP(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "cancel", "operator")
 	policy, run := h.seedPolicyWithRun(t, "cancel-http")
-	h.stopRuns()
 	client := h.jsonClient(t)
 
 	status, body := readJSONStatus(t, h.do(t, client, http.MethodPost, "/api/v1/runs/"+run.ID+"/cancel", "", cookie))

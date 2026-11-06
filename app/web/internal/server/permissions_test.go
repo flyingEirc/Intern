@@ -435,10 +435,13 @@ func (f *authFixture) createRunRow(t *testing.T, policyID, sourceID string) stri
 }
 
 // createRestoreRow inserts one queued restore for the matrix's restore-route
-// cases. The row carries a cancel request, so the running dispatcher's restore
-// worker never claims it (its claim skips requested cancellations) and the row
-// stays queued: the detail, log and cancel cases then always reach the handler
-// instead of racing a worker that would fail an unconfigured execution.
+// cases. The row carries a cancel request from the moment it exists, so the
+// running dispatcher's restore worker never claims it (its claim skips
+// requested cancellations) and the row stays queued: the detail, log and
+// cancel cases then always reach the handler instead of racing a worker that
+// would fail an unconfigured execution. CreateRestore has no cancel input, and
+// a second UPDATE would leave a window in which the worker can claim the row,
+// so a trigger sets the flag inside the insert's own transaction.
 func (f *authFixture) createRestoreRow(t *testing.T, userID string) string {
 	t.Helper()
 	id := strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -447,14 +450,21 @@ func (f *authFixture) createRestoreRow(t *testing.T, userID string) string {
 		BackupID: backupID, ChainID: uuid.Must(uuid.NewV7()).String(), SourceID: uuid.Must(uuid.NewV7()).String(),
 		ToolVersion: "8.4.0-7", Links: []store.RestorePlanLink{}, Risks: []string{}, Digest: restoreDigest,
 	}
-	if _, err := f.database.CreateRestore(t.Context(), store.RestoreInput{
-		ID: id, BackupID: backupID, Plan: plan, PlanDigest: plan.Digest, RequestedBy: userID,
-		Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
-	}); err != nil {
+	db := f.database.DB()
+	if _, err := db.ExecContext(t.Context(), `CREATE TRIGGER matrix_restore_cancel_requested
+		AFTER INSERT ON restores BEGIN
+			UPDATE restores SET cancel_requested = 1 WHERE id = NEW.id;
+		END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.database.DB().ExecContext(t.Context(),
-		`UPDATE restores SET cancel_requested = 1 WHERE id = ?`, id); err != nil {
+	_, err := f.database.CreateRestore(t.Context(), store.RestoreInput{
+		ID: id, BackupID: backupID, Plan: plan, PlanDigest: plan.Digest, RequestedBy: userID,
+		Audit: store.SystemAudit("restores.execute", store.AuditDetail{}),
+	})
+	if _, dropErr := db.ExecContext(t.Context(), `DROP TRIGGER matrix_restore_cancel_requested`); dropErr != nil {
+		t.Fatal(dropErr)
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	return id
