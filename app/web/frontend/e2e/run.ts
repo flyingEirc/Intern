@@ -403,6 +403,12 @@ async function main(): Promise<void> {
     "the rotated session still reaches the console",
   );
 
+  // Two full page loads, so that Back after logout restores a document from
+  // the back-forward cache rather than re-rendering a client-side route.
+  ab("open", `${origin}/account`);
+  ab("wait", "--text", "确认新密码");
+  ab("open", `${origin}/`);
+  ab("wait", "--text", "有效权限");
   const cookies = z
     .object({
       data: z.object({
@@ -434,6 +440,20 @@ async function main(): Promise<void> {
     description:
       "logout returns to login and the previous cookie is rejected by the API",
     screenshot: shot("08-signed-out"),
+  });
+
+  ab("back");
+  ab("wait", "--url", "**/login?next=%2Faccount");
+  ab("wait", "--text", "使用 Intern 账号登录控制台");
+  expect(
+    !ab("get", "text", "body").includes(operator.username),
+    "Back after logout still shows the previous user's page",
+  );
+  record({
+    id: "08b-back-after-logout",
+    acceptance: "F1-A7",
+    description:
+      "Back after logout does not show the previous user's page; it lands on login",
   });
 
   const errors = ab("errors");

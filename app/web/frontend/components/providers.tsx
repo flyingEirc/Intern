@@ -25,6 +25,20 @@ export function Providers({ children }: { children: ReactNode }) {
     }
   }, [pathname]);
 
+  // A page restored from the back-forward cache still shows the previous
+  // principal's data (Cache-Control: no-cache does not prevent that), for
+  // example after signing out and pressing Back. Reload it so the session is
+  // read again and an ended session lands on the login page.
+  useEffect(() => {
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        window.location.reload();
+      }
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
+
   const [queryClient] = useState(() => {
     const client = createQueryClient(() => {
       if (redirecting.current || window.location.pathname === "/login") {
