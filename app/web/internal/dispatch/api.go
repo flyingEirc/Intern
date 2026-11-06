@@ -153,18 +153,18 @@ type ReplicaFilter struct {
 type BackupView struct {
 	ID            string        `json:"id"`
 	ChainID       string        `json:"chain_id"`
-	ParentID      string        `json:"parent_id,omitempty"`
+	ParentID      *string       `json:"parent_id"`
 	Kind          string        `json:"kind"`
 	Status        string        `json:"status"`
 	Seq           int           `json:"seq"`
-	FromLSN       string        `json:"from_lsn,omitempty"`
-	ToLSN         string        `json:"to_lsn,omitempty"`
-	LastLSN       string        `json:"last_lsn,omitempty"`
+	FromLSN       string        `json:"from_lsn"`
+	ToLSN         string        `json:"to_lsn"`
+	LastLSN       string        `json:"last_lsn"`
 	ObjectPath    string        `json:"object_path"`
 	PayloadSize   int64         `json:"payload_size"`
 	PayloadSHA256 string        `json:"payload_sha256"`
 	LocalPresent  bool          `json:"local_present"`
-	CompletedAt   string        `json:"completed_at,omitempty"`
+	CompletedAt   *string       `json:"completed_at"`
 	Replicas      []ReplicaView `json:"replicas"`
 }
 
@@ -174,7 +174,7 @@ type ChainView struct {
 	SourceID   string       `json:"source_id"`
 	ServerUUID string       `json:"server_uuid"`
 	StartedAt  string       `json:"started_at"`
-	SealedAt   string       `json:"sealed_at,omitempty"`
+	SealedAt   *string      `json:"sealed_at"`
 	Pinned     bool         `json:"pinned"`
 	Members    []BackupView `json:"members"`
 }
@@ -416,9 +416,7 @@ func (d *Dispatcher) ChainViews(ctx context.Context, sourceID string) ([]ChainVi
 			StartedAt: store.ScheduleStamp(chain.StartedAt), Pinned: chain.Pinned,
 			Members: make([]BackupView, 0, len(members)),
 		}
-		if !chain.SealedAt.IsZero() {
-			view.SealedAt = store.ScheduleStamp(chain.SealedAt)
-		}
+		view.SealedAt = optionalStamp(chain.SealedAt)
 		for _, member := range members {
 			backup := backupView(member)
 			backup.Replicas = []ReplicaView{}
@@ -442,10 +440,10 @@ func (d *Dispatcher) SourceExists(ctx context.Context, sourceID string) (bool, e
 
 func backupView(backup physicalstore.Backup) BackupView {
 	view := BackupView{
-		ID: backup.ID, ChainID: backup.ChainID, ParentID: backup.ParentID, Kind: backup.Kind,
+		ID: backup.ID, ChainID: backup.ChainID, ParentID: optionalString(backup.ParentID), Kind: backup.Kind,
 		Status: backup.Status, Seq: backup.Seq, ObjectPath: backup.ObjectPath,
 		PayloadSize: backup.PayloadSize, PayloadSHA256: backup.PayloadSHA256,
-		LocalPresent: backup.LocalPresent,
+		LocalPresent: backup.LocalPresent, CompletedAt: optionalStamp(backup.CompletedAt),
 	}
 	if backup.FromLSN != 0 {
 		view.FromLSN = strconv.FormatUint(backup.FromLSN, 10)
@@ -456,10 +454,26 @@ func backupView(backup physicalstore.Backup) BackupView {
 	if backup.LastLSN != 0 {
 		view.LastLSN = strconv.FormatUint(backup.LastLSN, 10)
 	}
-	if !backup.CompletedAt.IsZero() {
-		view.CompletedAt = store.ScheduleStamp(backup.CompletedAt)
-	}
 	return view
+}
+
+// optionalString renders an unset text field as JSON null. The pointer is the
+// parameter's own copy, so the caller may reuse its value afterwards.
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+// optionalStamp renders a zero time as JSON null and any other time in the
+// UTC stamp the rest of the API uses.
+func optionalStamp(value time.Time) *string {
+	if value.IsZero() {
+		return nil
+	}
+	text := store.ScheduleStamp(value)
+	return &text
 }
 
 var _ = fmt.Sprintf

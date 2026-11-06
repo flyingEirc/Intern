@@ -509,7 +509,7 @@ export type ReplicaPage = {
 export type Backup = {
     id: string;
     chain_id: string;
-    parent_id: string;
+    parent_id: string | null;
     kind: 'physical-full' | 'physical-incremental';
     status: 'running' | 'completed' | 'failed';
     seq: number;
@@ -517,13 +517,19 @@ export type Backup = {
      * Decimal text of the unsigned 64-bit LSN; empty when unset.
      */
     from_lsn: string;
+    /**
+     * Decimal text of the unsigned 64-bit LSN; empty when unset.
+     */
     to_lsn: string;
+    /**
+     * Decimal text of the unsigned 64-bit LSN; empty when unset.
+     */
     last_lsn: string;
     object_path: string;
     payload_size: number;
     payload_sha256: string;
     local_present: boolean;
-    completed_at: string;
+    completed_at: string | null;
     replicas: Array<Replica>;
 };
 
@@ -532,7 +538,7 @@ export type Chain = {
     source_id: string;
     server_uuid: string;
     started_at: string;
-    sealed_at: string;
+    sealed_at: string | null;
     pinned: boolean;
     members: Array<Backup>;
 };

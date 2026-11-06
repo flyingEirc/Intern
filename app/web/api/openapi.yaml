@@ -2816,6 +2816,7 @@ components:
           type: string
         parent_id:
           type: string
+          nullable: true
         kind:
           type: string
           enum: [physical-full, physical-incremental]
@@ -2830,8 +2831,10 @@ components:
           description: Decimal text of the unsigned 64-bit LSN; empty when unset.
         to_lsn:
           type: string
+          description: Decimal text of the unsigned 64-bit LSN; empty when unset.
         last_lsn:
           type: string
+          description: Decimal text of the unsigned 64-bit LSN; empty when unset.
         object_path:
           type: string
         payload_size:
@@ -2845,6 +2848,7 @@ components:
         completed_at:
           type: string
           format: date-time
+          nullable: true
         replicas:
           type: array
           items:
@@ -2866,6 +2870,7 @@ components:
         sealed_at:
           type: string
           format: date-time
+          nullable: true
         pinned:
           type: boolean
         members:

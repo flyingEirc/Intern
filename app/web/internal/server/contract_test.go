@@ -32,6 +32,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 )
 
 type readinessFunc func(context.Context) error
@@ -733,6 +734,85 @@ func auditCount(t *testing.T, f *runContractFixture) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+// unsealedBackupWire is the subset of Backup this case asserts. Pointers stay
+// nil only when the JSON value is null; the contract check already rejected a
+// response that omitted the required field.
+type unsealedBackupWire struct {
+	ID          string  `json:"id"`
+	ParentID    *string `json:"parent_id"`
+	FromLSN     string  `json:"from_lsn"`
+	ToLSN       string  `json:"to_lsn"`
+	LastLSN     string  `json:"last_lsn"`
+	CompletedAt *string `json:"completed_at"`
+}
+
+// TestUnsealedFullChainMatchesContract is the shape a real full leaves behind
+// before the chain is sealed: no parent, no LSN yet, no completion and no seal.
+// kin-openapi rejects the response when any required field is omitted, which is
+// what omitempty did, and the decoded values are null or an empty string.
+func TestUnsealedFullChainMatchesContract(t *testing.T) {
+	f := newRunContractFixture(t)
+	backupID := f.beginUnsealedFull(t)
+
+	chains := f.request(t, "GET", "/api/v1/sources/"+f.policy.SourceID+"/chains", "", f.cookie, http.StatusOK)
+	page := decodeResponse[struct {
+		Items []struct {
+			SealedAt *string              `json:"sealed_at"`
+			Members  []unsealedBackupWire `json:"members"`
+		} `json:"items"`
+	}](t, chains)
+	if len(page.Items) != 1 || len(page.Items[0].Members) != 1 {
+		t.Fatalf("chains = %+v, want one unsealed chain with one full", page.Items)
+	}
+	if page.Items[0].SealedAt != nil {
+		t.Fatalf("sealed_at = %q, want null", *page.Items[0].SealedAt)
+	}
+	assertUnsealedBackup(t, page.Items[0].Members[0], backupID)
+
+	backup := f.request(t, "GET", "/api/v1/backups/"+backupID, "", f.cookie, http.StatusOK)
+	assertUnsealedBackup(t, decodeResponse[unsealedBackupWire](t, backup), backupID)
+}
+
+// beginUnsealedFull records one running full and its chain, and does not
+// complete the backup, so the chain stays unsealed and the LSN columns unset.
+func (f *runContractFixture) beginUnsealedFull(t *testing.T) string {
+	t.Helper()
+	physical := physicalstore.New(f.database.DB())
+	sourceID := f.policy.SourceID
+	plan, err := physical.Plan(t.Context(), physicalstore.PlanRequest{
+		SourceID: sourceID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
+		ToolVersion: "8.4.0-7", Kind: "full", MaxChainLength: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupID := "unsealed-full"
+	err = physical.Begin(t.Context(), physicalstore.BeginRequest{
+		Plan: plan, SourceID: sourceID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
+		ToolVersion: "8.4.0-7", InstanceID: f.database.InstanceID(), RunID: backupID, BackupID: backupID,
+		ObjectPath:   f.database.InstanceID() + "/" + sourceID + "/" + plan.ChainID + "/" + backupID,
+		StagingToken: backupID, WorkDir: filepath.Join(t.TempDir(), "work"), KeyID: "key", CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backupID
+}
+
+// assertUnsealedBackup requires the absent fields to be present as null or "".
+func assertUnsealedBackup(t *testing.T, backup unsealedBackupWire, backupID string) {
+	t.Helper()
+	if backup.ID != backupID {
+		t.Fatalf("backup id = %q, want %q", backup.ID, backupID)
+	}
+	if backup.ParentID != nil || backup.CompletedAt != nil {
+		t.Fatalf("parent_id=%v completed_at=%v, want null", backup.ParentID, backup.CompletedAt)
+	}
+	if backup.FromLSN != "" || backup.ToLSN != "" || backup.LastLSN != "" {
+		t.Fatalf("lsn = %q %q %q, want empty", backup.FromLSN, backup.ToLSN, backup.LastLSN)
+	}
 }
 
 // TestRunEventStreamContract covers the SSE route's pre-stream JSON failures

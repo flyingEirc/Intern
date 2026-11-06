@@ -134,9 +134,7 @@ export function BackupDetail() {
             <dt className="text-muted-foreground">完成时间</dt>
             <dd>{formatDateTime(data.completed_at)}</dd>
             <dt className="text-muted-foreground">父备份</dt>
-            <dd className="font-mono text-xs">
-              {data.parent_id === "" ? "—" : data.parent_id}
-            </dd>
+            <dd className="font-mono text-xs">{data.parent_id ?? "—"}</dd>
           </dl>
         </CardContent>
       </Card>
