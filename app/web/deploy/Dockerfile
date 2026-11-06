@@ -137,6 +137,7 @@ ARG SOURCE_SHA=unknown
 ARG GO_IMAGE
 ARG MYSQL_IMAGE
 ARG PXB_IMAGE
+ARG BUN_IMAGE
 RUN set -eu \
  && mkdir -p /var/lib/intern/metadata /var/lib/intern/backups /var/lib/intern/work /var/lib/intern/export \
  && chown -R 999:999 /var/lib/intern \
@@ -151,6 +152,7 @@ RUN set -eu \
       echo "go_image=${GO_IMAGE}"; \
       echo "mysql_image=${MYSQL_IMAGE}"; \
       echo "pxb_image=${PXB_IMAGE}"; \
+      echo "bun_image=${BUN_IMAGE}"; \
       echo "intern_web=$(/usr/local/bin/intern-web --help 2>&1 | head -n 1)"; \
       echo "mysqld=$(mysqld --version)"; \
       echo "xtrabackup=$(xtrabackup --version 2>&1 | grep -m1 '^xtrabackup version ')"; \
@@ -182,6 +184,7 @@ LABEL org.opencontainers.image.title="Intern Web" \
       io.github.flyingeirc.intern.mysql-image="${MYSQL_IMAGE}" \
       io.github.flyingeirc.intern.pxb-image="${PXB_IMAGE}" \
       io.github.flyingeirc.intern.go-image="${GO_IMAGE}" \
+      io.github.flyingeirc.intern.bun-image="${BUN_IMAGE}" \
       io.github.flyingeirc.intern.licenses="/usr/share/licenses/intern"
 
 USER 999:999
