@@ -93,6 +93,10 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 		"DELETE /api/v1/policies/:id":       {"", 204, 204, 403, 401},
 		"POST /api/v1/policies/:id/enable":  {"", 503, 503, 403, 401},
 		"POST /api/v1/policies/:id/disable": {"", 200, 200, 403, 401},
+		// The preview is resources:read, so every role sees it, and it answers
+		// even though this fixture's runtime is unconfigured and the policy is
+		// disabled: the fires describe what enabling would schedule.
+		"GET /api/v1/policies/:id/schedule": {"", 200, 200, 200, 401},
 
 		// W4: viewers read every run, chain and replica view; only admin and
 		// operator trigger, cancel and retry. The fixture runtime is

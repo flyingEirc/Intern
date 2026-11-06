@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Intern Web control plane
-  version: 0.3.0
+  version: 0.4.0
   description: >-
     Session authentication, three-role authorization, users and audit API.
     JSON uses encoding/json/v2; handwritten handlers are checked by kin-openapi.
@@ -905,6 +905,57 @@ paths:
         '415':
           $ref: '#/components/responses/Error'
         '503':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+  /api/v1/policies/{id}/schedule:
+    parameters:
+      - $ref: '#/components/parameters/ResourceID'
+    get:
+      operationId: previewPolicySchedule
+      summary: Preview the next scheduled fires of one policy (resources:read, viewer and above)
+      description: >-
+        Read-only. The fires are computed by the scheduler's own cron
+        implementation (robfig/cron ParseStandard) in the policy time zone,
+        so daylight-saving transitions match what the scheduler will do.
+        For an enabled policy the first fire of each kind is the stored
+        next_full_at / next_incremental_at the scheduler will use; a stored
+        time that is not after now is returned with missed=true, fires once
+        on the next scheduler tick, and the following fires of that kind are
+        computed from now (missed triggers coalesce to one run). For a
+        disabled policy, or an enabled one whose schedule is not initialized
+        yet, the fires are computed from now with missed=false and describe
+        what enabling the policy would schedule. A full and an incremental
+        due at the same instant yield one full fire: the scheduler queues
+        the full and advances both schedules. fires is in chronological
+        order and holds exactly count entries.
+      parameters:
+        - name: count
+          in: query
+          required: false
+          description: Number of fires to return, 1 to 50; default 10.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: The policy's next fires
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicySchedule'
+        '400':
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '404':
           $ref: '#/components/responses/Error'
         default:
           $ref: '#/components/responses/Error'
@@ -2208,6 +2259,37 @@ components:
     RunKind:
       type: string
       enum: [full, incremental]
+    ScheduleFire:
+      type: object
+      additionalProperties: false
+      required: [kind, at, missed]
+      properties:
+        kind:
+          $ref: '#/components/schemas/RunKind'
+        at:
+          type: string
+          format: date-time
+          description: The scheduled_at the scheduler will give the run, UTC.
+        missed:
+          type: boolean
+          description: The stored fire time is not after now; the scheduler queues it on its next tick.
+    PolicySchedule:
+      type: object
+      additionalProperties: false
+      required: [policy_id, enabled, timezone, fires]
+      properties:
+        policy_id:
+          type: string
+        enabled:
+          type: boolean
+          description: False means the fires are what enabling the policy would schedule.
+        timezone:
+          type: string
+          description: The IANA time zone the cron expressions are evaluated in.
+        fires:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScheduleFire'
     RunStatus:
       type: string
       enum: [queued, running, completed, failed, canceled]

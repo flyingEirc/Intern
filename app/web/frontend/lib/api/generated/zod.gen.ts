@@ -256,6 +256,19 @@ export const zRunTrigger = z.object({
     kind: zRunKind
 });
 
+export const zScheduleFire = z.object({
+    kind: zRunKind,
+    at: z.iso.datetime(),
+    missed: z.boolean()
+});
+
+export const zPolicySchedule = z.object({
+    policy_id: z.string(),
+    enabled: z.boolean(),
+    timezone: z.string(),
+    fires: z.array(zScheduleFire)
+});
+
 export const zRunStatus = z.enum([
     'queued',
     'running',
@@ -958,6 +971,19 @@ export const zTriggerPolicyRunPath = z.object({
  * Run created or replayed with the same idempotency key
  */
 export const zTriggerPolicyRunResponse = zRunAccepted;
+
+export const zPreviewPolicySchedulePath = z.object({
+    id: z.string()
+});
+
+export const zPreviewPolicyScheduleQuery = z.object({
+    count: z.int().gte(1).lte(50).optional().default(10)
+});
+
+/**
+ * The policy's next fires
+ */
+export const zPreviewPolicyScheduleResponse = zPolicySchedule;
 
 export const zListRunsQuery = z.object({
     policy_id: z.string().optional(),

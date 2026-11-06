@@ -245,6 +245,31 @@ export type RunTrigger = {
 
 export type RunKind = 'full' | 'incremental';
 
+export type ScheduleFire = {
+    kind: RunKind;
+    /**
+     * The scheduled_at the scheduler will give the run, UTC.
+     */
+    at: string;
+    /**
+     * The stored fire time is not after now; the scheduler queues it on its next tick.
+     */
+    missed: boolean;
+};
+
+export type PolicySchedule = {
+    policy_id: string;
+    /**
+     * False means the fires are what enabling the policy would schedule.
+     */
+    enabled: boolean;
+    /**
+     * The IANA time zone the cron expressions are evaluated in.
+     */
+    timezone: string;
+    fires: Array<ScheduleFire>;
+};
+
 export type RunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'canceled';
 
 export type RunTriggerKind = 'cron' | 'manual' | 'admission';
@@ -2021,6 +2046,54 @@ export type TriggerPolicyRunResponses = {
 };
 
 export type TriggerPolicyRunResponse = TriggerPolicyRunResponses[keyof TriggerPolicyRunResponses];
+
+export type PreviewPolicyScheduleData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: {
+        /**
+         * Number of fires to return, 1 to 50; default 10.
+         */
+        count?: number;
+    };
+    url: '/api/v1/policies/{id}/schedule';
+};
+
+export type PreviewPolicyScheduleErrors = {
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    400: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    401: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    403: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    404: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    default: ErrorResponse;
+};
+
+export type PreviewPolicyScheduleError = PreviewPolicyScheduleErrors[keyof PreviewPolicyScheduleErrors];
+
+export type PreviewPolicyScheduleResponses = {
+    /**
+     * The policy's next fires
+     */
+    200: PolicySchedule;
+};
+
+export type PreviewPolicyScheduleResponse = PreviewPolicyScheduleResponses[keyof PreviewPolicyScheduleResponses];
 
 export type ListRunsData = {
     body?: never;
