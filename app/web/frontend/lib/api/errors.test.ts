@@ -68,6 +68,13 @@ describe("generated SDK with the contract error interceptor", () => {
       "an empty body without a content type",
       new Response(null, { status: 200 }),
     ],
+    [
+      "an empty body with Content-Length: 0",
+      new Response("", {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Content-Length": "0" },
+      }),
+    ],
   ])("rejects a 2xx answer with %s instead of rendering it", async (_, response) => {
     // Every JSON operation of the contract answers application/json; a proxy
     // login page or an empty 200 must not be taken for a valid session.
