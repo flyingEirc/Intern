@@ -38,7 +38,13 @@ export function PageHeader({
   );
 }
 
-export function NoPermission({ action }: { action: string }) {
+export function NoPermission({
+  action,
+  note,
+}: {
+  action: string;
+  note?: string;
+}) {
   return (
     <Empty className="border">
       <EmptyHeader>
@@ -47,8 +53,12 @@ export function NoPermission({ action }: { action: string }) {
         </EmptyMedia>
         <EmptyTitle>没有权限</EmptyTitle>
         <EmptyDescription>
-          当前账号没有{action}
-          的权限。页面可以查看，但写操作只对具备相应管理权限的角色开放。
+          {note ?? (
+            <>
+              当前账号没有{action}
+              的权限。页面可以查看，但写操作只对具备相应管理权限的角色开放。
+            </>
+          )}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
