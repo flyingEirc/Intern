@@ -167,12 +167,26 @@ func (e *RestoreEngineAdapter) localRoots(ctx context.Context) ([]string, error)
 // until a short page ends the table.
 const repositoryPageSize = 200
 
-// restorePlanView converts the engine plan to the persisted wire view.
+// planLinkKinds maps the catalog's backup kinds, which the engine plan carries
+// verbatim, to the contract's RunKind (full | incremental) of RestorePlanLink.
+var planLinkKinds = map[string]string{
+	"physical-full":        store.RunKindFull,
+	"physical-incremental": store.RunKindIncremental,
+}
+
+// restorePlanView converts the engine plan to the persisted wire view. The
+// digest is the engine's and is unaffected by the kind translation.
 func restorePlanView(plan restore.Plan, rehearsalAvailable bool) store.RestorePlan {
 	links := make([]store.RestorePlanLink, 0, len(plan.Links))
 	for _, link := range plan.Links {
+		kind, ok := planLinkKinds[link.Kind]
+		if !ok {
+			// The engine only plans physical chains; an unknown kind is kept so
+			// the contract validation surfaces it rather than hiding it.
+			kind = link.Kind
+		}
 		links = append(links, store.RestorePlanLink{
-			BackupID: link.BackupID, Seq: int64(link.Seq), Kind: link.Kind,
+			BackupID: link.BackupID, Seq: int64(link.Seq), Kind: kind,
 			FromLSN: link.FromLSN, ToLSN: link.ToLSN, Source: link.Source,
 			RepositoryID: link.RepositoryID, PayloadSize: link.PayloadSize,
 			MetadataSize: link.MetadataSize,
