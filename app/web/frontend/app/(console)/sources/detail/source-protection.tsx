@@ -167,8 +167,12 @@ export function SourceProtection({ sourceId }: { sourceId: string }) {
                           className="flex flex-wrap items-center gap-1 underline-offset-4 hover:underline"
                           href={`/backups/detail?id=${member.id}`}
                         >
+                          {/* The chains contract does not carry replica rows
+                              (members list kind, seq, status, presence, LSNs
+                              and payload identity); the backup detail reads
+                              them, so an empty list here is not "no replica". */}
                           {member.replicas.length === 0
-                            ? "无副本"
+                            ? "查看副本状态"
                             : member.replicas.map((replica) => (
                                 <ReplicaStatusBadge
                                   key={replica.repository_id}
