@@ -2,7 +2,7 @@
 
 **为 MySQL 提供可验证的备份与隔离恢复。**
 
-Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线优先完成 Web：Web 后端（控制面 API、XtraBackup 物理链、FTP 副本与隔离恢复）的阶段 B、C、D 已通过真实容器 CI 原生验收并合入 `main`；CLI 暂停新功能、保留必要维护。**Web 首版仍未交付**——前端只有 F1（[#54](https://github.com/flyingEirc/Intern/issues/54)）的登录、会话与修改本人密码页面，仓库、数据源、策略、运行与恢复页面（F2–F4）尚未实现；阶段 E 的 Docker 部署与 FTPS（D1、S2）及候选制品门禁（G）已原生验收，V1 内网实测于 2026-11-05 取消（FTP/FTPS 由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI 覆盖），阶段 E 已关闭。
+Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线优先完成 Web：Web 后端（控制面 API、XtraBackup 物理链、FTP 副本与隔离恢复）的阶段 B、C、D 已通过真实容器 CI 原生验收并合入 `main`；CLI 暂停新功能、保留必要维护。**Web 首版仍未交付**——前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）已提供登录与账户、仓库/数据源/策略、运行与复制、恢复向导、用户与审计页面，但真实组件的界面验收只有 arm64 模拟 linux/amd64 的开发证据，原生 amd64 验收与 CI 结果未完成；阶段 E 的 Docker 部署与 FTPS（D1、S2）及候选制品门禁（G）已原生验收，V1 内网实测于 2026-11-05 取消（FTP/FTPS 由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI 覆盖），阶段 E 已关闭。
 
 ## 当前可复用的能力基线
 
@@ -106,7 +106,7 @@ chmod 600 "$HOME/intern-secrets/source.yaml"
 
 - CLI 当前增量是 binlog 归档（逻辑链）；Web 后端已实现并通过真实容器 CI 的是 XtraBackup 物理全量与页增量链。两者的环境、版本与验证互不覆盖。
 - 当前按已封存检查点恢复；任意时间输入、实例级 PITR、跨库事务恢复尚不在已交付能力中（N1）。
-- Web 前端的资源、运行与恢复页面（F2–F4，[#19](https://github.com/flyingEirc/Intern/issues/19)）、S3、自动保留清理（N2）与持续断线归档尚未交付；Docker 单宿主机部署（D1）与 FTPS（S2）已在候选 `9489f6c` 原生验收；V1 内网实测于 2026-11-05 取消，FTP/FTPS 只由固定 Pure-FTPd 1.0.54 夹具的容器 CI 证明，其他服务器须运维按[运维说明第 12 节](docs/guide/operations.md)自测。MySQL 其他版本、Linux 发行版、云平台、TLS/最小权限等组合须逐项提供实测证据后再列入支持矩阵：`internal/physical/compat.json` 目前只有一条 `status: candidate`、`verified: false` 的记录（MySQL 8.4.11 + PXB 8.4.0-7 + linux/amd64）。
+- Web 前端页面的原生 Linux amd64 验收与 CI 结果（阶段 F，[#19](https://github.com/flyingEirc/Intern/issues/19)）、S3、自动保留清理（N2）与持续断线归档尚未交付；Docker 单宿主机部署（D1）与 FTPS（S2）已在候选 `9489f6c` 原生验收；V1 内网实测于 2026-11-05 取消，FTP/FTPS 只由固定 Pure-FTPd 1.0.54 夹具的容器 CI 证明，其他服务器须运维按[运维说明第 12 节](docs/guide/operations.md)自测。MySQL 其他版本、Linux 发行版、云平台、TLS/最小权限等组合须逐项提供实测证据后再列入支持矩阵：`internal/physical/compat.json` 目前只有一条 `status: candidate`、`verified: false` 的记录（MySQL 8.4.11 + PXB 8.4.0-7 + linux/amd64）。
 - 备份和恢复会产生受保护的明文工作文件，需要受控磁盘与权限；加密备份仍依赖妥善保管历史密钥。
 
 ## 阅读与参与开发
