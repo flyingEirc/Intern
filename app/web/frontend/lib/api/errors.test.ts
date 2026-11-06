@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { client } from "./client";
 import { ApiError } from "./errors";
-import { currentSession, login } from "./generated/sdk.gen";
+import { currentSession, login, logout } from "./generated/sdk.gen";
 
 const user = {
   id: "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a3b",
@@ -83,6 +83,20 @@ describe("generated SDK with the contract error interceptor", () => {
       (error: unknown) => error,
     );
     expect(failure).toMatchObject({ status: 200, code: "contract" });
+  });
+
+  it("rejects a 204 from an operation the contract gives a JSON body", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    const failure = await currentSession({ throwOnError: true }).catch(
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ status: 204, code: "contract" });
+  });
+
+  it("accepts the 204 an operation declares", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    const result = await logout({ throwOnError: true });
+    expect(result.response.status).toBe(204);
   });
 
   it("maps the contract error envelope, including Retry-After", async () => {
