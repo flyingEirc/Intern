@@ -405,10 +405,7 @@ async function main(): Promise<void> {
     });
 
     // --- F2-A5: role-based visibility ---
-    b.ab("find", "role", "button", "click", "--name", "账户菜单");
-    b.ab("wait", "--text", "退出登录");
-    b.ab("find", "role", "menuitem", "click", "--name", "退出登录");
-    b.ab("wait", "--url", "**/login**");
+    b.signOut();
     b.fill("用户名", viewer.username);
     b.fill("密码", viewer.password);
     b.click("登录");

@@ -143,6 +143,8 @@ export class Browser {
     this.ab("wait", "--text", "退出登录");
     this.ab("find", "role", "menuitem", "click", "--name", "退出登录");
     this.ab("wait", "--url", "**/login**");
+    // The form renders after hydration, inside a Suspense boundary.
+    this.waitText("使用 Intern 账号登录控制台");
   }
 
   /** Page errors and CSP violations fail the run. */
