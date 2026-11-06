@@ -19,6 +19,8 @@ go test -race ./internal/... ./app/cli/... ./app/web/...
 golangci-lint run ./internal/... ./app/cli/... ./app/web/...
 ```
 
+Web 前端（`app/web/frontend`，F1 [#54](https://github.com/flyingEirc/Intern/issues/54)）的本地检查是 `mise run frontend:check`：`biome ci`、`tsc --noEmit`、Vitest，以及从 `app/web/api/openapi.yaml` 重新生成客户端后与入库副本比对（漂移即失败）。Biome 是前端唯一的 lint/format 工具，不降规则；只对 shadcn 上游组件 `components/ui` 关闭 `biome.json` 中列出的少数规则。前端 UI/UX 验收以 agent-browser 驱动真实 `webui` 构建的 `bin/intern-web`（`mise run frontend:e2e`）并保留截图为准，Vitest 与 mock 只覆盖逻辑边界，不能代替界面证据。
+
 lint 必须使用项目 `.golangci.yml` 与 `golangci-lint`，不得以 `go vet` 替代，不能降规则、调低门槛或跳过失败检查。本地 `.githooks/pre-commit` 对暂存快照分类并执行检查；它的豁免范围不替代 CI 要求。
 
 ## 真实组件是核心业务门禁

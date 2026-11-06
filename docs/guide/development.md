@@ -2,7 +2,7 @@
 
 开发前阅读 [Web 优先总路线](../roadmap/Web优先与多应用架构-2026-10-17.md) 和 [备份恢复详细方案](../roadmap/数据库备份与恢复-2026-10-17.md)；Web 子任务另读 [Web 备份控制面与流式管道](../roadmap/Web备份控制面与流式管道-2026-10-17.md)，按其中的范围、职责、选型、安全与验收要求实施。任务跟踪见 [Issue 流程](../workflow/issue.md)，提交见 [PR 流程](../workflow/pr.md)，质量门禁见 [quality.md](quality.md)。
 
-当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围与前端栈已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)，见 [Web 优先总路线第 3 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。前端暂缓，当前按阶段 B–E 的子 Issue 先实施后端；对前端暴露的接口以 OpenAPI 契约 `app/web/api/openapi.yaml` 为准，接口变更须同步契约与测试（[#18](https://github.com/flyingEirc/Intern/issues/18)）。契约测试使用 kin-openapi 校验规范本身、Gin 路由与规范操作双向一致，以及 API 测试中的全部请求与响应；后端不做代码生成（[#22](https://github.com/flyingEirc/Intern/issues/22)）。
+当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)），前端栈按 2026-11-06 的用户决定执行（[#19](https://github.com/flyingEirc/Intern/issues/19)、[#54](https://github.com/flyingEirc/Intern/issues/54)，见 [Web 优先总路线第 3.1 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。后端阶段 B–E 已交付，前端阶段 F 自 2026-11-06 实施；对前端暴露的接口以 OpenAPI 契约 `app/web/api/openapi.yaml` 为准，接口变更须同步契约、测试与前端生成客户端（[#18](https://github.com/flyingEirc/Intern/issues/18)、#54）。契约测试使用 kin-openapi 校验规范本身、Gin 路由与规范操作双向一致，以及 API 测试中的全部请求与响应；后端不做代码生成（[#22](https://github.com/flyingEirc/Intern/issues/22)）。
 
 ## 目录与共享接口
 
@@ -10,7 +10,7 @@
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`、`user create-admin`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库、scs 服务端会话与 admin / operator / viewer 三角色、变更审计，以及 `api/openapi.yaml` 契约；前端（React + TypeScript + Vite + Ant Design + TanStack Query）暂缓到阶段 F。 |
+| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`、`user create-admin`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库、scs 服务端会话与 admin / operator / viewer 三角色、变更审计，以及 `api/openapi.yaml` 契约；`frontend/` 是 Web 前端（见下文「Web 前端」），其静态导出经 `internal/webui` 在 `webui` 构建标签下嵌入。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
@@ -34,6 +34,18 @@
 - W5（#37）恢复 API 真实组件入口：在原生 Linux amd64 Docker 上执行 `go test -v -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestW5NativeContainers$'`（CI job `container-restore-api`，证据门禁 `.github/scripts/verify-w5-evidence.sh`，其接受/拒绝用例为 `.github/scripts/w5-gate-cases.sh`）。worker 在 `app/web/integration/restore.Dockerfile` 镜像内（`MYSQL_IMAGE`/`PXB_IMAGE` 取 `internal/physical/compat.json` 的 digest）以源库 mysql uid 运行真实的 serve：dispatcher + HTTP + `internal/restore`，对面是真实 `mysql:8.4.11`、真实 Pure-FTPd 与真实导出卷。证据只从回读状态计算：API 与 SQLite 的 restore 行、本地仓库、FTP 命名空间、导出目录权限与字节，以及用新 `mysql:8.4.11` 容器直接启动每个已发布导出后的数据快照与同一次运行记录的恢复点快照逐点一致。缺 runtime、平台不符、缺 `INTERN_W5_EXPORT_ROOT/XBSTREAM/MYSQLD` 都失败，不 skip。
 - W5 终态语义补充：`restores.error_class` 是闭合集合 `unavailable|refused|restore_failed|canceled|interrupted`，其中 `refused` 专指确认摘要之后目录漂移（执行期 `plan_changed` 等），`error_code` 用引擎固定码；`side_effects` 在每一条终态行都明示，包括从未被认领、因取消而终结的排队行（三个目标都记为不存在）。已发布导出永不被取消或重启回收删除；引擎在进入导出阶段时上报 `exporting` 阶段。`restores.phase` 只表示运行中的实时阶段：**每条终态写入都把 `phase` 置 NULL**（completed、failed、canceled 均如此，排队取消同样是 NULL），因此 `GET /api/v1/restores/{id}` 对终态行返回 `phase: null`；引擎真正走过的阶段序列只保留在 `restore_logs`（`GET /api/v1/restores/{id}/logs`）中，完成并演练的恢复记录为 fetching、authenticating、extracting、preparing、exporting、rehearsing（逐环重复按首次出现去重）。
 
+## Web 前端
+
+`app/web/frontend` 由 `bun create next-app@latest` 以默认选项创建（TypeScript、Tailwind CSS、App Router、`@/*` 别名，lint 选 Biome），依赖在 `package.json` 中精确固定并由 `bun.lock` 冻结；Bun 版本固定在 mise.toml。约束如下（F1 [#54](https://github.com/flyingEirc/Intern/issues/54)）：
+
+- **静态导出、同源提供**：`next build` 以 `output: "export"` 产出 `out/`，`mise run frontend:build` 把它复制到 `app/web/internal/webui/dist`（不入库），带 `webui` 构建标签的 `intern-web` 嵌入它：`/api/*`、`/healthz`、`/readyz` 仍归 API，其他 GET/HEAD 路径按 `/login` → `login.html` 解析，未知路径返回导出的 `404.html`，`/_next/static/*` 长期缓存，页面 `no-cache`，并带 CSP 与防嵌入头。不带标签的构建只提供 API，行为与之前一致。因此不能使用 SSR、Route Handler（依赖请求）、Server Actions、rewrites/redirects/headers 与 Cache Components（PPR，与导出不兼容）；带 ID 的页面用查询参数（如 `/runs/detail?id=`）而不是动态段。
+- **开发代理**：`next dev` 仅在开发阶段把 `/api/*`、`/healthz`、`/readyz` 代理到 `INTERN_DEV_BACKEND`（默认 `http://127.0.0.1:8080`），使浏览器保持同源，满足后端的跨源保护与 `Secure; SameSite=Lax` 会话 Cookie。
+- **接口客户端**：`lib/api/generated` 由 `@hey-api/openapi-ts` 从 `app/web/api/openapi.yaml` 生成（类型、fetch SDK、TanStack Query 选项、Zod 模式），SDK 用 Zod 校验每个 JSON 响应；错误统一经 `lib/api/errors.ts` 变为 `ApiError`（状态码、契约错误码、请求 ID、`Retry-After`）。生成物入库，禁止手改；契约变更后运行 `mise run frontend:generate` 并一并提交，`frontend:check` 的漂移检查会拒绝未重新生成的提交。
+- **会话**：任一请求 401 时由 Query 缓存统一清空缓存并跳转 `/login?next=<原路径>`（`next` 只接受同源路径）；预期 401 的请求（登录、登录页探测、注销）以 `meta.handlesUnauthorized` 标明。
+- **组件**：shadcn/ui 使用 Base UI 底座（`components.json` 的 `base-nova`），用 `bunx --bun shadcn@latest add` 添加到 `components/ui`，遵循 shadcn 规则（`FieldGroup`/`Field` 表单、语义色、`render` 代替 `asChild`）；缺失组件先搜索开源实现并在 Issue 记录来源与许可证。`components/ui` 由 Biome 格式化，只对其上游写法关闭少数规则（见 `biome.json`）。
+- **测试**：Vitest + Testing Library 覆盖契约校验、错误映射、表单规则与会话失效；端到端由 agent-browser 驱动真实 `bin/intern-web`（`mise run frontend:e2e`，截图与 `manifest.json` 写入 `.cache/e2e/<提交>`），UI 证据按 [Issue 流程](../workflow/issue.md) 附到 Issue。
+- **许可证**：Web 镜像的前端阶段用 `scripts/collect-licenses.ts` 收集 `dependencies` 闭包的许可证文本，随镜像放在 `/usr/share/licenses/intern/web-ui/`；只在构建期使用的工具放 `devDependencies`。
+
 ## 安全与恢复约束
 
 - 加密固定 AES-128-GCM，压缩固定 Zstandard，先压缩后加密；复用成熟认证流组件，保证 nonce 唯一和完整流认证，不自制格式替换已定方案。
@@ -50,13 +62,18 @@
 
 ## 常用开发入口
 
-工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`，sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [IotProject#14](https://github.com/flyingEirc/IotProject/issues/14)。
+工具版本与任务统一维护在 [mise.toml](../../mise.toml)：Go `1.27.0`（与 `go.work` 一致）、golangci-lint `2.13.2`、Bun `1.4.4`（Web 前端），sqlc 生成命令固定 `v1.30.0`。首次使用执行 `mise trust`、`mise install`，不要另外维护 Taskfile 或依赖开发机随机 PATH 中的工具版本。工具/任务调整依据见 [IotProject#14](https://github.com/flyingEirc/IotProject/issues/14)。
 
 以下命令在仓库根目录执行；在其子目录运行时，mise 仍以根目录的 mise.toml 所在目录执行任务。也可从其他目录使用 `mise -C /path/to/Intern run <任务>`。
 
 | 目的 | 命令 |
 | --- | --- |
-| 构建 CLI 与 Web 后端到 `bin/intern`、`bin/intern-web` | `mise run build` |
+| 构建 CLI 到 `bin/intern`，构建前端静态导出并以 `webui` 标签构建带 UI 的 `bin/intern-web` | `mise run build` |
+| 前端依赖（按 `bun.lock` 冻结安装） | `mise run frontend:install` |
+| 前端检查：Biome CI、TypeScript、Vitest、OpenAPI 客户端漂移 | `mise run frontend:check` |
+| 契约变更后重新生成前端客户端 | `mise run frontend:generate` |
+| 前端开发服务器（代理到 `INTERN_DEV_BACKEND`，默认 `http://127.0.0.1:8080`） | `cd app/web/frontend && bun run dev` |
+| agent-browser 端到端（先 `build`，再驱动真实 `bin/intern-web`） | `mise run frontend:e2e` |
 | 启动 Web 后端（监听前自动迁移元数据库） | `./bin/intern-web serve --metadata-dir <绝对路径> --listen 127.0.0.1:8080` |
 | 查看或执行 Web 元数据库迁移 | `./bin/intern-web migrate status` / `./bin/intern-web migrate up` |
 | 创建初始管理员（serve 运行期间也可执行） | `./bin/intern-web user create-admin --username <用户名> --metadata-dir <绝对路径>`（终端无回显输入两次；脚本使用 `--password-stdin` 从标准输入读一行，不接受命令行明文） |
@@ -91,6 +108,6 @@ W5 恢复 API 的裁定边界：`verify_sql` 由恢复引擎唯一裁定，API �
 
 panic 发生在响应输出前时，可以丢弃部分缓冲并返回统一 `500`；字节已发送后无法收回或改写状态，只记录错误，不能把这类情形描述为已回滚。改密事务成功后若 token 轮换失败，密码与成功审计仍保留，旧会话不得被提升到新 epoch，需要用新密码重新登录。
 
-`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；纯文档/非业务变更仍按原规则豁免。CI 使用相同锁定版本和检查规则：活跃 CI 为 GitHub Actions（`.github/workflows/quality.yml`），在仓库的 Linux 自托管 runner（Windows 主机上的 WSL2）上运行，分三层：fast（quality-fast）、cli（`container-mysql` 矩阵与汇总门禁）、web（九个 Web 容器 job 及各自的 `verify-*-evidence.sh` 门禁）。分支推送只跑 fast；合并前在 PR 分支上用 `workflow_dispatch`（`gh workflow run quality.yml --ref <分支>`，`-f full=true` 时三层全跑）按整条分支相对 main 的改动层运行容器层；main 的业务推送、tag、每日定时与 main 上的手动运行三层全跑。CI 只验证业务代码，推送先经 `on.push.paths` 过滤，只改文档或 `.github/**` 的推送不创建运行（过滤规则与 `.github/scripts/needs-ci.sh` 的路径表一致，`needs-ci-cases.sh` 在 quality-fast 中校验两者不漂移；tag 推送不受 path filter 限制，超过 1000 个提交或差异超时也总是运行）；head 提交信息带 `[skip ci]` 的推送同样不创建运行。改动 `.github/**` 时须在本地跑通全部 `*-cases.sh` 与 actionlint 并把输出记录在 PR，脚本只在下一次业务运行或定时运行时执行；`container-mysql` 在每个锁定配置中先自测清理与停止脚本、清除本 runner 的遗留资源，再跑 14 个真实场景；被取消 job 遗留的测试进程组和容器资源在 `if: always()` 步骤中停止与清理，并以 `--inventory` 盘点，证据以 `container-<profile>` 制品上传（同名重跑覆盖）。`scope` job 按 `needs-ci.sh` 的 `cli|web|all` 分层选择运行哪些层：`app/cli/**` 只属 CLI 层，`app/web/**` 只属 Web 层，两个模块互相读取的 `go.mod`/`go.sum`、CLI 的 `contract.json` 以及 `internal/**`、根目录 `Dockerfile` 等共享输入算全部；没有业务改动时三层全部跳过（`quality-gate` 仍须成功）。规则见 [质量规范](quality.md)，合并判定见 [PR 流程](../workflow/pr.md)。runner 的前置条件见 [质量规范](quality.md) 的「CI 执行环境」。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪；CLI 容器矩阵的实际运行、取消路径与未覆盖项以 [质量规范](quality.md) 和 [路线第 15.8 节](../roadmap/数据库备份与恢复-2026-10-17.md) 的记录为准。workflow 已提交或矩阵已通过都不代表合并门禁已验收，结论只取对应运行的记录。
+`check` 严格顺序执行 build → test-race → lint，任一步失败即停止，不用并行依赖替代。提交 hook 通过 mise 运行分类器，并在独立暂存快照中调用同一个 `check` 任务；暂存了 `app/web/frontend`（Markdown 除外）或 `app/web/api/openapi.yaml` 时，同一快照中再运行 `frontend:check`；纯文档/非业务变更仍按原规则豁免。`check` 只覆盖 Go，不依赖 Bun；quality-fast 另外执行前端检查、静态导出、`webui` 构建与其测试和 lint。CI 使用相同锁定版本和检查规则：活跃 CI 为 GitHub Actions（`.github/workflows/quality.yml`），在仓库的 Linux 自托管 runner（Windows 主机上的 WSL2）上运行，分三层：fast（quality-fast）、cli（`container-mysql` 矩阵与汇总门禁）、web（九个 Web 容器 job 及各自的 `verify-*-evidence.sh` 门禁）。分支推送只跑 fast；合并前在 PR 分支上用 `workflow_dispatch`（`gh workflow run quality.yml --ref <分支>`，`-f full=true` 时三层全跑）按整条分支相对 main 的改动层运行容器层；main 的业务推送、tag、每日定时与 main 上的手动运行三层全跑。CI 只验证业务代码，推送先经 `on.push.paths` 过滤，只改文档或 `.github/**` 的推送不创建运行（过滤规则与 `.github/scripts/needs-ci.sh` 的路径表一致，`needs-ci-cases.sh` 在 quality-fast 中校验两者不漂移；tag 推送不受 path filter 限制，超过 1000 个提交或差异超时也总是运行）；head 提交信息带 `[skip ci]` 的推送同样不创建运行。改动 `.github/**` 时须在本地跑通全部 `*-cases.sh` 与 actionlint 并把输出记录在 PR，脚本只在下一次业务运行或定时运行时执行；`container-mysql` 在每个锁定配置中先自测清理与停止脚本、清除本 runner 的遗留资源，再跑 14 个真实场景；被取消 job 遗留的测试进程组和容器资源在 `if: always()` 步骤中停止与清理，并以 `--inventory` 盘点，证据以 `container-<profile>` 制品上传（同名重跑覆盖）。`scope` job 按 `needs-ci.sh` 的 `cli|web|all` 分层选择运行哪些层：`app/cli/**` 只属 CLI 层，`app/web/**` 只属 Web 层，两个模块互相读取的 `go.mod`/`go.sum`、CLI 的 `contract.json` 以及 `internal/**`、根目录 `Dockerfile` 等共享输入算全部；没有业务改动时三层全部跳过（`quality-gate` 仍须成功）。规则见 [质量规范](quality.md)，合并判定见 [PR 流程](../workflow/pr.md)。runner 的前置条件见 [质量规范](quality.md) 的「CI 执行环境」。实现与实际运行状态由 [当前仓库 #4](https://github.com/flyingEirc/Intern/issues/4) 跟踪；CLI 容器矩阵的实际运行、取消路径与未覆盖项以 [质量规范](quality.md) 和 [路线第 15.8 节](../roadmap/数据库备份与恢复-2026-10-17.md) 的记录为准。workflow 已提交或矩阵已通过都不代表合并门禁已验收，结论只取对应运行的记录。
 
 项目文件直接位于 Git 根目录：`.github/`、`.githooks/`、`app/`、`docs/`、`internal/`、`go.work` 与 `mise.toml` 同级，没有额外的 `Intern/` 包装目录。GitHub workflow 从仓库根执行，缓存、测试证据和制品路径也以根为基准。本地 hook 配置为 `git config core.hooksPath .githooks`；新 clone 后执行此命令启用暂存快照检查。
