@@ -29,8 +29,10 @@ export function describeError(error: unknown): string {
     case "forbidden":
       return withRequestId("当前账号没有执行此操作的权限", error);
     default:
+      // The backend's message names the failed rule (for example which field
+      // failed validation); it is English and shown as reported.
       return withRequestId(
-        `请求失败（HTTP ${error.status}，${error.code}）`,
+        `请求失败（HTTP ${error.status}，${error.code}）：${error.message}`,
         error,
       );
   }
