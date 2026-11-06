@@ -47,8 +47,8 @@
 // pure-ftpd build starts but every session dies with Rosetta mmap errors before
 // the FTP greeting. On a native linux/amd64 host the fixtures are amd64 too.
 //
-// macOS bind mounts and file secrets
-// ----------------------------------
+// macOS bind mounts, file secrets and the export root
+// ---------------------------------------------------
 // Compose file secrets are ordinary bind mounts, and `intern-web serve` requires
 // the KEK to be a regular file owned by the container uid with mode 0600
 // (docs/guide/operations.md section 5). OrbStack presents bind-mounted host
@@ -58,6 +58,49 @@
 // container, gives them uid 999 and the documented modes, and points the service
 // at that volume through the generated Compose override. The repository compose
 // file itself is not modified.
+//
+// The reference deployment publishes restores on a host directory bound to
+// `/var/lib/intern/export` (`INTERN_EXPORT_HOST_DIR`), and operations.md requires
+// that directory to be owned by uid 999 with mode 0750. The same OrbStack bind
+// mount reports every file as root even after `chown 999:999` inside the
+// container (verified 2026-11-06: a bind-mounted directory stayed `0:0` while a
+// named volume took `999:999`), so a bind mount cannot satisfy the container's
+// view of that contract here. The stack therefore creates a named export volume,
+// sets uid 999 and mode 0750 on it with a helper container, and mounts that
+// volume at `/var/lib/intern/export`. `exportsHostDir` is the host path of the
+// temporary directory that would have been the bind source (still created, so a
+// native host that does honor chown can be compared); the volume name is what
+// `startExportedMysql` actually mounts. On a native Linux host a bind mount with
+// `chown 999:999 && chmod 0750` satisfies the same contract, which is what the
+// D1 acceptance does.
+//
+// Restore helpers
+// ---------------
+// `mysqlQuery(sql)` runs statements on the source as root. The root password
+// travels in `MYSQL_PWD` through `docker compose exec --env`, never on the
+// command line, and the client is `--batch --skip-column-names` so the result
+// is tab-separated rows. The existing `mysql` field stays the connection info
+// an operator types into the source form; the two names differ because one
+// object cannot hold both.
+// `startExportedMysql(exportPath)` starts a brand-new `mysql:8.4.11` container
+// from the digest in internal/physical/compat.json (`linux/amd64`, user 999:999)
+// on one published export. The official image entrypoint refuses a datadir it
+// did not initialize, so the container runs `mysqld` directly, with the
+// arguments docs/guide/operations.md section 8 and app/web/integration/p4_test.go
+// use (`--datadir`, a private socket, `--skip-log-bin`, a 64 MiB buffer pool).
+// `exportPath` is the
+// `export_path` the restore API returns (the container path); the helper mounts
+// the export volume at the same root so that path is the datadir's parent. Its
+// `query` reads through the container's own socket as root, again with the
+// password only in `MYSQL_PWD`. `stop()` removes the container, and the stack's
+// `stop()` removes any that are still running.
+// `removeLocalPayload(objectPath)` deletes one backup's published directory from
+// the local repository volume (`<repository root>/<object_path>`, the four
+// members `payload.bin`, `envelope.json`, `metadata.bin` and
+// `metadata.envelope.json`). That is what `Repository.ReclaimPublished` does in
+// the P4/W5 tests (`w5DropLocalPayloads`, `s2DropLocalPayloads`): the plan then
+// fails `localMembersMatch` and falls back to the verified FTP replica. The
+// deletion runs in a helper container as uid 999, the owner of the volume.
 //
 // Lifecycle
 // ---------
@@ -83,6 +126,12 @@
 //     0.87–0.89 s.
 //   * stop(): 1.7–2.4 s for the four Compose services, the KEK-less container,
 //     the volumes, the network and the temporary directory.
+//   * a full plus one incremental, one restore of the incremental, a fresh
+//     MySQL on the published export and a second plan after the local full
+//     payload is removed: 49–51 s with the image and fixtures cached
+//     (2026-11-06, same host). The backups were small (two and three rows).
+//   * `startExportedMysql`: the fresh server accepted a query within a second
+//     of the restore finishing; its `stop()` was under a second.
 // Subsequent starts reuse the built image and the fixture images.
 
 import { spawnSync } from "node:child_process";
@@ -143,6 +192,51 @@ export type Stack = {
    */
   setFtp(state: "down" | "up"): void;
   /** Removes every container, volume, network and temporary file this stack created. */
+  stop(): Promise<void>;
+  /**
+   * Host path recorded as `INTERN_EXPORT_HOST_DIR`. On this host the intern
+   * container does not bind-mount it: OrbStack keeps bind-mounted files owned
+   * by root, so the export root is the named volume `exportVolume`, mounted at
+   * `/var/lib/intern/export` and owned by uid 999 with mode 0750. The API's
+   * `export_path` is a path inside that mount.
+   */
+  exportsHostDir: string;
+  /** Name of the volume mounted at `/var/lib/intern/export`. */
+  exportVolume: string;
+  /**
+   * Runs SQL on the source MySQL as root. The password is passed with
+   * `--env MYSQL_PWD` and never appears on the command line. The result is
+   * tab-separated (`--batch --skip-column-names`), without a trailing newline
+   * beyond what the server printed.
+   */
+  mysqlQuery(sql: string): Promise<string>;
+  /**
+   * Starts a new pinned mysql:8.4.11 server on one published export.
+   * `exportPath` is the container path the restore API returned (`export_path`);
+   * the data directory is `<exportPath>/data`. `stop()` removes the container,
+   * and so does the stack's `stop()`.
+   */
+  startExportedMysql(exportPath: string): Promise<ExportedMysql>;
+  /**
+   * Deletes one backup's published directory from the local repository volume
+   * (`<localRepositoryRoot>/<objectPath>`), as uid 999. The FTP replica is left
+   * in place, so the next plan must take that link from FTP.
+   */
+  removeLocalPayload(objectPath: string): void;
+  /**
+   * Names of every entry directly under the export root, read as uid 999. A
+   * cancel or failure that claims `export_published: false` must leave no
+   * directory for that restore here, and no half-written pending export.
+   */
+  exportEntries(): string[];
+};
+/** One fresh MySQL server started on a published restore export. */
+export type ExportedMysql = {
+  /** Container name, so a caller can inspect it. */
+  name: string;
+  /** Runs SQL as root through the container's socket; tab-separated output. */
+  query(sql: string): Promise<string>;
+  /** Removes the container. Idempotent. */
   stop(): Promise<void>;
 };
 
@@ -398,6 +492,69 @@ function prepareSecretsVolume(
     script,
   ]);
 }
+/**
+ * Create the export volume and give it the ownership operations.md requires
+ * (uid 999, mode 0750). A named volume honors chown; an OrbStack bind mount
+ * does not, which is why the export root is not the host directory.
+ */
+function prepareExportVolume(volume: string, mysqlImage: string): void {
+  docker("create export volume", ["volume", "create", volume]);
+  const observed = docker("own the export volume", [
+    "run",
+    "--rm",
+    "--platform",
+    platform,
+    "--user",
+    "0:0",
+    "--network",
+    "none",
+    "--volume",
+    `${volume}:/export`,
+    "--entrypoint",
+    "/bin/sh",
+    mysqlImage,
+    "-c",
+    "chown 999:999 /export && chmod 0750 /export && stat -c '%u %g %a' /export",
+  ]).stdout.trim();
+  if (observed !== "999 999 750") {
+    throw new Error(
+      `export volume ${volume} is ${JSON.stringify(observed)} inside the container, want "999 999 750"`,
+    );
+  }
+}
+
+const exportRoot = "/var/lib/intern/export";
+
+/** Rejects anything that is not one relative repository object path. */
+function safeObjectPath(objectPath: string): string {
+  if (
+    objectPath === "" ||
+    objectPath.startsWith("/") ||
+    objectPath
+      .split("/")
+      .some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error(`refusing object path ${JSON.stringify(objectPath)}`);
+  }
+  return objectPath;
+}
+
+/**
+ * The published export must be `<export root>/<id>`, the path the API returns.
+ * Anything else would mount a datadir the restore did not publish.
+ */
+function safeExportPath(exportPath: string): string {
+  const prefix = `${exportRoot}/`;
+  const id = exportPath.startsWith(prefix)
+    ? exportPath.slice(prefix.length)
+    : "";
+  if (!/^[0-9a-f]{32}$/.test(id)) {
+    throw new Error(
+      `refusing export path ${JSON.stringify(exportPath)}; want ${prefix}<32 hex>`,
+    );
+  }
+  return exportPath;
+}
 
 /**
  * Build a fixture image once for the host platform. The FTP servers are peers
@@ -538,12 +695,10 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   const plainPasswordFile = path.join(root, "ftp-password");
   const ftpsPasswordFile = path.join(root, "ftps-password");
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-  // The export root is a host bind mount (the reference deployment publishes
-  // restores on the host). OrbStack ignores chown inside the container, so the
-  // test directory is world-writable to give the uid-999 process a usable export
-  // root for F4 restore cases; it lives in a private mkdtemp directory.
-  mkdirSync(exportDir, { recursive: true, mode: 0o777 });
-  chmodSync(exportDir, 0o777);
+  // The reference deployment bind-mounts this directory. It is created so
+  // exportsHostDir names a real path, but the container mounts the named
+  // export volume instead: an OrbStack bind mount stays root-owned.
+  mkdirSync(exportDir, { recursive: true, mode: 0o750 });
 
   const project = `intern-e2e-${randomBytes(4).toString("hex")}`;
   const secretsVolume = `${project}-secrets`;
@@ -551,7 +706,14 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   const ftpsVolume = `${project}-ftps-data`;
   const noKekName = `${project}-nokek`;
   const noKekVolume = `${project}-nokek-metadata`;
-  const volumes = [secretsVolume, ftpVolume, ftpsVolume, noKekVolume];
+  const exportVolume = `${project}-export`;
+  const volumes = [
+    secretsVolume,
+    ftpVolume,
+    ftpsVolume,
+    noKekVolume,
+    exportVolume,
+  ];
 
   const mysqlRootPassword = randomSecret();
   const backupPassword = randomSecret();
@@ -616,6 +778,24 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       () => exec(["docker", "rm", "--force", "--volumes", noKekName]),
       /no such container/i,
     );
+    const exported = exec([
+      "docker",
+      "ps",
+      "--all",
+      "--quiet",
+      "--filter",
+      `label=io.intern.e2e.export=${project}`,
+    ])
+      .stdout.split("\n")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    for (const id of exported) {
+      attempt(
+        `remove exported MySQL ${id}`,
+        () => exec(["docker", "rm", "--force", id]),
+        /no such container/i,
+      );
+    }
     if (existsSync(overrideFile) && existsSync(envFile)) {
       attempt("compose down", () =>
         compose(["down", "--volumes", "--remove-orphans", "--timeout", "120"]),
@@ -694,6 +874,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
 
     // ---------------------------------------------------------------- volumes ---
     prepareSecretsVolume(secretsVolume, secretsDir, compat.mysql_image);
+    prepareExportVolume(exportVolume, compat.mysql_image);
     docker("create plain FTP data volume", ["volume", "create", ftpVolume]);
     docker("create FTPS data volume", ["volume", "create", ftpsVolume]);
     // The fixtures chroot each account to its home, so the repository base path
@@ -742,6 +923,10 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       "      INTERN_TLS_KEY_FILE: /run/intern-secrets/intern_tls_key",
       "    volumes:",
       '      - "intern-secrets:/run/intern-secrets:ro"',
+      "      # Replaces the reference file's host bind mount. A named volume is",
+      "      # the only mount whose owner OrbStack lets the container set, and",
+      "      # operations.md requires uid 999 and mode 0750. Later entries win.",
+      '      - "intern-export:/var/lib/intern/export"',
       "  ftp:",
       `    platform: ${hostPlatform}`,
       `    image: ${yamlString(plainImage)}`,
@@ -772,6 +957,8 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       "volumes:",
       "  intern-secrets:",
       `    name: ${yamlString(secretsVolume)}`,
+      "  intern-export:",
+      `    name: ${yamlString(exportVolume)}`,
       "  ftp-data:",
       `    name: ${yamlString(ftpVolume)}`,
       "  ftps-data:",
@@ -959,6 +1146,76 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
 
     const caBundlePem = readFileSync(path.join(secretsDir, "ca.pem"), "utf8");
 
+    // The intern process is uid 999. Its view of the export root is the
+    // contract operations.md states, checked here rather than assumed.
+    const exportStat = composeMust("inspect the export root", [
+      "exec",
+      "-T",
+      "intern",
+      "stat",
+      "-c",
+      "%u %g %a %F",
+      exportRoot,
+    ]).stdout.trim();
+    if (exportStat !== "999 999 750 directory") {
+      throw new Error(
+        `intern sees ${exportRoot} as ${JSON.stringify(exportStat)}, want "999 999 750 directory"`,
+      );
+    }
+
+    const mysqlClient = [
+      "mysql",
+      "--user=root",
+      "--batch",
+      "--skip-column-names",
+      "--default-character-set=utf8mb4",
+    ];
+    const queryMysql = (sqlText: string): string => {
+      const result = compose(
+        ["exec", "-T", "--env", "MYSQL_PWD", "mysql", ...mysqlClient],
+        {
+          input: sqlText.endsWith("\n") ? sqlText : `${sqlText}\n`,
+          env: { MYSQL_PWD: mysqlRootPassword },
+          timeoutMs: 60_000,
+        },
+      );
+      if (result.code !== 0) {
+        throw new Error(
+          `mysql failed (exit ${result.code}): ${tail(result.stdout + result.stderr)}`,
+        );
+      }
+      return result.stdout.replace(/\n$/, "");
+    };
+
+    const backupsVolume = (): string => {
+      // `docker compose volumes` exists, but it prints a table and has no
+      // machine format. The project name is the volume's prefix.
+      const name = docker("name the backups volume", [
+        "volume",
+        "ls",
+        "--format",
+        "{{.Name}}",
+      ])
+        .stdout.split("\n")
+        .map((line) => line.trim())
+        .find((line) => line === `${project}_intern-backups`);
+      if (name === undefined) {
+        throw new Error(`project ${project} has no intern-backups volume`);
+      }
+      return name;
+    };
+
+    const exportedServers: string[] = [];
+    const removeExported = (name: string): void => {
+      const result = exec(["docker", "rm", "--force", name]);
+      const output = result.stdout + result.stderr;
+      if (result.code !== 0 && !/no such container/i.test(output)) {
+        throw new Error(
+          `remove exported MySQL ${name} failed: ${tail(output)}`,
+        );
+      }
+    };
+
     return {
       origin,
       admin,
@@ -1005,7 +1262,182 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
             : ["network", "connect", "--alias", "ftp", network, container],
         );
       },
-      stop: cleanup,
+      stop: async () => {
+        for (const name of exportedServers) removeExported(name);
+        await cleanup();
+      },
+      exportsHostDir: exportDir,
+      exportVolume,
+      mysqlQuery: async (sqlText) => queryMysql(sqlText),
+      exportEntries: () =>
+        docker(
+          "list the export root",
+          [
+            "run",
+            "--rm",
+            "--platform",
+            platform,
+            "--user",
+            "999:999",
+            "--network",
+            "none",
+            "--volume",
+            `${exportVolume}:/export:ro`,
+            "--entrypoint",
+            "/bin/sh",
+            compat.mysql_image,
+            "-c",
+            "ls -A1 /export",
+          ],
+          { timeoutMs: 60_000 },
+        )
+          .stdout.split("\n")
+          .filter((name) => name !== ""),
+      removeLocalPayload: (objectPath) => {
+        const relative = safeObjectPath(objectPath);
+        // Same removal Repository.ReclaimPublished performs: the published
+        // directory and nothing else. An absent directory is not an error,
+        // matching the engine's idempotent reclaim.
+        docker(
+          "remove one local payload",
+          [
+            "run",
+            "--rm",
+            "--platform",
+            platform,
+            "--user",
+            "999:999",
+            "--network",
+            "none",
+            "--volume",
+            `${backupsVolume()}:/backups`,
+            "--entrypoint",
+            "/bin/sh",
+            compat.mysql_image,
+            "-c",
+            'cd /backups && case "$1" in (*[!A-Za-z0-9_./-]*|""|/*|*..*) echo "refusing $1" >&2; exit 1;; esac && rm -rf -- "$1" && test ! -e "$1"',
+            "sh",
+            relative,
+          ],
+          { timeoutMs: 60_000 },
+        );
+      },
+      startExportedMysql: async (exportPath) => {
+        const published = safeExportPath(exportPath);
+        const name = `${project}-export-${randomBytes(3).toString("hex")}`;
+        // A prepared datadir keeps the source accounts, so the client uses
+        // the source root password rather than one this container never set.
+        const rootPassword = mysqlRootPassword;
+        // The official image entrypoint refuses a datadir it did not initialize
+        // unless MYSQL_ROOT_PASSWORD is set, and then it never reaches
+        // mysqld. The published export is already a prepared datadir, so the
+        // process is mysqld itself with the arguments operations.md section 8
+        // and p4_test.go use. The client password travels in MYSQL_PWD, which
+        // docker reads from this process and does not put on a command line.
+        docker(
+          "start exported MySQL",
+          [
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--platform",
+            platform,
+            "--user",
+            "999:999",
+            "--label",
+            `io.intern.e2e.export=${project}`,
+            "--publish",
+            "127.0.0.1::3306",
+            "--volume",
+            `${exportVolume}:${exportRoot}`,
+            "--entrypoint",
+            "mysqld",
+            compat.mysql_image,
+            `--datadir=${published}/data`,
+            "--socket=/tmp/mysql.sock",
+            "--pid-file=/tmp/mysqld.pid",
+            "--port=3306",
+            "--skip-log-bin",
+            "--innodb-buffer-pool-size=64M",
+          ],
+          { timeoutMs: 60_000 },
+        );
+        exportedServers.push(name);
+        const clientEnv = { MYSQL_PWD: rootPassword };
+        try {
+          await waitFor(
+            `exported MySQL ${name}`,
+            () => {
+              const state = exec([
+                "docker",
+                "inspect",
+                "--format",
+                "{{.State.Status}}",
+                name,
+              ]).stdout.trim();
+              if (state !== "running") {
+                const logs = exec(["docker", "logs", "--tail", "80", name]);
+                throw new Error(
+                  `exported MySQL ${name} is ${state}:\n${tail(logs.stdout + logs.stderr)}`,
+                );
+              }
+              return (
+                exec(
+                  [
+                    "docker",
+                    "exec",
+                    "--env",
+                    "MYSQL_PWD",
+                    name,
+                    "mysqladmin",
+                    "--user=root",
+                    "--socket=/tmp/mysql.sock",
+                    "ping",
+                  ],
+                  { env: clientEnv, timeoutMs: 15_000 },
+                ).code === 0
+              );
+            },
+            180_000,
+            2000,
+          );
+        } catch (error) {
+          removeExported(name);
+          throw error;
+        }
+        return {
+          name,
+          query: async (sqlText) => {
+            const result = exec(
+              [
+                "docker",
+                "exec",
+                "-i",
+                "--env",
+                "MYSQL_PWD",
+                name,
+                ...mysqlClient,
+                "--socket=/tmp/mysql.sock",
+              ],
+              {
+                env: clientEnv,
+                input: sqlText.endsWith("\n") ? sqlText : `${sqlText}\n`,
+                timeoutMs: 60_000,
+              },
+            );
+            if (result.code !== 0) {
+              throw new Error(
+                `exported mysql failed (exit ${result.code}): ${tail(result.stdout + result.stderr)}`,
+              );
+            }
+            return result.stdout.replace(/\n$/, "");
+          },
+          stop: async () => {
+            removeExported(name);
+          },
+        };
+      },
     };
   } catch (error) {
     try {
