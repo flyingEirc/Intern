@@ -121,6 +121,9 @@ func TestHandlerServesHeadWithoutBodyAndRejectsOtherMethods(t *testing.T) {
 		if got.status != http.StatusMethodNotAllowed || got.headers.Get("Allow") != "GET, HEAD" {
 			t.Errorf("%s /login = %d Allow %q, want 405 Allow GET, HEAD", method, got.status, got.headers.Get("Allow"))
 		}
+		if got.headers.Get("Content-Security-Policy") != contentSecurityPolicy || got.headers.Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s /login refusal lacks the security headers: %v", method, got.headers)
+		}
 	}
 }
 

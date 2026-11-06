@@ -53,12 +53,13 @@ func isAPIPath(p string) bool {
 // the export's 404.html.
 func Handler(files fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Every UI answer carries the security headers, refusals included.
+		setSecurityHeaders(w.Header())
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		setSecurityHeaders(w.Header())
 		name, ok := resolve(files, r.URL.Path)
 		if !ok {
 			serveNotFound(w, r, files)
