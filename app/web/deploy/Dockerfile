@@ -20,8 +20,8 @@
 # libprocps.so.8 is the only NEEDED soname the MySQL image lacks.
 #
 # Nothing is downloaded at run time and the runtime stage installs no packages:
-# the only build-time network use is `go mod download` inside the builder stage,
-# which the final image does not contain. The final RUN line fails the build when
+# the only build-time network use is `go mod download` in the builder stage and `bun install` in the frontend stage,
+# neither of which the final image contains. The final RUN line fails the build when
 # any of the three binaries cannot load on this exact base.
 #
 # The image defaults to UID/GID 999, the mysql user of the official MySQL image,
@@ -36,6 +36,26 @@
 ARG GO_IMAGE=golang:1.27.0@sha256:4013ae0f9e7994f8535c58c811f8f863fbed38b72e0d51e6592156f758d66146
 ARG MYSQL_IMAGE=mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a
 ARG PXB_IMAGE=percona/percona-xtrabackup:8.4.0-7@sha256:bf1478c188271b2478faddb92a27e8378364b672b8e399c0df1c17fef8cb0ceb
+ARG BUN_IMAGE=oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
+
+# The UI: a Next.js static export built with the same Bun as mise.toml from
+# the frozen bun.lock, then embedded into intern-web through the webui build
+# tag. The only network use is `bun install` in this build stage; the export
+# and the license texts of the packages it can contain are all the final image
+# receives from it.
+FROM ${BUN_IMAGE} AS frontend
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /src/app/web/frontend
+COPY app/web/frontend/package.json app/web/frontend/bun.lock app/web/frontend/bunfig.toml ./
+RUN bun install --frozen-lockfile
+COPY app/web/frontend ./
+ARG SOURCE_SHA=unknown
+# _next/static/<build id>/ is served as immutable, so the id follows the source;
+# without a revision Next generates a random one rather than a shared constant.
+RUN set -eu; \
+    if [ "${SOURCE_SHA}" != unknown ]; then export INTERN_BUILD_ID="${SOURCE_SHA}"; fi; \
+    bun run build; \
+    bun scripts/collect-licenses.ts /out/licenses
 
 FROM ${GO_IMAGE} AS builder
 ENV GOTOOLCHAIN=local
@@ -47,8 +67,9 @@ COPY app/web/go.mod app/web/go.sum ./app/web/
 RUN cd app/web && go mod download
 COPY internal ./internal
 COPY app/web ./app/web
+COPY --from=frontend /src/app/web/frontend/out ./app/web/internal/webui/dist
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -o /out/intern-web ./app/web
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -buildvcs=false -tags webui -o /out/intern-web ./app/web
 
 # License texts of the modules actually linked into intern-web. Each text is
 # copied unmodified out of the module cache and the manifest records module path,
@@ -104,6 +125,8 @@ COPY --from=xtrabackup /usr/share/licenses/procps-ng/COPYING /usr/share/licenses
 COPY --from=xtrabackup /usr/share/licenses/procps-ng/COPYING.LIB /usr/share/licenses/intern/procps-ng/COPYING.LIB
 # The modules linked into intern-web, with their license texts and manifest.
 COPY --from=builder /out/licenses /usr/share/licenses/intern/go-internals
+# The JavaScript packages the embedded UI export can contain, with their texts.
+COPY --from=frontend /out/licenses /usr/share/licenses/intern/web-ui
 
 RUN mysqld --version \
  && xtrabackup --version \
@@ -140,6 +163,7 @@ RUN set -eu \
       echo "  /usr/share/licenses/intern/percona-xtrabackup/COPYING"; \
       echo "  /usr/share/licenses/intern/procps-ng/COPYING and COPYING.LIB"; \
       echo "  /usr/share/licenses/intern/go-internals/GO-MODULES.txt (texts under go-internals/go/)"; \
+      echo "  /usr/share/licenses/intern/web-ui/JS-PACKAGES.txt (texts under web-ui/js/)"; \
       echo ""; \
       echo "Copied files that belong to no package of the final image (provenance and digest):"; \
       for path in $( { ls /usr/lib/private/*.so* 2>/dev/null || true; echo /usr/lib64/libprocps.so.8; echo /usr/lib64/libprocps.so.8.0.3; } | LC_ALL=C sort ); do \
@@ -147,6 +171,7 @@ RUN set -eu \
       done; \
     } >/usr/share/licenses/intern/VERSIONS.txt \
  && test -s /usr/share/licenses/intern/go-internals/GO-MODULES.txt \
+ && test -s /usr/share/licenses/intern/web-ui/JS-PACKAGES.txt \
  && chmod 0644 /usr/share/licenses/intern/VERSIONS.txt
 
 LABEL org.opencontainers.image.title="Intern Web" \
