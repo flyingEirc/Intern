@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ReplicaStatusBadge } from "@/components/resources/replica-status";
 import { ResourceError } from "@/components/resources/states";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -36,12 +37,32 @@ import {
 } from "@/lib/resources/queries";
 import { backupKindText, backupStatusText } from "@/lib/resources/runs";
 
+/** Link to the restore wizard for one completed backup, when the session may plan. */
+export function RestorePointLink({ backupId }: { backupId: string }) {
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      nativeButton={false}
+      render={<Link href={`/restores/new?backup_id=${backupId}`} />}
+    >
+      恢复到此备份
+    </Button>
+  );
+}
+
 /**
  * One source's chains and its protection points. The local point and every
  * remote point are separate rows: a remote point that lags is shown as lagging,
  * never folded into the local one.
  */
-export function SourceProtection({ sourceId }: { sourceId: string }) {
+export function SourceProtection({
+  sourceId,
+  canPlanRestore = false,
+}: {
+  sourceId: string;
+  canPlanRestore?: boolean;
+}) {
   const chains = useSourceChains(sourceId);
   const protection = useSourceProtection(sourceId);
   const repositories = useRepositoryChoices();
@@ -163,23 +184,27 @@ export function SourceProtection({ sourceId }: { sourceId: string }) {
                         {member.local_present ? "存在" : "已不在"}
                       </TableCell>
                       <TableCell>
-                        <Link
-                          className="flex flex-wrap items-center gap-1 underline-offset-4 hover:underline"
-                          href={`/backups/detail?id=${member.id}`}
-                        >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link
+                            className="underline-offset-4 hover:underline"
+                            href={`/backups/detail?id=${member.id}`}
+                          >
+                            查看副本状态
+                          </Link>
                           {/* The chains contract does not carry replica rows
                               (members list kind, seq, status, presence, LSNs
                               and payload identity); the backup detail reads
                               them, so an empty list here is not "no replica". */}
-                          {member.replicas.length === 0
-                            ? "查看副本状态"
-                            : member.replicas.map((replica) => (
-                                <ReplicaStatusBadge
-                                  key={replica.repository_id}
-                                  status={replica.status}
-                                />
-                              ))}
-                        </Link>
+                          {member.replicas.map((replica) => (
+                            <ReplicaStatusBadge
+                              key={replica.repository_id}
+                              status={replica.status}
+                            />
+                          ))}
+                          {canPlanRestore && member.status === "completed" ? (
+                            <RestorePointLink backupId={member.id} />
+                          ) : null}
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}

@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { client } from "./client";
 import { ApiError } from "./errors";
-import { currentSession, login, logout } from "./generated/sdk.gen";
+import {
+  currentSession,
+  login,
+  logout,
+  planRestore,
+} from "./generated/sdk.gen";
 
 const user = {
   id: "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a3b",
@@ -123,6 +128,29 @@ describe("generated SDK with the contract error interceptor", () => {
       message: "Too many login attempts",
       requestId: "req-2",
       retryAfter: 17,
+    });
+  });
+
+  it("keeps the machine code of a restore_refused error", async () => {
+    fetchMock.mockResolvedValue(
+      json(409, {
+        error: {
+          code: "restore_refused",
+          message: "Restore refused",
+          request_id: "req-refused",
+          detail: { code: "chain_broken" },
+        },
+      }),
+    );
+    const failure = await planRestore({
+      body: { backup_id: "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a06" },
+      throwOnError: true,
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({
+      status: 409,
+      code: "restore_refused",
+      detailCode: "chain_broken",
     });
   });
 

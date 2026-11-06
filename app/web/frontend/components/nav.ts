@@ -3,6 +3,7 @@ import {
   CopyIcon,
   DatabaseIcon,
   HardDriveIcon,
+  HistoryIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   ListChecksIcon,
@@ -49,6 +50,12 @@ export const navItems: NavItem[] = [
     icon: CopyIcon,
     permission: "resources:read",
   },
+  {
+    href: "/restores",
+    title: "恢复",
+    icon: HistoryIcon,
+    permission: "restores:read",
+  },
   { href: "/account", title: "账户与密码", icon: KeyRoundIcon },
 ];
 
@@ -72,6 +79,8 @@ const pageTitles: Record<string, string> = {
   "/policies/detail": "策略详情",
   "/runs/detail": "运行详情",
   "/backups/detail": "备份详情",
+  "/restores/new": "新建恢复",
+  "/restores/detail": "恢复详情",
 };
 
 /**

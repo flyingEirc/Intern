@@ -1,13 +1,17 @@
 import {
+  keepPreviousData,
   type QueryClient,
   useInfiniteQuery,
   useQuery,
 } from "@tanstack/react-query";
+import { client } from "@/lib/api/client";
 import {
   getBackupOptions,
   getBackupQueryKey,
   getPolicyQueryKey,
   getRepositoryQueryKey,
+  getRestoreOptions,
+  getRestoreQueryKey,
   getRunOptions,
   getRunQueryKey,
   getSourceOptions,
@@ -21,6 +25,9 @@ import {
   listRepositoriesInfiniteOptions,
   listRepositoriesOptions,
   listRepositoriesQueryKey,
+  listRestoreLogsQueryKey,
+  listRestoresInfiniteOptions,
+  listRestoresQueryKey,
   listRunLogsQueryKey,
   listRunsInfiniteOptions,
   listRunsQueryKey,
@@ -30,12 +37,15 @@ import {
   listSourcesQueryKey,
   previewPolicyScheduleOptions,
 } from "@/lib/api/generated/@tanstack/react-query.gen";
-import { listRunLogs } from "@/lib/api/generated/sdk.gen";
+import { listRestoreLogs, listRunLogs } from "@/lib/api/generated/sdk.gen";
 import type {
   ReplicaStatus,
+  RestoreLog,
+  RestoreStatus,
   RunLog,
   RunStatus,
 } from "@/lib/api/generated/types.gen";
+import { isTerminalRestore } from "@/lib/resources/restore";
 import { sequenceNumber } from "@/lib/runs/events";
 
 const pageSize = 50;
@@ -155,6 +165,7 @@ export function useRunLog(id: string | null) {
       let truncated = false;
       for (;;) {
         const { data } = await listRunLogs({
+          client,
           path: { id: id ?? "" },
           query: { limit: logPageSize, after_seq: afterSeq },
           signal,
@@ -261,4 +272,100 @@ export function useReplicaQueue(filters: ReplicaListFilters) {
       },
     }),
   );
+}
+
+export type RestoreListFilters = {
+  status?: RestoreStatus;
+};
+
+/** Newest first, one cursor page at a time; the status filter is an exact match. */
+export function useRestorePages(filters: RestoreListFilters) {
+  return useInfiniteQuery({
+    ...listRestoresInfiniteOptions({
+      query: { limit: pageSize, status: filters.status },
+    }),
+    initialPageParam: undefined as unknown as string,
+    getNextPageParam: (last) => last.next_before ?? undefined,
+  });
+}
+
+const restorePollMs = 2000;
+
+/**
+ * One restore. The contract has no restore SSE, so a non-terminal row is
+ * polled until a terminal write nulls the phase.
+ */
+export function useRestore(id: string | null) {
+  return useQuery({
+    ...getRestoreOptions({ path: { id: id ?? "" } }),
+    enabled: id !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status !== undefined && !isTerminalRestore(status)
+        ? restorePollMs
+        : false;
+    },
+  });
+}
+
+export type RestoreLogView = {
+  items: RestoreLog[];
+  truncated: boolean;
+};
+
+/**
+ * The bounded restore log, walked with `next_after` and polled while live.
+ * `live` is undefined until the restore row is known; the key carries it, so
+ * the switch to a terminal row reads the log once more and the terminal
+ * entries written after the last poll are not lost.
+ */
+export function useRestoreLog(id: string | null, live: boolean | undefined) {
+  return useQuery({
+    queryKey: [
+      ...listRestoreLogsQueryKey({
+        path: { id: id ?? "" },
+        query: { limit: logPageSize },
+      }),
+      { live },
+    ],
+    enabled: id !== null && live !== undefined,
+    placeholderData: keepPreviousData,
+    refetchInterval: live ? restorePollMs : false,
+    queryFn: async ({ signal }): Promise<RestoreLogView> => {
+      const items: RestoreLog[] = [];
+      let afterSeq = 0;
+      let truncated = false;
+      for (;;) {
+        const { data } = await listRestoreLogs({
+          client,
+          path: { id: id ?? "" },
+          query: { limit: logPageSize, after_seq: afterSeq },
+          signal,
+          throwOnError: true,
+        });
+        items.push(
+          ...data.items.map((item) => ({
+            ...item,
+            seq: sequenceNumber(item.seq),
+          })),
+        );
+        truncated = data.truncated;
+        if (data.next_after === null || data.items.length === 0) {
+          return { items, truncated };
+        }
+        afterSeq = sequenceNumber(data.next_after);
+      }
+    },
+  });
+}
+
+export function invalidateRestore(client: QueryClient, id: string) {
+  client.invalidateQueries({ queryKey: listRestoresQueryKey() });
+  client.invalidateQueries({ queryKey: getRestoreQueryKey({ path: { id } }) });
+  client.invalidateQueries({
+    queryKey: listRestoreLogsQueryKey({
+      path: { id },
+      query: { limit: logPageSize },
+    }),
+  });
 }

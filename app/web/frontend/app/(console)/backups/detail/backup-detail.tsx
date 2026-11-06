@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { RotateCwIcon } from "lucide-react";
+import { HistoryIcon, RotateCwIcon } from "lucide-react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ReplicaStatusBadge } from "@/components/resources/replica-status";
 import {
@@ -94,7 +95,19 @@ export function BackupDetail() {
       <PageHeader
         title={`${backupKindText(data.kind)}备份`}
         description="LSN、大小、校验和、本地是否仍在，以及每个仓库的副本状态。"
-      />
+      >
+        {hasPermission(session.data?.permissions, "restores:plan") &&
+        data.status === "completed" ? (
+          <Button
+            variant="outline"
+            nativeButton={false}
+            render={<Link href={`/restores/new?backup_id=${data.id}`} />}
+          >
+            <HistoryIcon data-icon="inline-start" />
+            恢复到此备份
+          </Button>
+        ) : null}
+      </PageHeader>
 
       <Card>
         <CardHeader>

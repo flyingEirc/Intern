@@ -37,7 +37,9 @@ export const unauthorizedBody = {
 };
 
 /** Routes each request by "METHOD /path" to a queued response. */
-export function routeFetch(routes: Record<string, Array<() => Response>>) {
+export function routeFetch(
+  routes: Record<string, Array<() => Response | Promise<Response>>>,
+) {
   fetchMock.mockImplementation(async (input) => {
     const request = input as Request;
     const key = `${request.method} ${new URL(request.url).pathname}`;
