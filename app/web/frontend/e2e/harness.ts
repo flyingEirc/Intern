@@ -118,7 +118,8 @@ export class Browser {
       "--fn",
       "document.getAnimations().every((a) => a.playState !== 'running')",
     );
-    this.ab("screenshot", file);
+    // Full page: the evidence of a section below the fold must be in the image.
+    this.ab("screenshot", "--full", file);
     return path.basename(file);
   }
 
