@@ -1,9 +1,17 @@
-// Shared driver pieces for the real-stack end-to-end scripts (e2e/f2.ts,
-// e2e/f3.ts): an agent-browser session bound to one evidence directory, a
-// TLS-tolerant API client for the stack's self-signed origin, and the run
-// manifest. Nothing here asserts product behavior; the scripts do.
-import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+// Shared driver pieces for the end-to-end scripts: an agent-browser session
+// bound to one evidence directory, a TLS-tolerant API client, a native
+// `bin/intern-web` for the suites that need no external component, and the
+// run manifest. Nothing here asserts product behavior; the scripts do.
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export const repo = path.resolve(import.meta.dir, "../../../..");
@@ -174,10 +182,14 @@ export class Browser {
     });
   }
 
-  writeManifest(commit: string, dirty: boolean): void {
+  /** Writes this session's steps, plus those of `others` sharing the run, in id order. */
+  writeManifest(commit: string, dirty: boolean, others: Browser[] = []): void {
+    const steps = [this, ...others]
+      .flatMap((browser) => browser.steps)
+      .sort((a, b) => a.id.localeCompare(b.id));
     writeFileSync(
       path.join(this.evidence, "manifest.json"),
-      `${JSON.stringify({ commit, dirty, steps: this.steps }, null, 2)}\n`,
+      `${JSON.stringify({ commit, dirty, steps }, null, 2)}\n`,
     );
   }
 }
@@ -285,4 +297,88 @@ export function stopOnSignal(stop: () => Promise<void>): void {
       void stop().finally(() => process.exit(130));
     });
   }
+}
+
+/**
+ * One native `bin/intern-web` on loopback HTTP: migrated metadata, one
+ * administrator created through `--password-stdin`, and the process itself.
+ * `stop()` kills the process and removes the metadata directory.
+ */
+export async function startNative(options: {
+  admin: { username: string; password: string };
+}): Promise<{
+  origin: string;
+  work: string;
+  stop: () => Promise<void>;
+}> {
+  const binary = path.join(repo, "bin/intern-web");
+  const work = mkdtempSync(path.join(tmpdir(), "intern-web-e2e-"));
+  const metadata = path.join(work, "metadata");
+  mkdirSync(metadata, { mode: 0o700 });
+  chmodSync(metadata, 0o700);
+  const port = 20_000 + Math.floor(Math.random() * 20_000);
+  const origin = `http://127.0.0.1:${port}`;
+
+  const command = (args: string[], input?: string) => {
+    const result = spawnSync(binary, args, { input, encoding: "utf8" });
+    if (result.status !== 0) {
+      rmSync(work, { recursive: true, force: true });
+      throw new Error(
+        `e2e: intern-web ${args.slice(0, 2).join(" ")} exited ${result.status}: ${result.stderr.trim()}`,
+      );
+    }
+  };
+  command(["migrate", "up", "--metadata-dir", metadata]);
+  command(
+    [
+      "user",
+      "create-admin",
+      "--username",
+      options.admin.username,
+      "--metadata-dir",
+      metadata,
+      "--password-stdin",
+    ],
+    `${options.admin.password}\n`,
+  );
+
+  const server: ChildProcess = spawn(
+    binary,
+    ["serve", "--metadata-dir", metadata, "--listen", `127.0.0.1:${port}`],
+    { stdio: ["ignore", "ignore", "pipe"] },
+  );
+  let serverLog = "";
+  server.stderr?.on("data", (chunk: Buffer) => {
+    serverLog += chunk.toString();
+  });
+  const deadline = Date.now() + 20_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    try {
+      if ((await fetch(`${origin}/readyz`)).status === 200) {
+        ready = true;
+        break;
+      }
+    } catch {
+      // Not listening yet.
+    }
+    await Bun.sleep(100);
+  }
+  if (!ready) {
+    server.kill("SIGTERM");
+    rmSync(work, { recursive: true, force: true });
+    throw new Error(`e2e: intern-web did not become ready:\n${serverLog}`);
+  }
+
+  return {
+    origin,
+    work,
+    stop: async () => {
+      server.kill("SIGTERM");
+      if (server.exitCode === null) {
+        await once(server, "exit");
+      }
+      rmSync(work, { recursive: true, force: true });
+    },
+  };
 }
