@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   zBackup,
+  zListSourceChainsResponse,
   zPolicySchedule,
   zProtection,
   zReplica,
@@ -320,6 +321,27 @@ async function main(): Promise<void> {
       sourcePage.includes("f3-ftp"),
       "the remote protection point is not listed per repository",
     );
+    // The chain list itself: every member the API reports, and no contract
+    // error in its place.
+    const chains = zListSourceChainsResponse.parse(
+      (await api("GET", `/api/v1/sources/${sourceId}/chains`, admin)).json,
+    );
+    const members = chains.items.flatMap((chain) => chain.members);
+    expect(
+      members.length === 3,
+      `expected 3 chain members, got ${members.length}`,
+    );
+    expect(
+      !sourcePage.includes("无法读取备份链"),
+      "the chain list failed to load on the source page",
+    );
+    for (const member of members) {
+      const linked = b.ab(
+        "eval",
+        `document.querySelector('a[href="/backups/detail?id=${member.id}"]') !== null`,
+      );
+      expect(linked === "true", `chain member ${member.id} is not listed`);
+    }
     b.record({
       id: "05-chain-protection",
       acceptance: "F3-A2",
