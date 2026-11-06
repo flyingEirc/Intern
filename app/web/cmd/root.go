@@ -16,6 +16,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/server"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/app/web/internal/webui"
 	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
@@ -112,7 +113,9 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 		ShutdownTimeout: c.ShutdownTimeout, TLSTerminatedByProxy: c.TLSTerminatedByProxy,
 	}
 	logStart(logger, &c, database)
-	srv := server.New(config, server.Handler(engine))
+	// Builds with the webui tag serve the embedded UI on every non-API path of
+	// the same origin; other builds serve the API alone, unchanged.
+	srv := server.New(config, webui.Mount(server.Handler(engine), webui.Assets()))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
 	return server.Run(command.Context(), srv, config)
 }
@@ -122,7 +125,7 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 func logStart(logger *slog.Logger, c *configuration, database *store.Store) {
 	plainProxy := c.TLSTerminatedByProxy && c.TLS.CertFile == ""
 	logger.Info("starting server", "listen", c.Listen, "instance_id", database.InstanceID(),
-		"tls", c.TLS.CertFile != "", "tls_terminated_by_proxy", plainProxy)
+		"tls", c.TLS.CertFile != "", "tls_terminated_by_proxy", plainProxy, "webui", webui.Assets() != nil)
 	if plainProxy {
 		logger.Warn("serving plain HTTP behind a TLS-terminating proxy; firewall this listener so clients cannot connect directly. This mode is not end-to-end TLS.",
 			"trusted_proxies", c.TrustedProxies)

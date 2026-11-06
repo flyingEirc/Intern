@@ -166,6 +166,34 @@ jobs:
         run: .github/scripts/needs-ci-cases.sh
       - name: Scope selection accept and reject cases
         run: .github/scripts/quality-scope-cases.sh
+      # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
+      # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
+      # check, and finally the static export embedded in a webui build.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+      - name: Frontend install from the frozen lockfile
+        working-directory: app/web/frontend
+        run: bun install --frozen-lockfile
+      - name: Frontend Biome, TypeScript, Vitest and OpenAPI client drift
+        working-directory: app/web/frontend
+        run: |
+          set -euo pipefail
+          bun run ci
+          bun run typecheck
+          bun run test
+          bun run generate:check
+      - name: Frontend static export embedded through the webui tag
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+          INTERN_BUILD_ID: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          (cd app/web/frontend && bun run build)
+          rm -rf app/web/internal/webui/dist
+          cp -R app/web/frontend/out app/web/internal/webui/dist
+          go build -tags webui -o .cache/intern-web-webui ./app/web
+          go test -race -tags webui ./app/web/internal/webui/ ./app/web/cmd/
       - name: Publish the OpenAPI contract with its digest
         run: |
           set -euo pipefail
@@ -187,6 +215,9 @@ jobs:
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
       - name: Lint including integration code
         run: golangci-lint run --build-tags=integration ./internal/... ./app/cli/... ./app/web/...
+      # The export staged above lets the webui-tagged embed file compile.
+      - name: Lint the webui build of the Web module
+        run: golangci-lint run --build-tags=webui ./app/web/...
 
   container-mysql:
     needs: scope
