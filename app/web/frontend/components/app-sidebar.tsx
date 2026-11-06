@@ -3,7 +3,7 @@
 import { DatabaseBackupIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { navItems } from "@/components/nav";
+import { navItemsFor } from "@/components/nav";
 import {
   Sidebar,
   SidebarContent,
@@ -17,9 +17,15 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar";
 import { UserMenu } from "@/components/user-menu";
-import type { User } from "@/lib/api/generated/types.gen";
+import type { Permission, User } from "@/lib/api/generated/types.gen";
 
-export function AppSidebar({ user }: { user: User }) {
+export function AppSidebar({
+  user,
+  permissions,
+}: {
+  user: User;
+  permissions: Permission[];
+}) {
   const pathname = usePathname();
   return (
     <Sidebar collapsible="icon">
@@ -44,10 +50,13 @@ export function AppSidebar({ user }: { user: User }) {
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems.map((item) => (
+              {navItemsFor(permissions).map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton
-                    isActive={pathname === item.href}
+                    isActive={
+                      pathname === item.href ||
+                      pathname.startsWith(`${item.href}/`)
+                    }
                     tooltip={item.title}
                     render={<Link href={item.href} />}
                   >

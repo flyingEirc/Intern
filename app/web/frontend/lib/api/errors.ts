@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { PreflightResult } from "./generated/types.gen";
 import { zErrorResponse } from "./generated/zod.gen";
 
 type ContractErrorCode = z.infer<typeof zErrorResponse>["error"]["code"];
@@ -18,6 +19,11 @@ export class ApiError extends Error {
   readonly requestId: string | undefined;
   /** Whole seconds from Retry-After on 429 and 503, when present. */
   readonly retryAfter: number | undefined;
+  /**
+   * The structured preflight outcome of a 409 `preflight_failed`. The error
+   * envelope carries it; the message alone cannot describe which check failed.
+   */
+  readonly preflight: PreflightResult | undefined;
 
   constructor(init: {
     status: number;
@@ -25,6 +31,7 @@ export class ApiError extends Error {
     message: string;
     requestId?: string;
     retryAfter?: number;
+    preflight?: PreflightResult;
   }) {
     super(init.message);
     this.name = "ApiError";
@@ -32,6 +39,7 @@ export class ApiError extends Error {
     this.code = init.code;
     this.requestId = init.requestId;
     this.retryAfter = init.retryAfter;
+    this.preflight = init.preflight;
   }
 }
 
@@ -87,6 +95,7 @@ export function toApiError(
     message: parsed.data.error.message,
     requestId: parsed.data.error.request_id,
     retryAfter: retryAfterSeconds(response),
+    preflight: parsed.data.error.preflight,
   });
 }
 
