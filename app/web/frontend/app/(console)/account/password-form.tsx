@@ -44,6 +44,18 @@ type PasswordFields = {
   confirm_password: string;
 };
 
+// PUT /auth/password answers several cases with 400 validation_failed; only
+// this fixed message (app/web/internal/server/auth_routes.go) means the current
+// password was wrong. Any other 400 is shown as the backend reported it.
+function isWrongCurrentPassword(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 400 &&
+    error.code === "validation_failed" &&
+    error.message === "current password is incorrect"
+  );
+}
+
 export function PasswordForm() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -69,6 +81,13 @@ export function PasswordForm() {
           router.replace(loginPath("/", "password-changed"));
           return;
         }
+        // The password did change; only this session's state is unknown.
+        toast.add({
+          type: "warning",
+          title: "密码已修改",
+          description: `无法确认本会话是否仍然有效：${describeError(error)}。如后续操作失败，请用新密码重新登录。`,
+        });
+        return;
       }
       toast.add({
         type: "success",
@@ -77,9 +96,7 @@ export function PasswordForm() {
       });
     },
     onError: (error) => {
-      // The contract answers a wrong current password with 400; the form has
-      // already enforced the only new-password rule (12–256 characters).
-      if (error instanceof ApiError && error.status === 400) {
+      if (isWrongCurrentPassword(error)) {
         setErrors({ current_password: "当前密码不正确" });
       }
     },
@@ -107,8 +124,7 @@ export function PasswordForm() {
   }
 
   const failure =
-    change.error &&
-    !(change.error instanceof ApiError && change.error.status === 400)
+    change.error && !isWrongCurrentPassword(change.error)
       ? describeError(change.error)
       : null;
 

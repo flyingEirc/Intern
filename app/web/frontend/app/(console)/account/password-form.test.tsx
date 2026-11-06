@@ -91,6 +91,58 @@ describe("PasswordForm", () => {
     );
   });
 
+  it("does not claim this session survived when it cannot be confirmed", async () => {
+    routeFetch({
+      "PUT /api/v1/auth/password": [noContent],
+      "GET /api/v1/auth/session": [
+        () =>
+          json(
+            503,
+            {
+              error: {
+                code: "unavailable",
+                message: "Metadata database is not ready",
+                request_id: "req-503",
+              },
+            },
+            { "Retry-After": "5" },
+          ),
+      ],
+    });
+    renderWithClient(<PasswordForm />);
+    await fill("old-password-123", "new-password-4567");
+
+    expect(
+      await screen.findByText(/无法确认本会话是否仍然有效/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("本会话保持登录，其他会话已全部失效。"),
+    ).not.toBeInTheDocument();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("shows other 400 answers as reported instead of blaming the current password", async () => {
+    routeFetch({
+      "PUT /api/v1/auth/password": [
+        () =>
+          json(400, {
+            error: {
+              code: "invalid_json",
+              message: "Request body is not valid JSON",
+              request_id: "req-4",
+            },
+          }),
+      ],
+    });
+    renderWithClient(<PasswordForm />);
+    await fill("old-password-123", "new-password-4567");
+
+    expect(
+      await screen.findByText(/请求失败（HTTP 400，invalid_json）/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("当前密码不正确")).not.toBeInTheDocument();
+  });
+
   it("does not send a new password that fails the shared rule", async () => {
     renderWithClient(<PasswordForm />);
     await fill("old-password-123", "short", "short");
