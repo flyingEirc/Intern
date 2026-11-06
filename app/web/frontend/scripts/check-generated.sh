@@ -7,8 +7,8 @@ set -eu
 cd "$(dirname "$0")/.."
 contract=../api/openapi.yaml
 generated=lib/api/generated
-# openapi-ts 0.99.0 exits 0 when the input is missing or unparsable, so both
-# conditions are checked here instead of trusting its status.
+# openapi-ts 0.99.0 can exit 0 when the input is missing or unparsable, so
+# those conditions are checked here as well as its exit status.
 if [ ! -s "$contract" ]; then
     echo "generate:check: $contract is missing or empty" >&2
     exit 1
@@ -17,9 +17,10 @@ before=$(mktemp -d "${TMPDIR:-/tmp}/intern-generated.XXXXXX")
 trap 'rm -rf "$before"' EXIT HUP INT TERM
 cp -R "$generated" "$before/generated"
 rm -f openapi-ts-error-*.log
-bunx --bun openapi-ts > /dev/null
-if ls openapi-ts-error-*.log > /dev/null 2>&1; then
-    cat openapi-ts-error-*.log >&2
+status=0
+bunx --bun openapi-ts > /dev/null || status=$?
+if [ "$status" -ne 0 ] || ls openapi-ts-error-*.log > /dev/null 2>&1; then
+    cat openapi-ts-error-*.log >&2 2>/dev/null || true
     rm -f openapi-ts-error-*.log
     rm -rf "$generated"
     cp -R "$before/generated" "$generated"
