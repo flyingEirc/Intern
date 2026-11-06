@@ -361,6 +361,15 @@ async function main(): Promise<void> {
     );
     b.open(`${stack.origin}/backups/detail?id=${latest.id}`);
     b.waitText(latest.payload_sha256);
+    // The per-repository replica of this backup, as GET /backups/{id} reports.
+    expect(
+      latest.replicas.some(
+        (replica) =>
+          replica.repository_id === ftpId && replica.status === "verified",
+      ),
+      "the API reports no verified FTP replica for the latest backup",
+    );
+    b.waitText("已校验");
     b.record({
       id: "06-backup-detail",
       acceptance: "F3-A1",
