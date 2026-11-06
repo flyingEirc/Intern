@@ -8,8 +8,9 @@ GOTOOLCHAIN = "local"
 NEXT_TELEMETRY_DISABLED = "1"
 
 [tasks.build]
-description = "Build the CLI and Web server into bin/intern and bin/intern-web"
-run = ["go build -o bin/intern ./app/cli", "go build -o bin/intern-web ./app/web"]
+description = "Build the CLI into bin/intern and the Web server with the embedded UI into bin/intern-web"
+depends = ["frontend:build"]
+run = ["go build -o bin/intern ./app/cli", "go build -tags webui -o bin/intern-web ./app/web"]
 
 [tasks."frontend:install"]
 description = "Install the Web frontend dependencies exactly as bun.lock records them"
@@ -27,6 +28,29 @@ description = "Biome CI, TypeScript, Vitest, then the OpenAPI client drift check
 depends = ["frontend:install"]
 dir = "{{config_root}}/app/web/frontend"
 run = ["bun run ci", "bun run typecheck", "bun run test", "bun run generate:check"]
+
+[tasks."frontend:build"]
+description = "Build the static export and stage it in app/web/internal/webui/dist for the webui embed"
+depends = ["frontend:install"]
+run = '''
+#!/usr/bin/env sh
+set -eu
+# _next/static/<build id>/ is served as immutable, so the id follows the commit.
+export INTERN_BUILD_ID="${INTERN_BUILD_ID:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo dev)}"
+(cd app/web/frontend && rm -rf out && bun run build)
+rm -rf app/web/internal/webui/dist
+cp -R app/web/frontend/out app/web/internal/webui/dist
+'''
+
+[tasks."frontend:e2e"]
+description = "agent-browser end-to-end run against a real bin/intern-web with the embedded UI"
+depends = ["build"]
+dir = "{{config_root}}/app/web/frontend"
+raw_args = true
+run = '''
+#!/usr/bin/env sh
+exec bun e2e/run.ts "$@"
+'''
 
 [tasks.run]
 description = "Run the CLI (mise run run --help)"

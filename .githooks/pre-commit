@@ -7,8 +7,10 @@ project_prefix=$(git -C "$project_root" rev-parse --show-prefix)
 
 # Documentation, policy and test-only commits do not trigger business-code checks.
 source_changes=$(git -C "$project_root" diff --cached --name-only -- '*.go' ':!**/*_test.go')
-if [ -z "$source_changes" ]; then
-    echo "pre-commit: no business Go source staged; skipping build/test/lint"
+# The frontend, including its tests, and the OpenAPI contract it is generated from.
+frontend_changes=$(git -C "$project_root" diff --cached --name-only -- 'app/web/frontend' 'app/web/api/openapi.yaml' ':!*.md')
+if [ -z "$source_changes" ] && [ -z "$frontend_changes" ]; then
+    echo "pre-commit: no business Go source or frontend change staged; skipping checks"
     exit 0
 fi
 
@@ -17,9 +19,16 @@ if ! command -v mise >/dev/null 2>&1; then
     exit 1
 fi
 
-classification=$(mise -C "$project_root" exec -- go run "$project_root/.githooks/source-changes.go" "$project_root")
-if [ "$classification" = "unchanged" ]; then
-    echo "pre-commit: only comments or non-business files changed; skipping build/test/lint"
+go_check=false
+if [ -n "$source_changes" ]; then
+    classification=$(mise -C "$project_root" exec -- go run "$project_root/.githooks/source-changes.go" "$project_root")
+    if [ "$classification" = "unchanged" ]; then
+        echo "pre-commit: only comments or non-business Go files changed; skipping build/test/lint"
+    else
+        go_check=true
+    fi
+fi
+if ! $go_check && [ -z "$frontend_changes" ]; then
     exit 0
 fi
 
@@ -30,4 +39,10 @@ git -C "$repo_root" checkout-index --all --prefix="$snapshot/"
 cd "$snapshot/$project_prefix"
 
 # Trust only this staged config for this invocation, including in a fresh temp path.
-MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:+$MISE_TRUSTED_CONFIG_PATHS:}$PWD/mise.toml" mise run check
+export MISE_TRUSTED_CONFIG_PATHS="${MISE_TRUSTED_CONFIG_PATHS:+$MISE_TRUSTED_CONFIG_PATHS:}$PWD/mise.toml"
+if $go_check; then
+    mise run check
+fi
+if [ -n "$frontend_changes" ]; then
+    mise run frontend:check
+fi
