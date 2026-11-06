@@ -2,11 +2,14 @@
 # Accept and reject cases for quality-scope.sh. Every case builds a scratch Git
 # repository, provides refs/remotes/origin/main the way actions/checkout with
 # fetch-depth 0 does, runs the script with the environment the scope job
-# passes, and compares the required output. The cases cover the base selection
-# of each ref kind, the unusable bases and the failed diff that must end in
-# required=true with exit status 0 and one logged reason, and the
-# documentation/CI-only follow-up push that the push delta used to pass for a
-# head whose code never had a completed matrix.
+# passes, and compares the fast, cli and web outputs. The cases cover the rule
+# and the base selection of each event and ref kind (main runs every tier, a
+# branch push runs the fast checks only, a branch workflow_dispatch runs the
+# tiers of its needs-ci.sh tier or every tier with full=true), the unusable
+# bases and the failed diff that must end in the widest verdict of the event
+# with exit status 0 and one logged reason, and the documentation/CI-only
+# follow-up push that the push delta used to pass for a head whose code never
+# had a completed run.
 #
 # SCOPE_SCRIPT and SCOPE_CONTRACT point the cases at another script or
 # contract.json than the ones next to this file.
@@ -58,77 +61,92 @@ commit() {
 	git rev-parse HEAD
 }
 
-# scope EVENT REF BEFORE HEAD runs the script as the scope job does and sets
-# required, status and log.
+# scope EVENT REF BEFORE HEAD [FULL] runs the script as the scope job does and
+# sets verdict ("FAST CLI WEB"), status and log.
 scope() {
 	: > "$out"
-	if log=$(EVENT_NAME=$1 REF=$2 BEFORE_SHA=$3 HEAD_SHA=$4 GITHUB_OUTPUT=$out "$scope_script" 2>&1); then
+	if log=$(EVENT_NAME=$1 REF=$2 BEFORE_SHA=$3 HEAD_SHA=$4 FULL_INPUT=${5:-} GITHUB_OUTPUT=$out "$scope_script" 2>&1); then
 		status=0
 	else
 		status=$?
 	fi
-	required=$(sed -n 's/^required=//p' "$out")
+	verdict="$(sed -n 's/^fast=//p' "$out") $(sed -n 's/^cli=//p' "$out") $(sed -n 's/^web=//p' "$out")"
 }
 
-# expect NAME REQUIRED [REASON] checks the last scope call: exit status 0, the
-# wanted required output, exactly one quality-scope line and, when REASON is
-# given, that the line matches it as a regular expression, so a case proves
-# which branch produced the verdict and not only the verdict.
+# expect NAME "FAST CLI WEB" [REASON] checks the last scope call: exit status 0,
+# exactly the wanted fast, cli and web outputs, a matrix output, exactly one
+# quality-scope line and, when REASON is given, that the line matches it as a
+# regular expression, so a case proves which branch produced the verdict and
+# not only the verdict.
 expect() {
 	local name=$1 want=$2 pattern=${3:-} reasons problem=''
 	cases=$((cases + 1))
 	reasons=$(printf '%s\n' "$log" | grep -c '^quality-scope: ' || true)
 	if [[ $status -ne 0 ]]; then
 		problem="exit status $status, want 0"
-	elif [[ $required != "$want" ]]; then
-		problem="required=${required:-<none>}, want $want"
+	elif [[ $verdict != "$want" ]]; then
+		problem="fast cli web = ${verdict}, want $want"
+	elif ! grep -q '^matrix={"profile":\[' "$out"; then
+		problem='no matrix output'
 	elif [[ $reasons -ne 1 ]]; then
 		problem="$reasons quality-scope lines, want 1"
 	elif [[ -n $pattern && ! $(printf '%s\n' "$log" | grep '^quality-scope: ') =~ $pattern ]]; then
 		problem="the quality-scope line does not match: $pattern"
 	fi
 	if [[ -z $problem ]]; then
-		printf 'ok   %s: required=%s\n       %s\n' "$name" "$required" "$(printf '%s\n' "$log" | grep '^quality-scope: ')"
+		printf 'ok   %s: fast cli web = %s\n       %s\n' "$name" "$verdict" "$(printf '%s\n' "$log" | grep '^quality-scope: ')"
 	else
 		printf 'FAIL %s: %s\n%s\n' "$name" "$problem" "$log"
 		failed=$((failed + 1))
 	fi
 }
 
-# 1. The follow-up push the push delta passed: a code push, then docs only.
+all='true true true'
+fast='true false false'
+none='false false false'
+
+# 1. The follow-up push the push delta passed: a code push, then docs only. A
+# branch push never runs a container job.
 fresh_repo f1-followup
 git checkout -q -b feat
 C1=$(commit code internal/a.go)
 D1=$(commit docs docs/a.md)
 scope push refs/heads/feat "$C0" "$C1"
-expect '1a feature branch, code push' true
+expect '1a feature branch, code push' "$fast" 'internal/a\.go needs CI \(all\), a branch push runs the fast checks only'
 scope push refs/heads/feat "$C1" "$D1"
-expect '1b feature branch, docs-only push after the code push' true
+expect '1b feature branch, docs-only push after the code push' "$fast"
 
 # 2. A branch whose whole diff against main is documentation stays skippable.
 fresh_repo docs-branch
 git checkout -q -b docs
 D1=$(commit docs docs/a.md README.md)
 scope push refs/heads/docs "$zero" "$D1"
-expect '2a docs-only branch, first push (zero before)' false
+expect '2a docs-only branch, first push (zero before)' "$none"
 D2=$(commit docs docs/b.md)
 scope push refs/heads/docs "$D1" "$D2"
-expect '2b docs-only branch, follow-up push' false
+expect '2b docs-only branch, follow-up push' "$none"
 
-# 3-5. main judges the delta of each push.
+# 3-5. main judges the delta of each push, and any business delta runs every
+# tier whatever its needs-ci.sh tier.
 fresh_repo main-delta
 M1=$(commit code internal/a.go)
 M2=$(commit docs docs/a.md)
 scope push refs/heads/main "$M1" "$M2"
-expect '3 main push, docs-only delta' false 'no business change \(documentation or CI files only\)'
+expect '3 main push, docs-only delta' "$none" 'no business change \(documentation or CI files only\)'
 C1=$(commit ci .github/scripts/x.sh)
 scope push refs/heads/main "$M2" "$C1"
-expect '3b main push, .github-only delta' false 'no business change \(documentation or CI files only\)'
+expect '3b main push, .github-only delta' "$none" 'no business change \(documentation or CI files only\)'
 M3=$(commit code internal/a.go)
 scope push refs/heads/main "$C1" "$M3"
-expect '4 main push, code delta' true 'internal/a\.go needs CI'
+expect '4 main push, code delta' "$all" 'internal/a\.go needs CI \(all\), main runs every tier'
+M4=$(commit cli app/cli/a.go)
+scope push refs/heads/main "$M3" "$M4"
+expect '4b main push, CLI-only delta still runs every tier' "$all" 'app/cli/a\.go needs CI \(cli\), main runs every tier'
+M5=$(commit web app/web/a.go)
+scope push refs/heads/main "$M4" "$M5"
+expect '4c main push, Web-only delta still runs every tier' "$all" 'app/web/a\.go needs CI \(web\), main runs every tier'
 scope push refs/heads/main "$zero" "$M3"
-expect '5 main push, zero before' true
+expect '5 main push, zero before' "$all"
 
 # 6. A force-push can leave before outside the clone: full run, no failure.
 fresh_repo main-force-push
@@ -144,23 +162,24 @@ if git cat-file -e "${X}^{commit}" 2>/dev/null; then
 	exit 1
 fi
 scope push refs/heads/main "$X" "$D1"
-expect '6a main force-push, before pruned from the clone' true
+expect '6a main force-push, before pruned from the clone' "$all"
 scope push refs/heads/main "$missing" "$D1"
-expect '6b main push, before is not an object' true
+expect '6b main push, before is not an object' "$all"
 
 # 6c. A usable before and a head the diff cannot read: the base is accepted, then
 # git diff itself fails. That is the last unusable-base branch, and it must end
-# in a full run with exit status 0 like the others, never in required=false.
+# in a full run with exit status 0 like the others, never in a skipped tier.
 scope push refs/heads/main "$C0" "$missing"
-expect '6c main push, valid before, git diff fails (head is not an object)' true 'no usable base, git diff .* failed'
+expect '6c main push, valid before, git diff fails (head is not an object)' "$all" 'no usable base, git diff .* failed'
 
-# 7. A branch push without origin/main cannot be judged: full run, no failure.
+# 7. A branch push without origin/main cannot be judged: the widest verdict of
+# a branch push (fast only), no failure.
 fresh_repo no-origin-main
 git checkout -q -b feat
 D1=$(commit docs docs/a.md)
 git update-ref -d refs/remotes/origin/main
 scope push refs/heads/feat "$C0" "$D1"
-expect '7 feature branch, origin/main missing' true
+expect '7 feature branch, origin/main missing' "$fast" 'no usable base'
 
 # 8. Tag pushes always run everything, even for a documentation-only head.
 fresh_repo tag-push
@@ -168,24 +187,27 @@ git checkout -q -b docs
 D1=$(commit docs docs/a.md)
 git tag v1.0.0
 scope push refs/tags/v1.0.0 "$zero" "$D1"
-expect '8 tag push at a docs-only head' true
+expect '8 tag push at a docs-only head' "$all"
 scope push '' "$C0" "$D1"
-expect '8b push without a ref' true
+expect '8b push without a ref' "$all"
 
-# 9. Schedule, workflow_dispatch and any other event always run everything.
+# 9. Schedule, workflow_dispatch on main and any other event always run every
+# tier.
 scope schedule refs/heads/main '' "$D1"
-expect '9a schedule' true
-scope workflow_dispatch refs/heads/docs '' "$D1"
-expect '9b workflow_dispatch' true
+expect '9a schedule' "$all"
+scope workflow_dispatch refs/heads/main '' "$D1"
+expect '9b workflow_dispatch on main' "$all" 'workflow_dispatch on main'
+scope workflow_dispatch refs/heads/main '' "$D1" false
+expect '9c workflow_dispatch on main, full=false' "$all" 'workflow_dispatch on main'
 scope pull_request refs/pull/1/merge "$C0" "$D1"
-expect '9c pull_request (no longer a trigger)' true
+expect '9d pull_request (no longer a trigger)' "$all"
 
-# 10. No merge base (unrelated history): full run, no failure.
+# 10. No merge base (unrelated history): fast only, no failure.
 fresh_repo unrelated
 git checkout -q --orphan other
 git commit -q -m root
 scope push refs/heads/other "$zero" "$(git rev-parse HEAD)"
-expect '10 branch without a merge base with origin/main' true
+expect '10 branch without a merge base with origin/main' "$fast" 'no usable base'
 
 # 11. A code file renamed to *.md is a code change: the delete side must count.
 fresh_repo rename
@@ -193,21 +215,21 @@ git checkout -q -b mv
 git mv internal/a.go docs/moved.md
 git commit -q -m 'rename code to markdown'
 scope push refs/heads/mv "$C0" "$(git rev-parse HEAD)"
-expect '11 branch renames a code file to *.md' true
+expect '11 branch renames a code file to *.md' "$fast"
 
 # 12. Documentation mixed with code in one push.
 fresh_repo mixed
 git checkout -q -b feat
 D1=$(commit mixed docs/a.md internal/a.go)
 scope push refs/heads/feat "$C0" "$D1"
-expect '12 branch with documentation and code' true
+expect '12 branch with documentation and code' "$fast"
 
 # 12b. Markdown under a code directory is judged as code by the path list.
 fresh_repo md-in-code
 git checkout -q -b feat
 D1=$(commit notes internal/notes.md)
 scope push refs/heads/feat "$C0" "$D1"
-expect '12b branch changes only internal/notes.md' true
+expect '12b branch changes only internal/notes.md' "$fast"
 
 # 12c. The CI's own files need no run either: everything under .github/ is
 # non-business, its Markdown included.
@@ -215,14 +237,14 @@ fresh_repo ci-files
 git checkout -q -b ci
 D1=$(commit ci .github/workflows/quality.yml .github/scripts/x.sh .github/pull_request_template.md)
 scope push refs/heads/ci "$zero" "$D1"
-expect '12c branch changing only .github files' false 'no business change \(documentation or CI files only\)'
+expect '12c branch changing only .github files' "$none" 'no business change \(documentation or CI files only\)'
 
-# 12d. CI files mixed with business code still need the heavy checks.
+# 12d. CI files mixed with business code still need the fast checks.
 fresh_repo ci-and-business
 git checkout -q -b ci-mixed
 D1=$(commit mixed .github/scripts/x.sh internal/a.go)
 scope push refs/heads/ci-mixed "$zero" "$D1"
-expect '12d branch with CI files and business code' true 'internal/a\.go needs CI'
+expect '12d branch with CI files and business code' "$fast" 'internal/a\.go needs CI'
 
 # 13. Only the branch's own changes count: main moving on does not force a run.
 fresh_repo main-moves
@@ -232,23 +254,23 @@ git checkout -q main
 M1=$(commit code internal/a.go)
 git update-ref refs/remotes/origin/main "$M1"
 scope push refs/heads/docs "$zero" "$D1"
-expect '13a docs-only branch, main has moved on with code' false
+expect '13a docs-only branch, main has moved on with code' "$none"
 git checkout -q docs
 git merge -q --no-ff -m 'merge main' main
 scope push refs/heads/docs "$D1" "$(git rev-parse HEAD)"
-expect '13b docs-only branch after merging that main' false
+expect '13b docs-only branch after merging that main' "$none"
 
 # 14. A force-pushed branch is judged by its content; before is not consulted.
 fresh_repo branch-force-push
 git checkout -q -b feat
 C1=$(commit code internal/a.go)
 scope push refs/heads/feat "$missing" "$C1"
-expect '14a feature branch force-push, code, before missing' true
+expect '14a feature branch force-push, code, before missing' "$fast"
 git checkout -q main
 git checkout -q -b docs
 D1=$(commit docs docs/a.md)
 scope push refs/heads/docs "$missing" "$D1"
-expect '14b feature branch force-push, docs only, before missing' false
+expect '14b feature branch force-push, docs only, before missing' "$none"
 
 # 15. A real clone made by the git commands actions/checkout runs with
 # fetch-depth 0 (fetch every head into refs/remotes/origin/*, then check the
@@ -275,10 +297,56 @@ git -c protocol.version=2 fetch --quiet --no-tags --prune --no-recurse-submodule
 git rev-parse --verify --quiet refs/remotes/origin/main > /dev/null
 git checkout --progress --force -q -B feat refs/remotes/origin/feat
 scope push refs/heads/feat "$C1" "$D1"
-expect '15a checkout clone, feature branch, docs push after a code push' true
+expect '15a checkout clone, feature branch, docs push after a code push' "$fast"
 git checkout --progress --force -q -B docs refs/remotes/origin/docs
 scope push refs/heads/docs "$zero" "$DOCS"
-expect '15b checkout clone, docs-only branch' false
+expect '15b checkout clone, docs-only branch' "$none"
+
+# 16. workflow_dispatch on a branch, the pre-merge run: the whole branch over
+# main decides the container tiers through needs-ci.sh.
+fresh_repo dispatch-tiers
+git checkout -q -b cli
+CLI=$(commit cli app/cli/a.go app/cli/README.md)
+scope workflow_dispatch refs/heads/cli '' "$CLI"
+expect '16a dispatch, CLI-only branch' 'true true false' 'app/cli/README\.md needs the cli tier'
+scope workflow_dispatch refs/heads/cli '' "$CLI" false
+expect '16b dispatch, CLI-only branch, full=false' 'true true false' 'needs the cli tier'
+git checkout -q main
+git checkout -q -b web
+WEB=$(commit web app/web/a.go app/web/internal/store/migrations/00010_x.sql)
+scope workflow_dispatch refs/heads/web '' "$WEB"
+expect '16c dispatch, Web-only branch' 'true false true' 'app/web/a\.go needs the web tier'
+BOTH=$(commit cli app/cli/a.go)
+scope workflow_dispatch refs/heads/web '' "$BOTH"
+expect '16d dispatch, branch with CLI and Web code' "$all" 'app/web/a\.go needs the all tier'
+git checkout -q main
+git checkout -q -b shared
+SHARED=$(commit shared internal/a.go)
+scope workflow_dispatch refs/heads/shared '' "$SHARED"
+expect '16e dispatch, shared path' "$all" 'internal/a\.go needs the all tier'
+git checkout -q main
+git checkout -q -b gosum
+GOSUM=$(commit pin app/web/go.sum)
+scope workflow_dispatch refs/heads/gosum '' "$GOSUM"
+expect '16f dispatch, Web go.sum copied by the CLI image' "$all" 'app/web/go\.sum needs the all tier'
+git checkout -q main
+git checkout -q -b docs
+DOCS=$(commit docs docs/a.md .github/scripts/x.sh)
+scope workflow_dispatch refs/heads/docs '' "$DOCS"
+expect '16g dispatch, documentation/CI-only branch' "$none" 'no business change'
+scope workflow_dispatch refs/heads/docs '' "$DOCS" true
+expect '16h dispatch, full=true on a documentation-only branch' "$all" 'full=true'
+scope workflow_dispatch refs/heads/cli '' "$CLI" true
+expect '16i dispatch, full=true on a CLI-only branch' "$all" 'full=true'
+
+# 16j. The same branch pushed runs the fast checks only.
+scope push refs/heads/cli "$C0" "$CLI"
+expect '16j branch push, CLI-only branch' "$fast" 'app/cli/README\.md needs CI \(cli\), a branch push runs the fast checks only'
+
+# 16k. A dispatch that cannot be judged runs every tier.
+git update-ref -d refs/remotes/origin/main
+scope workflow_dispatch refs/heads/cli '' "$CLI"
+expect '16k dispatch, origin/main missing' "$all" 'no usable base'
 
 printf '\n%s cases, %s failed\n' "$cases" "$failed"
 [[ $failed -eq 0 ]]
