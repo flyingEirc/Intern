@@ -2,7 +2,7 @@
 
 **为 MySQL 提供可验证的备份与隔离恢复。**
 
-Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线优先完成 Web：Web 后端（控制面 API、XtraBackup 物理链、FTP 副本与隔离恢复）的阶段 B、C、D 已通过真实容器 CI 原生验收并合入 `main`；CLI 暂停新功能、保留必要维护。**Web 首版仍未交付**——没有前端页面；阶段 E 的 Docker 部署与 FTPS（D1、S2）及候选制品门禁（G）已原生验收，V1 内网实测于 2026-11-05 取消（FTP/FTPS 由每次 push 的容器 CI 覆盖），阶段 E 已关闭。
+Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立全量备份、归档后续变化，并在需要时恢复到已保存的检查点。当前研发主线优先完成 Web：Web 后端（控制面 API、XtraBackup 物理链、FTP 副本与隔离恢复）的阶段 B、C、D 已通过真实容器 CI 原生验收并合入 `main`；CLI 暂停新功能、保留必要维护。**Web 首版仍未交付**——没有前端页面；阶段 E 的 Docker 部署与 FTPS（D1、S2）及候选制品门禁（G）已原生验收，V1 内网实测于 2026-11-05 取消（FTP/FTPS 由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI 覆盖），阶段 E 已关闭。
 
 ## 当前可复用的能力基线
 
@@ -28,13 +28,13 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 | FTP 副本复制 | 发布后把密文原样复制到运维 FTP 服务器（真实 Pure-FTPd 1.0.54，明文模式）并完整回读认证，认证通过才 `verified`；FIFO 顺序、重试、`.part` 回收；未 `verified` 不会被保留判定删除。 |
 | 隔离恢复、导出与演练 | 只读恢复计划 + `plan_digest` 与管理员密码二次确认执行、按链 prepare、导出到宿主机目录并由新 MySQL 8.4.11 容器启动核对独立快照（含**仅从 FTP 副本**分别恢复增量 1 与增量 2）；拒绝全部发生在 prepare 与写导出之前；取消、SIGKILL 与 ENOSPC 精确回收；备份与恢复全局互斥。 |
 
-Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 D 的证据覆盖上述组件组合本身，**版本矩阵仍是 `candidate`（`verified: false`）**，不外推到所有版本、平台或生产环境；阶段 E 的镜像与 Compose 部署（D1 [#41](https://github.com/flyingEirc/Intern/issues/41)）、FTPS（S2 [#42](https://github.com/flyingEirc/Intern/issues/42)）与候选制品/契约门禁（G [#44](https://github.com/flyingEirc/Intern/issues/44)）已在候选 `9489f6c` 的 [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449) 原生验收（14 个 job 全绿）。V1 内网实测（[#43](https://github.com/flyingEirc/Intern/issues/43)）于 2026-11-05 取消，FTP/FTPS 改由每次 push 的容器 CI 以固定 Pure-FTPd 1.0.54 夹具覆盖（最新 main：merge `7355766` 的 [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492)，14/14 全绿），非夹具服务器无证据。
+Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 D 的证据覆盖上述组件组合本身，**版本矩阵仍是 `candidate`（`verified: false`）**，不外推到所有版本、平台或生产环境；阶段 E 的镜像与 Compose 部署（D1 [#41](https://github.com/flyingEirc/Intern/issues/41)）、FTPS（S2 [#42](https://github.com/flyingEirc/Intern/issues/42)）与候选制品/契约门禁（G [#44](https://github.com/flyingEirc/Intern/issues/44)）已在候选 `9489f6c` 的 [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449) 原生验收（14 个 job 全绿）。V1 内网实测（[#43](https://github.com/flyingEirc/Intern/issues/43)）于 2026-11-05 取消，FTP/FTPS 改由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI 以固定 Pure-FTPd 1.0.54 夹具覆盖；截至 2026-11-05 最近一次整套 main 运行为 merge `7355766` 的 [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492)（14/14 job 全绿），非夹具服务器无证据。
 
 ## 目录与当前路线
 
 | 目录 | 作用与当前状态 |
 | --- | --- |
-| `app/web/` | 当前产品主线。阶段 B（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）、阶段 C（P2 #27、S1 #28、P3 #29、R1 #30、W3 #31、W4 #32，后端验收 C-A1–C-A5）与阶段 D（P4 #36、W5 #37，验收 P4-A1–A9、W5-A1–A8）均已通过固定候选的 Linux amd64 原生验收并合入 `main`；候选提交、CI 流水线与证据边界见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 E 的 D1、S2 与 G 已在候选 `9489f6c` 验收并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 `main`（merge `2a2040d`），V1 内网实测取消（2026-11-05），阶段 E 已关闭并完成后端首版交付；接口以 [OpenAPI 契约](app/web/api/openapi.yaml) 为唯一契约，前端 F（暂缓）、Web 首版与物理 PITR 均未交付。CI 与合并门禁为 GitHub Actions（[`.github/workflows/quality.yml`](.github/workflows/quality.yml)），覆盖每次分支/tag 推送与每日定时，纯文档改动按 [质量规范](docs/guide/quality.md) 跳过多级矩阵。 |
+| `app/web/` | 当前产品主线。阶段 B（[#12](https://github.com/flyingEirc/Intern/issues/12)、#22–#24）、阶段 C（P2 #27、S1 #28、P3 #29、R1 #30、W3 #31、W4 #32，后端验收 C-A1–C-A5）与阶段 D（P4 #36、W5 #37，验收 P4-A1–A9、W5-A1–A8）均已通过固定候选的 Linux amd64 原生验收并合入 `main`；候选提交、CI 流水线与证据边界见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 E 的 D1、S2 与 G 已在候选 `9489f6c` 验收并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 `main`（merge `2a2040d`），V1 内网实测取消（2026-11-05），阶段 E 已关闭并完成后端首版交付；接口以 [OpenAPI 契约](app/web/api/openapi.yaml) 为唯一契约，前端 F（暂缓）、Web 首版与物理 PITR 均未交付。CI 与合并门禁为 GitHub Actions（[`.github/workflows/quality.yml`](.github/workflows/quality.yml)），运行在 WSL2 里的 Linux 自托管 runner 上：分支推送只跑快速检查，合并前在 PR 分支手动触发、按改动的 CLI/Web 层运行容器验收，main 的业务推送、tag 与每日定时运行全部检查；只改文档或 CI 自身文件（`.github/`）的推送不创建运行，分层由 `.github/scripts/needs-ci.sh` 判定（见 [质量规范](docs/guide/quality.md)）。 |
 | `app/cli/` | 已有 CLI 实现与兼容入口，暂停新功能。 |
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
