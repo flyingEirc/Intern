@@ -49,7 +49,9 @@ dir = "{{config_root}}/app/web/frontend"
 raw_args = true
 run = '''
 #!/usr/bin/env sh
-exec bun e2e/run.ts "$@"
+set -e
+bun e2e/run.ts "$@"
+bun e2e/f5.ts "$@"
 '''
 
 [tasks."frontend:e2e:stack"]
