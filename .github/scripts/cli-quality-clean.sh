@@ -27,8 +27,11 @@
 # keep_candidates images by creation time are kept, and the current SHA's image
 # is always kept (it counts toward K when it is one of the newest): runs of
 # different branches interleave on this runner, and pruning every other branch's
-# image would force a cold rebuild in its next job. There is no image prune, so
-# no unrelated image can be lost.
+# image would force a cold rebuild in its next job. An old candidate goes
+# through remove-images.sh, never `docker image rm`: that one also prunes every
+# untagged ancestor, and those ancestors are the build cache that the
+# candidates of other runs, and their builds in flight, share (issue #70).
+# There is no image prune, so no unrelated image can be lost.
 #
 #   cli-quality-clean.sh              remove this runner's CLI quality leftovers
 #   cli-quality-clean.sh --inventory  fail if any labelled resource remains
@@ -58,6 +61,9 @@ label=intern.quality.runner
 # Candidate images kept per profile besides the current commit's image.
 keep_candidates=3
 filter=label=$label=$tag
+here=$(cd "$(dirname "$0")" && pwd)
+# REMOVE_IMAGES points the cases at a stand-in for remove-images.sh.
+remove_images=${REMOVE_IMAGES:-$here/remove-images.sh}
 
 # Every listing is its own assignment: a failing docker must end the script, not
 # look like an empty host. Candidate image listing is conditional because its
@@ -149,7 +155,7 @@ if ((images_scoped)); then
 			fi
 		else
 			echo "cli-quality-clean: removing candidate image $ref"
-			docker image rm "$ref" || status=1
+			"$remove_images" "$ref" || status=1
 		fi
 	done <<< "$(printf '%s' "$entries" | LC_ALL=C sort -r)"
 else

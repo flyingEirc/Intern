@@ -215,6 +215,10 @@ jobs:
         run: .github/scripts/runner-labels-cases.sh
       - name: Web container lane accept and reject cases
         run: .github/scripts/runner-lanes-cases.sh
+      # Self-test of the image removal that container-mysql's cleanup removes old
+      # candidate images with (fake docker, no engine needed).
+      - name: Image removal accept and reject cases
+        run: .github/scripts/remove-images-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
