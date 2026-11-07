@@ -66,6 +66,19 @@ field_of() {
 	' "$file"
 }
 
+# max_parallel_of FILE prints container-mysql's strategy.max-parallel line.
+max_parallel_of() {
+	awk -v want=container-mysql '
+		/^  [a-z][a-z0-9-]+:$/ {
+			cur = $1; sub(/:$/, "", cur)
+			if (seen && cur != want) exit
+			if (cur == want) seen = 1
+			next
+		}
+		seen && /^      max-parallel:/ { print; exit }
+	' "$1"
+}
+
 verify() {
 	local file=$1 job got gate
 	[[ -f $file ]] || { printf 'no workflow at %s\n' "$file"; return 1; }
@@ -86,6 +99,11 @@ verify() {
 	got=$(field_of container-mysql if "$file")
 	if [[ $got != "$cli_if" ]]; then
 		printf 'container-mysql: if is "%s", want "%s"\n' "$got" "$cli_if"
+		return 1
+	fi
+	got=$(max_parallel_of "$file")
+	if [[ $got != '      max-parallel: 1' ]]; then
+		printf 'container-mysql: max-parallel is "%s", want "      max-parallel: 1"\n' "$got"
 		return 1
 	fi
 	gate=$(field_of quality-gate needs "$file")
@@ -148,6 +166,9 @@ expect_bad 'a web job gates on its upstream instead of scope' \
 
 expect_bad 'the cli tier loses its own scope gate' \
 	"$(mutate cli-if container-mysql "$cli_if" "$web_if")"
+
+expect_bad 'the cli matrix runs both profiles in parallel' \
+	"$(mutate matrix-parallel container-mysql '      max-parallel: 1' '      max-parallel: 2')"
 
 gate_line=$(field_of quality-gate needs "$workflow")
 expect_bad 'quality-gate drops one job from its needs list' \

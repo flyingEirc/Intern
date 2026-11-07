@@ -67,9 +67,11 @@ name: Intern quality
 #   A  container-ftp -> container-web -> container-replication  (ftp.Dockerfile)
 #   B  container-restore -> container-restore-api -> container-ftps (restore/ftps Dockerfile)
 #   C  container-physical -> container-deploy -> container-dispatch (root/deploy images, dispatcher)
-# container-mysql (the cli tier) keeps its parallel matrix and depends only on
-# scope: a lane must never cross a tier boundary, or a cli-only or web-only run
-# would have a skipped upstream and quality-gate would reject the run.
+# container-mysql (the cli tier) still depends only on scope -- a lane must
+# never cross a tier boundary, or a cli-only or web-only run would have a
+# skipped upstream and quality-gate would reject the run -- but its two matrix
+# legs are serialised with max-parallel: 1, capping the full run at four heavy
+# jobs (three Web lanes plus one CLI profile) on this 10 GiB host.
 # .github/scripts/runner-lanes-cases.sh asserts the lanes, the tier boundary
 # and the complete quality-gate needs list. Job-level `concurrency` was
 # considered, but avoiding a canceled third pending job needs `queue: max`,
@@ -260,6 +262,13 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Both profiles initialise several MySQL containers each (the job itself
+      # runs two cases in parallel). Running the two matrix legs together, on
+      # top of the three Web lanes, exhausted the 10 GiB WSL VM: mysqld stayed
+      # in "Initializing database files" past the 90 s readiness window and
+      # swap was used (run 42343799557). Serialise the legs to cap the peak at
+      # four heavy jobs; the readiness timeout stays untouched.
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
     env:
       INTERN_TEST_PROFILE: ${{ matrix.profile }}
