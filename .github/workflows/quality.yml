@@ -17,7 +17,7 @@ name: Intern quality
 # runner without the native Docker engine would match it too. Both would fail
 # the real-component gates, or hang until a job timeout. Only the instances
 # configured for this harness carry `docker` and `wsl`, so a job cannot land on
-# the Windows runner or on an under-provisioned Linux instance. All 13
+# the Windows runner or on an under-provisioned Linux instance. All 14
 # occurrences must stay byte-identical; .github/scripts/runner-labels-cases.sh
 # is the single check that fails the fast tier when one drifts, when a job loses
 # its runs-on, or when a new job is added without updating the count together.
@@ -58,6 +58,14 @@ name: Intern quality
 # branch); CircleCI ran nothing on deletion. The scope and quality-gate jobs
 # skip deleted events, so a deletion neither starts a matrix nor produces a
 # gate result.
+#
+# The ui input (issue #74) asks for a UI acceptance run instead: the scope runs
+# the fast checks and no container tier, whatever the diff, and ui-e2e (which
+# needs quality-fast) runs the browser end-to-end suites on this native
+# linux/amd64 runner as the run's only heavy job. quality-gate does not depend
+# on ui-e2e and reports such a run as fast-only, so it is never merge-gate
+# evidence; ui-e2e's own result and its artifact are the UI evidence. ui and
+# full together are refused by the scope.
 #
 # The nine Web container jobs are chained into three lanes with `needs` so that
 # jobs building images from the same Dockerfile never run at the same time on
@@ -122,6 +130,10 @@ on:
         description: Run every container tier, whatever the branch changes (a branch run otherwise runs only the tiers its diff over main reaches)
         type: boolean
         default: false
+      ui:
+        description: UI acceptance run (issue #74) -- the fast checks plus the browser end-to-end suites on this runner, no container tier; not merge-gate evidence, and refused together with full
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -130,8 +142,10 @@ concurrency:
   # main runs get one group per commit, so a merge commit's run is never
   # canceled or replaced by a later pending run; on any other branch or tag a
   # newer run of the same event cancels that ref's superseded run, and a branch
-  # push does not cancel the branch's workflow_dispatch run.
-  group: intern-quality-${{ github.event_name }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}
+  # push does not cancel the branch's workflow_dispatch run. A ui=true dispatch
+  # has a group of its own, so a UI acceptance run and the branch's merge-gate
+  # dispatch never cancel each other.
+  group: intern-quality-${{ github.event_name }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.sha) || '' }}${{ inputs.ui && '-ui' || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
@@ -167,6 +181,7 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           FULL_INPUT: ${{ inputs.full }}
+          UI_INPUT: ${{ inputs.ui }}
         run: .github/scripts/quality-scope.sh
 
   quality-fast:
@@ -228,6 +243,13 @@ jobs:
         run: .github/scripts/remove-images-cases.sh
       - name: Web fixture image cleanup accept and reject cases
         run: .github/scripts/web-image-clean-cases.sh
+      # Self-tests of the ui-e2e job's scripts (#74): the pinned browser
+      # install (fake network, nothing downloaded) and the e2e stack cleanup
+      # (fake docker). They run in every fast tier, not only in UI runs.
+      - name: UI browser install accept and reject cases
+        run: .github/scripts/install-ui-browser-cases.sh
+      - name: e2e stack cleanup accept and reject cases
+        run: .github/scripts/e2e-stack-clean-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
@@ -750,6 +772,98 @@ jobs:
           retention-days: 7
           include-hidden-files: true
           path: .cache/quality/ftps/events.jsonl
+
+  # UI acceptance on native linux/amd64 (#74, for #19 and #65). Only a
+  # workflow_dispatch with ui=true runs it, and the scope of such a run selects
+  # no container tier, so this is the only heavy job of its run; quality-gate
+  # does not depend on it. The suites are the repository's agent-browser
+  # scripts: F1 (run.ts) and F5 against a native bin/intern-web, F2, F3, F4 and
+  # the UI-only journey against the real Compose stack of
+  # app/web/frontend/e2e/stack.ts (MySQL 8.4.11 + PXB 8.4.0-7 + Pure-FTPd 1.0.54,
+  # native here, emulated on arm64 development hosts). Every suite runs even
+  # when an earlier one failed, and the suites step fails the job for any
+  # failure. Each manifest binds its screenshots to the commit and records
+  # whether the tree was clean. The stack removes itself on success and on
+  # failure; a cancelled job never gets there, so e2e-stack-clean.sh removes
+  # this runner's leftovers before and after the suites, the intern image the
+  # stack built for this commit is removed without pruning shared ancestors
+  # (remove-images.sh, #70), and the browsers started from this job's
+  # directory are stopped. The FTP fixture images stay: their tags carry the
+  # recipe digest, so they are reused until a recipe changes.
+  ui-e2e:
+    needs: [scope, quality-fast]
+    if: github.event_name == 'workflow_dispatch' && inputs.ui && needs.scope.outputs.fast == 'true'
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Runner prerequisites
+        run: .github/scripts/require-runner.sh --bun --compose
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: '1.4.4'
+      - name: Pinned agent-browser and Chrome for Testing
+        run: .github/scripts/install-ui-browser.sh "$RUNNER_TEMP/ui-browser"
+      - name: Remove e2e stacks that earlier jobs of this runner left behind
+        timeout-minutes: 5
+        run: .github/scripts/e2e-stack-clean.sh
+      # The same build as mise run build: the static export staged for the
+      # webui embed, then bin/intern (the stack generates its KEK with it) and
+      # the webui bin/intern-web the native suites start.
+      - name: Build bin/intern and the webui bin/intern-web
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: |
+          set -euo pipefail
+          INTERN_BUILD_ID=$(git rev-parse --short=12 HEAD)
+          export INTERN_BUILD_ID
+          (cd app/web/frontend && bun install --frozen-lockfile && rm -rf out && bun run build)
+          rm -rf app/web/internal/webui/dist
+          cp -R app/web/frontend/out app/web/internal/webui/dist
+          go build -o bin/intern ./app/cli
+          go build -tags webui -o bin/intern-web ./app/web
+      - name: Browser end-to-end suites
+        working-directory: app/web/frontend
+        run: |
+          set -uo pipefail
+          failed=()
+          for suite in run f5 f2 f3 f4 journey; do
+            echo "::group::e2e/$suite.ts"
+            if ! bun "e2e/$suite.ts"; then
+              failed+=("$suite")
+            fi
+            echo '::endgroup::'
+          done
+          if ((${#failed[@]})); then
+            printf 'ui-e2e: failed suites: %s\n' "${failed[*]}" >&2
+            exit 1
+          fi
+          echo 'ui-e2e: all six suites passed'
+      - name: Remove this job's e2e stacks
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/e2e-stack-clean.sh
+      - name: Remove the intern image built for this commit
+        if: always()
+        run: .github/scripts/remove-images.sh "intern:e2e-${GITHUB_SHA:0:12}-mysql8.4"
+      - name: Stop the browsers started from this job's directory
+        if: always()
+        run: pkill -f "$RUNNER_TEMP/ui-browser/" || true
+      - name: Retain the end-to-end evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-e2e-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+          path: .cache/e2e*/**
 
   quality-gate:
     name: quality-gate

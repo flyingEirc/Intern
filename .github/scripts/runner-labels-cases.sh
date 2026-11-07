@@ -23,7 +23,7 @@ root=$(cd "$here/../.." && pwd)
 workflow=${QUALITY_WORKFLOW:-$root/.github/workflows/quality.yml}
 
 expected_line='    runs-on: [self-hosted, Linux, X64, docker, wsl]'
-expected_count=13
+expected_count=14
 
 cases=0 failed=0
 report() {
