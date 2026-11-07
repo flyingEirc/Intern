@@ -67,13 +67,21 @@ name: Intern quality
 #   A  container-ftp -> container-web -> container-replication  (ftp.Dockerfile)
 #   B  container-restore -> container-restore-api -> container-ftps (restore/ftps Dockerfile)
 #   C  container-physical -> container-deploy -> container-dispatch (root/deploy images, dispatcher)
-# container-mysql (the cli tier) still depends only on scope -- a lane must
-# never cross a tier boundary, or a cli-only or web-only run would have a
-# skipped upstream and quality-gate would reject the run -- but its two matrix
-# legs are serialised with max-parallel: 1, capping the full run at four heavy
-# jobs (three Web lanes plus one CLI profile) on this 10 GiB host.
-# .github/scripts/runner-lanes-cases.sh asserts the lanes, the tier boundary
-# and the complete quality-gate needs list. Job-level `concurrency` was
+# container-mysql (the cli tier) never joins a lane -- a lane must not cross a
+# tier boundary, or a cli-only or web-only run would have a skipped upstream and
+# quality-gate would reject the run -- but its two matrix legs are serialised
+# with max-parallel: 1, capping the full run at four heavy jobs (three Web lanes
+# plus one CLI profile) on this 10 GiB host.
+# All four container entry points (the three lane heads and container-mysql)
+# depend on [scope, quality-fast], so the fast tier's build, race tests and
+# golangci-lint finish before any container job starts. Running lint beside the
+# containers drove swap to 1.5 GiB (run 42355033628): golangci-lint took 25.2
+# min and hit its timeout with 0 issues, while the first CLI profile's MySQL
+# containers missed their 90 s readiness window. Staggering them removes that
+# CPU/memory spike without relaxing either the readiness timeout or
+# .golangci.yml's timeout. Lane-internal jobs inherit the barrier through their
+# upstream. .github/scripts/runner-lanes-cases.sh asserts the lanes, the barrier,
+# the tier boundary and the complete quality-gate needs list. Job-level
 # considered, but avoiding a canceled third pending job needs `queue: max`,
 # which actionlint v1.7.12 rejects and which is documented only for
 # workflow-level concurrency; `needs` lanes are deterministic instead.
@@ -256,7 +264,7 @@ jobs:
         run: golangci-lint run --build-tags=webui ./app/web/...
 
   container-mysql:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.cli == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
@@ -362,7 +370,7 @@ jobs:
             .cache/quality/${{ matrix.profile }}/receipts/*.json
 
   container-physical:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 40
@@ -394,7 +402,7 @@ jobs:
           path: .cache/quality/physical/events.jsonl
 
   container-ftp:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 35
@@ -524,7 +532,7 @@ jobs:
           path: .cache/quality/dispatch/events.jsonl
 
   container-restore:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70

@@ -5,9 +5,12 @@
 # start several jobs building images from the same Dockerfile at once on the
 # shared Docker engine (S1/W3/R1 share ftp.Dockerfile, P4/W5/S2 share
 # restore.Dockerfile). Three `needs` lanes serialise those builds. A lane must
-# stay inside the web tier: container-mysql belongs to the cli tier and keeps
-# its parallel matrix with only `needs: scope`, otherwise a cli-only run would
-# have a skipped upstream and quality-gate would reject it. Every web job also
+# stay inside the web tier: container-mysql belongs to the cli tier and never
+# joins a lane, otherwise a cli-only run would have a skipped upstream and
+# quality-gate would reject it. All four container entry points also wait for
+# quality-fast, so golangci-lint never competes with containers for this host's
+# 10 GiB (run 42355033628: lint took 25.2 min and timed out with 0 issues while
+# the first CLI profile missed its MySQL readiness window). Every web job also
 # keeps its own `needs.scope.outputs.web` gate, and quality-gate must still
 # depend on every job it validates.
 #
@@ -20,18 +23,19 @@ root=$(cd "$here/../.." && pwd)
 workflow=${QUALITY_WORKFLOW:-$root/.github/workflows/quality.yml}
 
 scope='    needs: scope'
+fast_barrier='    needs: [scope, quality-fast]'
 web_if="    if: needs.scope.outputs.web == 'true'"
 cli_if="    if: needs.scope.outputs.cli == 'true'"
 
 order=(quality-fast container-mysql container-physical container-ftp container-web container-replication container-restore container-restore-api container-ftps container-deploy container-dispatch)
 declare -A want=(
 	[quality-fast]="$scope"
-	[container-mysql]="$scope"
-	[container-physical]="$scope"
-	[container-ftp]="$scope"
+	[container-mysql]="$fast_barrier"
+	[container-physical]="$fast_barrier"
+	[container-ftp]="$fast_barrier"
 	[container-web]='    needs: [scope, container-ftp]'
 	[container-replication]='    needs: [scope, container-web]'
-	[container-restore]=$scope
+	[container-restore]="$fast_barrier"
 	[container-restore-api]='    needs: [scope, container-restore]'
 	[container-ftps]='    needs: [scope, container-restore-api]'
 	[container-deploy]='    needs: [scope, container-physical]'
@@ -124,7 +128,9 @@ expect_ok() {
 
 expect_bad() {
 	local label=$1 file=$2
-	if verify "$file" >/dev/null 2>&1; then
+	if [[ -z $file || ! -f $file ]]; then
+		report "$label" 'the mutation produced no workflow (a no-op mutate must not pass)'
+	elif verify "$file" >/dev/null 2>&1; then
 		report "$label" 'the mutated workflow was accepted'
 	else
 		report "$label"
@@ -158,8 +164,11 @@ expect_bad 'a lane is broken (container-web back to needs: scope)' \
 expect_bad 'a lane loses its scope dependency' \
 	"$(mutate drop-scope container-replication '    needs: [scope, container-web]' '    needs: container-web')"
 
+expect_bad 'a lane head bypasses the fast-tier barrier' \
+	"$(mutate skip-fast container-ftp "$fast_barrier" "$scope")"
+
 expect_bad 'the cli tier is pulled into a web lane' \
-	"$(mutate cross-tier container-mysql "$scope" '    needs: [scope, container-ftp]')"
+	"$(mutate cross-tier container-mysql "$fast_barrier" '    needs: [scope, container-ftp]')"
 
 expect_bad 'a web job gates on its upstream instead of scope' \
 	"$(mutate wrong-if container-web "$web_if" "    if: needs.container-ftp.result == 'success'")"
@@ -174,7 +183,11 @@ gate_line=$(field_of quality-gate needs "$workflow")
 expect_bad 'quality-gate drops one job from its needs list' \
 	"$(mutate gate-missing quality-gate "$gate_line" "${gate_line/container-dispatch, /}")"
 
-expect_bad 'the workflow is missing' "$work/absent.yml"
+if verify "$work/absent.yml" >/dev/null 2>&1; then
+	report 'the workflow is missing' 'a missing workflow was accepted'
+else
+	report 'the workflow is missing'
+fi
 
 printf '\n%s cases, %s failed\n' "$cases" "$failed"
 [[ $failed -eq 0 ]]
