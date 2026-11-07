@@ -10,6 +10,18 @@ name: Intern quality
 # .github/scripts/require-runner.sh, which fails explicitly and names whatever
 # the runner lacks.
 #
+# Every job selects that runner with one identical `runs-on` label set: the
+# three default labels plus the custom `docker` and `wsl` labels the WSL2
+# instances are registered with. The default trio alone is not specific enough
+# on this machine: a Windows runner is also registered here, and a plain Linux
+# runner without the native Docker engine would match it too. Both would fail
+# the real-component gates, or hang until a job timeout. Only the instances
+# configured for this harness carry `docker` and `wsl`, so a job cannot land on
+# the Windows runner or on an under-provisioned Linux instance. All 13
+# occurrences must stay byte-identical; .github/scripts/runner-labels-cases.sh
+# is the single check that fails the fast tier when one drifts, when a job loses
+# its runs-on, or when a new job is added without updating the count together.
+#
 # Triggers: push on every branch and tag, the nightly schedule on the default
 # branch, and workflow_dispatch. Branch pushes are filtered with on.push.paths:
 # a push that changes only documentation or the CI's own files creates no run
@@ -46,6 +58,38 @@ name: Intern quality
 # branch); CircleCI ran nothing on deletion. The scope and quality-gate jobs
 # skip deleted events, so a deletion neither starts a matrix nor produces a
 # gate result.
+#
+# The nine Web container jobs are chained into three lanes with `needs` so that
+# jobs building images from the same Dockerfile never run at the same time on
+# the shared Docker engine. Every container job used to depend only on scope, so
+# a full run could start S1, W3 and R1 building ftp.Dockerfile (and P4, W5 and
+# S2 building restore.Dockerfile) together. The lanes are:
+#   A  container-ftp -> container-web -> container-replication  (ftp.Dockerfile)
+#   B  container-restore -> container-restore-api -> container-ftps (restore/ftps Dockerfile)
+#   C  container-physical -> container-deploy -> container-dispatch (root/deploy images, dispatcher)
+# container-mysql (the cli tier) never joins a lane -- a lane must not cross a
+# tier boundary, or a cli-only or web-only run would have a skipped upstream and
+# quality-gate would reject the run -- but its two matrix legs are serialised
+# with max-parallel: 1, capping the full run at four heavy jobs (three Web lanes
+# plus one CLI profile) on this 10 GiB host.
+# All four container entry points (the three lane heads and container-mysql)
+# depend on [scope, quality-fast], so the fast tier's build, race tests and
+# golangci-lint finish before any container job starts. Running lint beside the
+# containers drove swap to 1.5 GiB (run 42355033628): golangci-lint took 25.2
+# min and hit its timeout with 0 issues, while the first CLI profile's MySQL
+# containers missed their 90 s readiness window. Staggering them removes that
+# CPU/memory spike without relaxing either the readiness timeout or
+# .golangci.yml's timeout. Lane-internal jobs inherit the barrier through their
+# upstream. .github/scripts/runner-lanes-cases.sh asserts the lanes, the barrier,
+# the tier boundary and the complete quality-gate needs list. Job-level
+# `concurrency` was considered, but avoiding a canceled third pending job needs
+# `queue: max`, which actionlint v1.7.12 rejects and which is documented only
+# for workflow-level concurrency; `needs` lanes are deterministic instead.
+# Known trade-off of the lanes: a job runs only when its upstream succeeded, so
+# a failed lane head (or quality-fast) skips the rest of its lane. quality-gate
+# still fails such a run, but the skipped jobs give no signal of their own; a
+# rerun of the whole lane is needed to see them. A lane also adds up its jobs'
+# wall clock (lane B can take up to 70 + 70 + 105 minutes).
 #
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
 # step; setup-go with cache: false (the runner keeps its module and build caches
@@ -101,7 +145,7 @@ env:
 jobs:
   scope:
     if: github.event.deleted != true
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 20
     outputs:
       fast: ${{ steps.scope.outputs.fast }}
@@ -128,7 +172,7 @@ jobs:
   quality-fast:
     needs: scope
     if: needs.scope.outputs.fast == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -166,6 +210,11 @@ jobs:
         run: .github/scripts/needs-ci-cases.sh
       - name: Scope selection accept and reject cases
         run: .github/scripts/quality-scope-cases.sh
+      # Every job must target the same WSL2 runner group (see the file header).
+      - name: Runner label set accept and reject cases
+        run: .github/scripts/runner-labels-cases.sh
+      - name: Web container lane accept and reject cases
+        run: .github/scripts/runner-lanes-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
@@ -220,12 +269,19 @@ jobs:
         run: golangci-lint run --build-tags=webui ./app/web/...
 
   container-mysql:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.cli == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Both profiles initialise several MySQL containers each (the job itself
+      # runs two cases in parallel). Running the two matrix legs together, on
+      # top of the three Web lanes, exhausted the 10 GiB WSL VM: mysqld stayed
+      # in "Initializing database files" past the 90 s readiness window and
+      # swap was used (run 42343799557). Serialise the legs to cap the peak at
+      # four heavy jobs; the readiness timeout stays untouched.
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
     env:
       INTERN_TEST_PROFILE: ${{ matrix.profile }}
@@ -319,9 +375,9 @@ jobs:
             .cache/quality/${{ matrix.profile }}/receipts/*.json
 
   container-physical:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -351,9 +407,9 @@ jobs:
           path: .cache/quality/physical/events.jsonl
 
   container-ftp:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -385,9 +441,9 @@ jobs:
           path: .cache/quality/ftp/events.jsonl
 
   container-replication:
-    needs: scope
+    needs: [scope, container-web]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -417,9 +473,9 @@ jobs:
           path: .cache/quality/replication/events.jsonl
 
   container-web:
-    needs: scope
+    needs: [scope, container-ftp]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -449,9 +505,9 @@ jobs:
           path: .cache/quality/web/events.jsonl
 
   container-dispatch:
-    needs: scope
+    needs: [scope, container-deploy]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -481,9 +537,9 @@ jobs:
           path: .cache/quality/dispatch/events.jsonl
 
   container-restore:
-    needs: scope
+    needs: [scope, quality-fast]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -513,9 +569,9 @@ jobs:
           path: .cache/quality/restore/events.jsonl
 
   container-restore-api:
-    needs: scope
+    needs: [scope, container-restore]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -555,9 +611,9 @@ jobs:
   # Compose projects, and nothing else, before the test (leftovers of earlier jobs)
   # and after it with always().
   container-deploy:
-    needs: scope
+    needs: [scope, container-physical]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 75
     env:
       INTERN_D1_ARTIFACT_DIR: ${{ github.workspace }}/.cache/quality/deploy
@@ -609,9 +665,9 @@ jobs:
   # the restores read back from that copy, with every published export started in a
   # brand-new pinned MySQL 8.4.11 container by the harness itself.
   container-ftps:
-    needs: scope
+    needs: [scope, container-restore-api]
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -644,7 +700,7 @@ jobs:
     name: quality-gate
     needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch, container-restore, container-restore-api, container-deploy, container-ftps]
     if: always() && github.event.deleted != true
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 10
     steps:
       # Every job of a tier the scope selected must succeed and every job of
