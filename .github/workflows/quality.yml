@@ -59,6 +59,23 @@ name: Intern quality
 # skip deleted events, so a deletion neither starts a matrix nor produces a
 # gate result.
 #
+# The nine Web container jobs are chained into three lanes with `needs` so that
+# jobs building images from the same Dockerfile never run at the same time on
+# the shared Docker engine. Every container job used to depend only on scope, so
+# a full run could start S1, W3 and R1 building ftp.Dockerfile (and P4, W5 and
+# S2 building restore.Dockerfile) together. The lanes are:
+#   A  container-ftp -> container-web -> container-replication  (ftp.Dockerfile)
+#   B  container-restore -> container-restore-api -> container-ftps (restore/ftps Dockerfile)
+#   C  container-physical -> container-deploy -> container-dispatch (root/deploy images, dispatcher)
+# container-mysql (the cli tier) keeps its parallel matrix and depends only on
+# scope: a lane must never cross a tier boundary, or a cli-only or web-only run
+# would have a skipped upstream and quality-gate would reject the run.
+# .github/scripts/runner-lanes-cases.sh asserts the lanes, the tier boundary
+# and the complete quality-gate needs list. Job-level `concurrency` was
+# considered, but avoiding a canceled third pending job needs `queue: max`,
+# which actionlint v1.7.12 rejects and which is documented only for
+# workflow-level concurrency; `needs` lanes are deterministic instead.
+#
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
 # step; setup-go with cache: false (the runner keeps its module and build caches
 # between jobs); and timeouts raised by 15 minutes (scope 20, quality-fast 45)
@@ -181,6 +198,8 @@ jobs:
       # Every job must target the same WSL2 runner group (see the file header).
       - name: Runner label set accept and reject cases
         run: .github/scripts/runner-labels-cases.sh
+      - name: Web container lane accept and reject cases
+        run: .github/scripts/runner-lanes-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
@@ -400,7 +419,7 @@ jobs:
           path: .cache/quality/ftp/events.jsonl
 
   container-replication:
-    needs: scope
+    needs: [scope, container-web]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
@@ -432,7 +451,7 @@ jobs:
           path: .cache/quality/replication/events.jsonl
 
   container-web:
-    needs: scope
+    needs: [scope, container-ftp]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
@@ -464,7 +483,7 @@ jobs:
           path: .cache/quality/web/events.jsonl
 
   container-dispatch:
-    needs: scope
+    needs: [scope, container-deploy]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
@@ -528,7 +547,7 @@ jobs:
           path: .cache/quality/restore/events.jsonl
 
   container-restore-api:
-    needs: scope
+    needs: [scope, container-restore]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70
@@ -570,7 +589,7 @@ jobs:
   # Compose projects, and nothing else, before the test (leftovers of earlier jobs)
   # and after it with always().
   container-deploy:
-    needs: scope
+    needs: [scope, container-physical]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 75
@@ -624,7 +643,7 @@ jobs:
   # the restores read back from that copy, with every published export started in a
   # brand-new pinned MySQL 8.4.11 container by the harness itself.
   container-ftps:
-    needs: scope
+    needs: [scope, container-restore-api]
     if: needs.scope.outputs.web == 'true'
     runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 105
