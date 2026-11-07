@@ -159,7 +159,7 @@ func mysqlIDs(t *testing.T, ctx context.Context, fixture tc.Container) (int, int
 func startR1FTP(t *testing.T, ctx context.Context, root string, nw *tc.DockerNetwork, password, quotaPassword string) tc.Container {
 	t.Helper()
 	server, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{Context: filepath.Join(root, "app/web/integration"), Dockerfile: "ftp.Dockerfile", BuildLogWriter: os.Stderr},
+		FromDockerfile: ftpImage.build(t, root, "amd64", nil),
 		ImagePlatform:  "linux/amd64",
 		Networks:       []string{nw.Name}, NetworkAliases: map[string][]string{nw.Name: {r1NetworkAlias}},
 		Mounts: []tc.ContainerMount{tc.VolumeMount("", "/data")},

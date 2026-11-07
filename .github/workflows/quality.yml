@@ -215,6 +215,13 @@ jobs:
         run: .github/scripts/runner-labels-cases.sh
       - name: Web container lane accept and reject cases
         run: .github/scripts/runner-lanes-cases.sh
+      # Self-tests of the image cleanup that the Web container jobs run after
+      # their tests (fake docker, no engine needed). remove-images.sh is also
+      # what container-mysql's cleanup removes old candidate images with.
+      - name: Image removal accept and reject cases
+        run: .github/scripts/remove-images-cases.sh
+      - name: Web fixture image cleanup accept and reject cases
+        run: .github/scripts/web-image-clean-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
@@ -396,6 +403,14 @@ jobs:
       - name: Reject incomplete or skipped physical evidence
         if: always()
         run: .github/scripts/verify-physical-evidence.sh .cache/quality/physical/events.jsonl
+      # The harness keeps every fixture image under a tag that names its inputs
+      # (app/web/integration/image_test.go) and never removes one, so a job never
+      # deletes an image another job's build depends on. This removes only the
+      # images a changed Dockerfile or pin has superseded.
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted physical evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -430,6 +445,10 @@ jobs:
       - name: Reject incomplete or skipped FTP evidence
         if: always()
         run: .github/scripts/verify-ftp-evidence.sh .cache/quality/ftp/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted FTP evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -462,6 +481,10 @@ jobs:
       - name: Reject incomplete or skipped replication evidence
         if: always()
         run: .github/scripts/verify-replication-evidence.sh .cache/quality/replication/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted replication evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -494,6 +517,10 @@ jobs:
       - name: Reject incomplete or skipped Web evidence
         if: always()
         run: .github/scripts/verify-w3-evidence.sh .cache/quality/web/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted Web evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -558,6 +585,10 @@ jobs:
       - name: Reject incomplete or skipped restore evidence
         if: always()
         run: .github/scripts/verify-p4-evidence.sh .cache/quality/restore/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted restore evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -590,6 +621,10 @@ jobs:
       - name: Reject incomplete or skipped restore API evidence
         if: always()
         run: .github/scripts/verify-w5-evidence.sh .cache/quality/restore-api/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted restore API evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -686,6 +721,10 @@ jobs:
       - name: Reject incomplete or skipped FTPS evidence
         if: always()
         run: .github/scripts/verify-s2-evidence.sh .cache/quality/ftps/events.jsonl
+      - name: Remove superseded Web fixture images
+        if: always()
+        timeout-minutes: 5
+        run: .github/scripts/web-image-clean.sh
       - name: Retain allowlisted FTPS evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -2,7 +2,10 @@
 # Accept and reject cases for cli-quality-clean.sh. A fake docker keeps four
 # tables (containers, networks, volumes, images; one "id runner" row each, one
 # image reference per row) and answers only the exact commands the script is
-# allowed to run, failing on any other command, flag or template. The cases
+# allowed to run, failing on any other command, flag or template. Old candidate
+# images are removed through remove-images.sh, so a stand-in for it records what
+# the script asks to be removed (remove-images-cases.sh proves how that script
+# removes), and a direct `docker image rm` is an unsupported command. The cases
 # therefore prove what the script removes and, as important, what it never
 # touches: another runner's resources, unlabelled resources (including the D1
 # Compose resources this script must not know about), candidate images of
@@ -46,7 +49,7 @@ case "$1 ${2:-}" in
 	'rm --force') table=containers action=remove ;;
 	'network rm') table=networks action=remove ;;
 	'volume rm') table=volumes action=remove ;;
-	'image rm') table=images action=remove ;;
+	'image rm') fail "docker image rm prunes the shared build cache; use remove-images.sh" ;;
 	*) fail "unsupported command: $*" ;;
 esac
 shift 2
@@ -78,16 +81,33 @@ for id in "$@"; do
 		status=1
 		continue
 	fi
-	if [[ $table == images ]]; then
-		awk -v ref="$id" '$NF != ref' "$state/images" > "$state/images.new"
-	else
-		awk -v id="$id" '$1 != id' "$state/$table" > "$state/$table.new"
-	fi
+	awk -v id="$id" '$1 != id' "$state/$table" > "$state/$table.new"
 	mv "$state/$table.new" "$state/$table"
 done
 exit "$status"
 FAKE
 chmod +x "$work/bin/docker"
+
+cat > "$work/remove-images.sh" <<'STAND_IN'
+#!/usr/bin/env bash
+# Stand-in for remove-images.sh: removes each reference from the fake image
+# table, and fails for FAKE_IMAGES_STUCK.
+set -euo pipefail
+state=$FAKE_DOCKER_STATE
+status=0
+for ref in "$@"; do
+	[[ $ref != -* ]] || { echo "stand-in: unsupported argument $ref" >&2; exit 2; }
+	if [[ $ref == "${FAKE_IMAGES_STUCK:-}" ]]; then
+		echo "Error: removal of $ref failed" >&2
+		status=1
+		continue
+	fi
+	awk -v ref="$ref" '$NF != ref' "$state/images" > "$state/images.new"
+	mv "$state/images.new" "$state/images"
+done
+exit "$status"
+STAND_IN
+chmod +x "$work/remove-images.sh"
 
 checks=0
 failed=0
@@ -135,7 +155,7 @@ clean() {
 		if [[ -n $sha ]]; then export GITHUB_SHA=$sha; else unset GITHUB_SHA; fi
 		if [[ -n $prof ]]; then export INTERN_TEST_PROFILE=$prof; else unset INTERN_TEST_PROFILE; fi
 		if [[ -n $plat ]]; then export INTERN_TEST_PLATFORM=$plat; else unset INTERN_TEST_PLATFORM; fi
-		PATH="$work/bin:$PATH" "$script" "$@" 2>&1
+		REMOVE_IMAGES=$work/remove-images.sh PATH="$work/bin:$PATH" "$script" "$@" 2>&1
 	); then
 		status=0
 	else
@@ -246,6 +266,20 @@ expect '2b current SHA among the newest K, older candidates removed' 0 '' \
 expect_images '2b candidate image scope (current newest)' \
 	"intern-quality:$profile-${current:0:12}-$arch intern-quality:$profile-111111111111-$arch intern-quality:$profile-222222222222-$arch"
 
+# 2c. Old candidate images go through remove-images.sh one reference at a time:
+# one that cannot be removed is reported, and the other old one still goes.
+seed \
+	"i1:2024-01-05 00:00:00 +0000 UTC intern-quality:$profile-111111111111-$arch" \
+	"i2:2024-01-04 00:00:00 +0000 UTC intern-quality:$profile-222222222222-$arch" \
+	"i3:2024-01-03 00:00:00 +0000 UTC intern-quality:$profile-333333333333-$arch" \
+	"i4:2024-01-02 00:00:00 +0000 UTC intern-quality:$profile-444444444444-$arch" \
+	"i5:2024-01-01 00:00:00 +0000 UTC intern-quality:$profile-555555555555-$arch"
+FAKE_IMAGES_STUCK=intern-quality:$profile-444444444444-$arch clean JackVance
+expect '2c a stuck candidate image is reported, the other old one still goes' 1 '' \
+	'removal of intern-quality:mysql-9.7.1-444444444444-amd64 failed'
+expect_images '2c candidate images after a stuck removal' \
+	"intern-quality:$profile-111111111111-$arch intern-quality:$profile-222222222222-$arch intern-quality:$profile-333333333333-$arch intern-quality:$profile-444444444444-$arch"
+
 # 3. Nothing to remove is a success with a log line, and touches nothing.
 seed "cx1:" "vx1:$other"
 clean JackVance
@@ -340,6 +374,8 @@ if [[ ${CLEAN_CASES_MUTANTS:-1} == 1 ]]; then
 		'^FAIL 2 candidate image scope .*images \['
 	mutant 'newest K ignored' 'keep_candidates=3' 'keep_candidates=0' \
 		'^FAIL 2b candidate image scope .*images \['
+	mutant 'candidates removed with docker image rm instead of remove-images.sh' '"$remove_images" "$ref"' 'docker image rm "$ref"' \
+		'^FAIL 2 .*: exit status 1, want 0'
 	mutant 'inventory leftovers ignored' 'if ((leftovers)); then' 'if false; then' \
 		'^FAIL 9 .*: exit status 0, want 1'
 	mutant 'RUNNER_NAME guard removed' 'runner=${RUNNER_NAME:?' 'runner=${RUNNER_NAME:-' \
