@@ -10,6 +10,18 @@ name: Intern quality
 # .github/scripts/require-runner.sh, which fails explicitly and names whatever
 # the runner lacks.
 #
+# Every job selects that runner with one identical `runs-on` label set: the
+# three default labels plus the custom `docker` and `wsl` labels the WSL2
+# instances are registered with. The default trio alone is not specific enough
+# on this machine: a Windows runner is also registered here, and a plain Linux
+# runner without the native Docker engine would match it too. Both would fail
+# the real-component gates, or hang until a job timeout. Only the instances
+# configured for this harness carry `docker` and `wsl`, so a job cannot land on
+# the Windows runner or on an under-provisioned Linux instance. All 13
+# occurrences must stay byte-identical; .github/scripts/runner-labels-cases.sh
+# is the single check that fails the fast tier when one drifts, when a job loses
+# its runs-on, or when a new job is added without updating the count together.
+#
 # Triggers: push on every branch and tag, the nightly schedule on the default
 # branch, and workflow_dispatch. Branch pushes are filtered with on.push.paths:
 # a push that changes only documentation or the CI's own files creates no run
@@ -101,7 +113,7 @@ env:
 jobs:
   scope:
     if: github.event.deleted != true
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 20
     outputs:
       fast: ${{ steps.scope.outputs.fast }}
@@ -128,7 +140,7 @@ jobs:
   quality-fast:
     needs: scope
     if: needs.scope.outputs.fast == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -166,6 +178,9 @@ jobs:
         run: .github/scripts/needs-ci-cases.sh
       - name: Scope selection accept and reject cases
         run: .github/scripts/quality-scope-cases.sh
+      # Every job must target the same WSL2 runner group (see the file header).
+      - name: Runner label set accept and reject cases
+        run: .github/scripts/runner-labels-cases.sh
       # The Web frontend (F1 #54): the same Bun as mise.toml, the frozen
       # lockfile, then Biome, TypeScript, Vitest and the OpenAPI client drift
       # check, and finally the static export embedded in a webui build.
@@ -222,7 +237,7 @@ jobs:
   container-mysql:
     needs: scope
     if: needs.scope.outputs.cli == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -321,7 +336,7 @@ jobs:
   container-physical:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -353,7 +368,7 @@ jobs:
   container-ftp:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -387,7 +402,7 @@ jobs:
   container-replication:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -419,7 +434,7 @@ jobs:
   container-web:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -451,7 +466,7 @@ jobs:
   container-dispatch:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -483,7 +498,7 @@ jobs:
   container-restore:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -515,7 +530,7 @@ jobs:
   container-restore-api:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -557,7 +572,7 @@ jobs:
   container-deploy:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 75
     env:
       INTERN_D1_ARTIFACT_DIR: ${{ github.workspace }}/.cache/quality/deploy
@@ -611,7 +626,7 @@ jobs:
   container-ftps:
     needs: scope
     if: needs.scope.outputs.web == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 105
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -644,7 +659,7 @@ jobs:
     name: quality-gate
     needs: [scope, quality-fast, container-mysql, container-physical, container-ftp, container-replication, container-web, container-dispatch, container-restore, container-restore-api, container-deploy, container-ftps]
     if: always() && github.event.deleted != true
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, docker, wsl]
     timeout-minutes: 10
     steps:
       # Every job of a tier the scope selected must succeed and every job of

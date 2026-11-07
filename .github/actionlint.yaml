@@ -1,0 +1,13 @@
+# actionlint only knows GitHub-hosted runner labels out of the box. These are
+# the custom labels of the WSL2 self-hosted instances that every job in
+# .github/workflows/quality.yml selects. Without this file actionlint rejects
+# the workflow's runs-on lines as unknown labels; with it the local check agrees
+# with the runner group actually registered on this host
+# (docs/guide/quality.md, "CI execution environment").
+#
+# Keep this list, the runs-on lines and .github/scripts/runner-labels-cases.sh
+# in sync: all three describe the same single runner group.
+self-hosted-runner:
+  labels:
+    - docker
+    - wsl
