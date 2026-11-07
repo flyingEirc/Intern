@@ -82,9 +82,14 @@ name: Intern quality
 # .golangci.yml's timeout. Lane-internal jobs inherit the barrier through their
 # upstream. .github/scripts/runner-lanes-cases.sh asserts the lanes, the barrier,
 # the tier boundary and the complete quality-gate needs list. Job-level
-# considered, but avoiding a canceled third pending job needs `queue: max`,
-# which actionlint v1.7.12 rejects and which is documented only for
-# workflow-level concurrency; `needs` lanes are deterministic instead.
+# `concurrency` was considered, but avoiding a canceled third pending job needs
+# `queue: max`, which actionlint v1.7.12 rejects and which is documented only
+# for workflow-level concurrency; `needs` lanes are deterministic instead.
+# Known trade-off of the lanes: a job runs only when its upstream succeeded, so
+# a failed lane head (or quality-fast) skips the rest of its lane. quality-gate
+# still fails such a run, but the skipped jobs give no signal of their own; a
+# rerun of the whole lane is needed to see them. A lane also adds up its jobs'
+# wall clock (lane B can take up to 70 + 70 + 105 minutes).
 #
 # Differences from the former hosted-runner form: runs-on; the require-runner.sh
 # step; setup-go with cache: false (the runner keeps its module and build caches
