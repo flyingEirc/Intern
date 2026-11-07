@@ -84,7 +84,8 @@ max_parallel_of() {
 }
 
 verify() {
-	local file=$1 job got gate
+	local file=$1 job got gate dep found
+	local -a deps
 	[[ -f $file ]] || { printf 'no workflow at %s\n' "$file"; return 1; }
 	for job in "${order[@]}"; do
 		got=$(field_of "$job" needs "$file")
@@ -110,9 +111,22 @@ verify() {
 		printf 'container-mysql: max-parallel is "%s", want "      max-parallel: 1"\n' "$got"
 		return 1
 	fi
+	# Split the needs list and compare whole names: a substring test would let
+	# container-restore-api stand in for a missing container-restore.
 	gate=$(field_of quality-gate needs "$file")
+	if [[ $gate != '    needs: ['*']' ]]; then
+		printf 'quality-gate: needs is "%s", want a [..] list\n' "$gate"
+		return 1
+	fi
+	gate=${gate#*[}
+	gate=${gate%]}
+	IFS=', ' read -r -a deps <<<"$gate"
 	for job in "${gate_jobs[@]}"; do
-		if [[ $gate != *"$job"* ]]; then
+		found=0
+		for dep in "${deps[@]}"; do
+			[[ $dep == "$job" ]] && found=1 && break
+		done
+		if ((!found)); then
 			printf 'quality-gate does not depend on %s\n' "$job"
 			return 1
 		fi
@@ -179,9 +193,11 @@ expect_bad 'the cli tier loses its own scope gate' \
 expect_bad 'the cli matrix runs both profiles in parallel' \
 	"$(mutate matrix-parallel container-mysql '      max-parallel: 1' '      max-parallel: 2')"
 
+# container-restore is a substring of container-restore-api, so dropping it is
+# only caught by an exact comparison of the list entries.
 gate_line=$(field_of quality-gate needs "$workflow")
 expect_bad 'quality-gate drops one job from its needs list' \
-	"$(mutate gate-missing quality-gate "$gate_line" "${gate_line/container-dispatch, /}")"
+	"$(mutate gate-missing quality-gate "$gate_line" "${gate_line/container-restore, /}")"
 
 if verify "$work/absent.yml" >/dev/null 2>&1; then
 	report 'the workflow is missing' 'a missing workflow was accepted'
