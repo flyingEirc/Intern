@@ -5,9 +5,10 @@
 # passes, and compares the fast, cli and web outputs. The cases cover the rule
 # and the base selection of each event and ref kind (main runs every tier, a
 # branch push runs the fast checks only, a branch workflow_dispatch runs the
-# tiers of its needs-ci.sh tier or every tier with full=true), the unusable
-# bases and the failed diff that must end in the widest verdict of the event
-# with exit status 0 and one logged reason, and the documentation/CI-only
+# tiers of its needs-ci.sh tier or every tier with full=true, a dispatch with
+# ui=true runs the fast checks only and refuses full=true beside it), the
+# unusable bases and the failed diff that must end in the widest verdict of the
+# event with exit status 0 and one logged reason, and the documentation/CI-only
 # follow-up push that the push delta used to pass for a head whose code never
 # had a completed run.
 #
@@ -61,11 +62,11 @@ commit() {
 	git rev-parse HEAD
 }
 
-# scope EVENT REF BEFORE HEAD [FULL] runs the script as the scope job does and
-# sets verdict ("FAST CLI WEB"), status and log.
+# scope EVENT REF BEFORE HEAD [FULL] [UI] runs the script as the scope job does
+# and sets verdict ("FAST CLI WEB"), status and log.
 scope() {
 	: > "$out"
-	if log=$(EVENT_NAME=$1 REF=$2 BEFORE_SHA=$3 HEAD_SHA=$4 FULL_INPUT=${5:-} GITHUB_OUTPUT=$out "$scope_script" 2>&1); then
+	if log=$(EVENT_NAME=$1 REF=$2 BEFORE_SHA=$3 HEAD_SHA=$4 FULL_INPUT=${5:-} UI_INPUT=${6:-} GITHUB_OUTPUT=$out "$scope_script" 2>&1); then
 		status=0
 	else
 		status=$?
@@ -95,6 +96,26 @@ expect() {
 	fi
 	if [[ -z $problem ]]; then
 		printf 'ok   %s: fast cli web = %s\n       %s\n' "$name" "$verdict" "$(printf '%s\n' "$log" | grep '^quality-scope: ')"
+	else
+		printf 'FAIL %s: %s\n%s\n' "$name" "$problem" "$log"
+		failed=$((failed + 1))
+	fi
+}
+
+# expect_refused NAME PATTERN checks that the last scope call failed, wrote no
+# tier output and logged a reason matching PATTERN.
+expect_refused() {
+	local name=$1 pattern=$2 problem=''
+	cases=$((cases + 1))
+	if [[ $status -eq 0 ]]; then
+		problem='exit status 0, want a refusal'
+	elif [[ -s $out ]]; then
+		problem="tier outputs were written: $(tr '\n' ' ' < "$out")"
+	elif [[ ! $log =~ $pattern ]]; then
+		problem="the log does not match: $pattern"
+	fi
+	if [[ -z $problem ]]; then
+		printf 'ok   %s: refused\n       %s\n' "$name" "$log"
 	else
 		printf 'FAIL %s: %s\n%s\n' "$name" "$problem" "$log"
 		failed=$((failed + 1))
@@ -347,6 +368,25 @@ expect '16j branch push, CLI-only branch' "$fast" 'app/cli/README\.md needs CI \
 git update-ref -d refs/remotes/origin/main
 scope workflow_dispatch refs/heads/cli '' "$CLI"
 expect '16k dispatch, origin/main missing' "$all" 'no usable base'
+
+# 17. workflow_dispatch with ui=true, the UI acceptance run (issue #74): the
+# fast checks whatever the branch changes, never a container tier; ui=true with
+# full=true is refused; the input means nothing to any other event.
+git update-ref refs/remotes/origin/main "$C0"
+scope workflow_dispatch refs/heads/web '' "$WEB" '' true
+expect '17a dispatch ui=true, Web branch: fast only' "$fast" 'ui=true: the fast checks and the UI end-to-end job'
+scope workflow_dispatch refs/heads/docs '' "$DOCS" false true
+expect '17b dispatch ui=true, documentation-only branch: still fast' "$fast" 'ui=true'
+scope workflow_dispatch refs/heads/main '' "$DOCS" '' true
+expect '17c dispatch ui=true on main: fast only' "$fast" 'ui=true'
+scope workflow_dispatch refs/heads/web '' "$WEB" true true
+expect_refused '17d dispatch ui=true with full=true' 'ui=true and full=true ask for opposite runs'
+scope workflow_dispatch refs/heads/web '' "$WEB" '' false
+expect '17e dispatch ui=false keeps the tier rules' 'true false true' 'app/web/a\.go needs the web tier'
+scope push refs/heads/web "$C0" "$WEB" '' true
+expect '17f a push ignores a ui value' "$fast" 'a branch push runs the fast checks only'
+scope schedule refs/heads/main '' "$DOCS" '' true
+expect '17g the schedule ignores a ui value' "$all"
 
 printf '\n%s cases, %s failed\n' "$cases" "$failed"
 [[ $failed -eq 0 ]]
