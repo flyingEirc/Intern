@@ -156,30 +156,23 @@ func TestEventStreamHeartbeat(t *testing.T) {
 	}
 }
 
-// TestEventStreamDropsSlowConsumerWithoutBlockingTheRun fills the 256-event
-// subscriber buffer faster than the client reads and proves the run keeps
-// committing events: the producer is never blocked by the stream.
+// TestEventStreamDropsSlowConsumerWithoutBlockingTheRun stalls a subscriber in
+// the middle of its first frame and then commits more events than the 256-event
+// subscriber buffer holds. Every one of them must commit while the consumer is
+// still stuck. The proof is the order of events, not a clock: the consumer is
+// released only after the burst, so a producer that waited on it could never
+// finish, and the store ends every write after 30 seconds, so such a wait fails
+// instead of hanging. The overflow rule itself is pinned at the boundary the
+// server owns by TestEventStreamDropsFullSubscriberWithoutBlockingIt.
 func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "slow", "operator")
 	_, run := h.seedPolicyWithRun(t, "slow-consumer")
-
-	// A stalled TLS client is attached while the log grows: the run must keep
-	// committing events regardless of what the socket accepts.
-	response, reader, cleanup := h.slowStreamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events")
-	defer cleanup()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", response.StatusCode)
-	}
-	readFrame(t, reader)
+	endStream := h.stallEventStream(t, cookie, run.ID)
 
 	const burst = 900
-	start := time.Now()
 	for i := range burst {
 		h.appendLog(t, run.ID, fmt.Sprintf("burst-%03d", i))
-	}
-	if elapsed := time.Since(start); elapsed > 20*time.Second {
-		t.Fatalf("appending %d events took %s: the producer is blocked by the consumer", burst, elapsed)
 	}
 	logs, err := h.fixture.database.RunLogsAfter(t.Context(), run.ID, 0, store.MaxRunLogRows+1)
 	if err != nil {
@@ -194,6 +187,7 @@ func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 	if last := h.logRowsFor(t, run.ID); last.Event != "after-burst" {
 		t.Fatalf("last stored event = %q", last.Event)
 	}
+	endStream()
 }
 
 // TestEventStreamDropsFullSubscriberWithoutBlockingIt exercises the overflow

@@ -7,13 +7,13 @@ import (
 	"crypto/x509"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -484,48 +484,80 @@ func (h *runHarness) materializeDispatcher(t *testing.T) {
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 }
 
-// slowStreamClient opens the event stream over a real TLS connection whose
-// receive buffer is deliberately tiny. That is a genuinely slow consumer at the
-// transport level: the kernel stops accepting bytes, the server's write blocks,
-// and the subscriber buffer overflows exactly as it would for a stalled client.
-func (h *runHarness) slowStreamClient(t *testing.T, cookie *http.Cookie, path string) (*http.Response, *bufio.Reader, func()) {
-	t.Helper()
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: h.pool, MinVersion: tls.VersionTLS12},
-		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: 10 * time.Second, Control: smallReceiveBuffer(t)}
-			return tls.DialWithDialer(dialer, network, h.address, &tls.Config{RootCAs: h.pool, ServerName: "127.0.0.1"})
-		},
-	}
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+h.address+path, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.AddCookie(cookie)
-	response, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response, bufio.NewReader(response.Body), func() {
-		_ = response.Body.Close()
-		client.CloseIdleConnections()
-	}
+// stalledResponse is the response writer of a client that has stopped reading.
+// Its first body write blocks until unblock, as a socket write does once the
+// peer never drains its receive window, but without depending on kernel buffer
+// sizes or a clock: stalled closes as soon as a write is blocked, so a test knows
+// the consumer is stuck before it produces anything.
+type stalledResponse struct {
+	header      http.Header
+	status      atomic.Int32
+	stalled     chan struct{}
+	release     chan struct{}
+	stalledOnce sync.Once
+	releaseOnce sync.Once
 }
 
-// smallReceiveBuffer shrinks SO_RCVBUF on the client socket, which is what makes
-// the consumer slow enough to overflow the server's subscriber buffer.
-func smallReceiveBuffer(t *testing.T) func(network, address string, conn syscall.RawConn) error {
-	return func(_, _ string, raw syscall.RawConn) error {
-		var sockErr error
-		if err := raw.Control(func(fd uintptr) {
-			sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 2048)
-		}); err != nil {
-			return err
+func newStalledResponse() *stalledResponse {
+	return &stalledResponse{header: http.Header{}, stalled: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *stalledResponse) Header() http.Header { return r.header }
+
+func (r *stalledResponse) WriteHeader(status int) { r.status.Store(int32(status)) }
+
+func (r *stalledResponse) Flush() {}
+
+func (r *stalledResponse) Write(body []byte) (int, error) {
+	r.stalledOnce.Do(func() { close(r.stalled) })
+	<-r.release
+	return len(body), nil
+}
+
+// unblock lets every blocked and later write return. It is safe to call more
+// than once.
+func (r *stalledResponse) unblock() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
+// stallEventStream serves one run's event stream to a consumer that stops
+// reading at the first frame and returns once that write is blocked, so
+// everything the test produces afterwards is produced against a stuck consumer.
+// The returned function cancels the request, releases the consumer and waits
+// for the handler to return. The minutes below only end a stream that never
+// starts or never ends; they are not a speed bound.
+func (h *runHarness) stallEventStream(t *testing.T, cookie *http.Cookie, runID string) (end func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	consumer := newStalledResponse()
+	t.Cleanup(func() {
+		cancel()
+		consumer.unblock()
+	})
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		req := apiRequest(http.MethodGet, "/api/v1/runs/"+runID+"/events", "", cookie).WithContext(ctx)
+		Handler(h.engine).ServeHTTP(consumer, req)
+	}()
+	select {
+	case <-consumer.stalled:
+	case <-served:
+		t.Fatalf("the stream ended before its first frame, status = %d", consumer.status.Load())
+	case <-time.After(time.Minute):
+		t.Fatal("the stream never wrote its first frame")
+	}
+	if status := consumer.status.Load(); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	return func() {
+		t.Helper()
+		cancel()
+		consumer.unblock()
+		select {
+		case <-served:
+		case <-time.After(time.Minute):
+			t.Fatal("the stream did not end after its request was canceled")
 		}
-		if sockErr != nil {
-			t.Logf("cannot shrink the receive buffer: %v", sockErr)
-		}
-		return nil
 	}
 }
