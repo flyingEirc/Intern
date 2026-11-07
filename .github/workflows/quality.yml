@@ -828,8 +828,15 @@ jobs:
           cp -R app/web/frontend/out app/web/internal/webui/dist
           go build -o bin/intern ./app/cli
           go build -tags webui -o bin/intern-web ./app/web
+      # Chrome's own sandbox needs unprivileged user namespaces, which Ubuntu
+      # 24.04 restricts through AppArmor where AppArmor is active, so whether
+      # the browser starts would depend on the host. The suites load only this
+      # job's own loopback servers, so the browsers run without it, as
+      # Playwright's Chromium launcher does by default.
       - name: Browser end-to-end suites
         working-directory: app/web/frontend
+        env:
+          AGENT_BROWSER_ARGS: --no-sandbox
         run: |
           set -uo pipefail
           failed=()
