@@ -122,7 +122,12 @@ func TestEventStreamReplaysFromTheStoredLog(t *testing.T) {
 }
 
 // TestEventStreamHeartbeat proves the periodic comment frame arrives without any
-// run activity, which is what keeps a quiet stream alive through proxies.
+// run activity, which is what keeps a quiet stream alive through proxies. The
+// heartbeat ticks independently of the replay, so on a loaded machine a ping can
+// legitimately reach the wire before the replayed event: pings ahead of it are
+// accepted, anything else is not. Once the replay is delivered the stream is
+// idle, because the replayed event is the only one the run has, so everything
+// after it must be heartbeat comments and they must keep coming.
 func TestEventStreamHeartbeat(t *testing.T) {
 	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	cookie := h.login(t, "heartbeat", "operator")
@@ -133,26 +138,43 @@ func TestEventStreamHeartbeat(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
-	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
-		t.Fatalf("first frame = %q", first)
+	if replay := readFirstEvent(t, reader); !strings.Contains(replay, "event: message") {
+		t.Fatalf("replay frame = %q", replay)
 	}
-	// The next frame must be the heartbeat comment: no event was written.
-	sawHeartbeat := false
-	for range 3 {
+	for range 2 {
+		assertHeartbeat(t, readFrame(t, reader))
+	}
+}
+
+// heartbeatsBeforeReplay bounds how many heartbeats may reach the wire before
+// the replayed event. It only ends a replay that never arrives: at the 40ms
+// interval it is the twenty seconds readFrame allows a single frame.
+const heartbeatsBeforeReplay = 500
+
+// readFirstEvent returns the first frame that is not a comment. Every comment
+// ahead of it must still be a well-formed heartbeat.
+func readFirstEvent(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	for range heartbeatsBeforeReplay {
 		frame := readFrame(t, reader)
-		if strings.HasPrefix(frame, ":") {
-			if !strings.Contains(frame, "ping") {
-				t.Fatalf("heartbeat = %q", frame)
-			}
-			sawHeartbeat = true
-			break
+		if !strings.HasPrefix(frame, ":") {
+			return frame
 		}
-		if !strings.Contains(frame, "event: message") {
-			t.Fatalf("unexpected frame while idle: %q", frame)
-		}
+		assertHeartbeat(t, frame)
 	}
-	if !sawHeartbeat {
-		t.Fatal("no heartbeat comment arrived")
+	t.Fatalf("%d heartbeats arrived and the replayed event never did", heartbeatsBeforeReplay)
+	return ""
+}
+
+// assertHeartbeat requires one frame of an idle stream to be the heartbeat
+// comment: nothing else may be written while the run has no activity.
+func assertHeartbeat(t *testing.T, frame string) {
+	t.Helper()
+	if !strings.HasPrefix(frame, ":") {
+		t.Fatalf("unexpected frame while idle: %q", frame)
+	}
+	if !strings.Contains(frame, "ping") {
+		t.Fatalf("heartbeat = %q", frame)
 	}
 }
 
