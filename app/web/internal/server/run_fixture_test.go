@@ -37,9 +37,6 @@ type runHarness struct {
 	pool       *x509.CertPool
 	certFile   string
 	keyFile    string
-	server     *http.Server
-	stop       context.CancelFunc
-	done       chan error
 }
 
 // newRunHarness starts a real TLS listener serving the run routes.
@@ -63,7 +60,7 @@ func newRunHarness(t *testing.T, opts ...EngineOption) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, dispatcher: dispatcher, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
@@ -88,7 +85,7 @@ func newUnconfiguredRunHarness(t *testing.T) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, dispatcher: dispatcher, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
@@ -105,25 +102,19 @@ func newControlHarness(t *testing.T, control DispatcherControl) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
-// listen starts (or restarts) the real server with the given WriteTimeout. The
-// timeout case uses a deliberately short one to prove the per-write deadline.
-func (h *runHarness) listen(t *testing.T, writeTimeout time.Duration) {
+// listen starts the real TLS server of the harness on a free loopback address.
+func (h *runHarness) listen(t *testing.T) {
 	t.Helper()
 	h.certFile, h.keyFile, h.pool = tlsMaterial(t, t.TempDir())
 	h.address = freeAddress(t)
 	config := Config{Listen: h.address, CertFile: h.certFile, KeyFile: h.keyFile, ShutdownTimeout: 5 * time.Second}
 	srv := New(config, Handler(h.engine))
-	if writeTimeout > 0 {
-		srv.WriteTimeout = writeTimeout
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h.server, h.stop = srv, cancel
-	h.done = make(chan error, 1)
-	go func() { h.done <- Run(ctx, srv, config) }()
+	go func() { _ = Run(ctx, srv, config) }()
 	waitListening(t, h.address, true)
 	t.Cleanup(func() {
 		cancel()
@@ -141,16 +132,6 @@ func (h *runHarness) stopRuns() {
 		h.t.Fatalf("stop dispatcher: %v", err)
 	}
 	h.dispatcher = nil
-}
-
-// restart serves the same engine again with a different WriteTimeout, which is
-// how the write-deadline case outlives the server's own limit.
-func (h *runHarness) restart(t *testing.T, writeTimeout time.Duration) {
-	t.Helper()
-	h.stop()
-	_ = h.server.Close()
-	<-h.done
-	h.listen(t, writeTimeout)
 }
 
 // streamClient opens the event stream with its own TLS client and returns a
@@ -559,5 +540,91 @@ func (h *runHarness) stallEventStream(t *testing.T, cookie *http.Cookie, runID s
 		case <-time.After(time.Minute):
 			t.Fatal("the stream did not end after its request was canceled")
 		}
+	}
+}
+
+// deadlineResponse is the response writer of a connection that supports write
+// deadlines. It records, in order, every deadline the handler sets and every
+// body write, so a test can prove that each write was preceded by a fresh
+// deadline without waiting for any deadline to expire.
+type deadlineResponse struct {
+	header http.Header
+	status atomic.Int32
+	// steps is appended by the handler goroutine only and read after served
+	// closes, which orders every append before the read.
+	steps  []deadlineStep
+	frames chan string
+	served chan struct{}
+}
+
+// deadlineStep is one recorded call: a SetWriteDeadline, or a body write.
+type deadlineStep struct {
+	at       time.Time
+	deadline time.Time
+	write    bool
+}
+
+func newDeadlineResponse() *deadlineResponse {
+	return &deadlineResponse{header: http.Header{}, frames: make(chan string, 64), served: make(chan struct{})}
+}
+
+func (r *deadlineResponse) Header() http.Header { return r.header }
+
+func (r *deadlineResponse) WriteHeader(status int) { r.status.Store(int32(status)) }
+
+func (r *deadlineResponse) Flush() {}
+
+func (r *deadlineResponse) SetWriteDeadline(deadline time.Time) error {
+	r.steps = append(r.steps, deadlineStep{at: time.Now(), deadline: deadline})
+	return nil
+}
+
+func (r *deadlineResponse) Write(body []byte) (int, error) {
+	r.steps = append(r.steps, deadlineStep{at: time.Now(), write: true})
+	r.frames <- string(body)
+	return len(body), nil
+}
+
+// awaitFrame returns once a written frame contains want. The minute only ends a
+// stream that never writes it; it is not a speed bound.
+func (r *deadlineResponse) awaitFrame(t *testing.T, want string) {
+	t.Helper()
+	giveUp := time.After(time.Minute)
+	for {
+		select {
+		case frame := <-r.frames:
+			if strings.Contains(frame, want) {
+				return
+			}
+		case <-r.served:
+			t.Fatalf("the stream ended before a frame containing %q, status = %d", want, r.status.Load())
+		case <-giveUp:
+			t.Fatalf("no frame containing %q was written", want)
+		}
+	}
+}
+
+// recordEventStream serves one run's event stream to a deadlineResponse. The
+// returned function cancels the request, waits for the handler to return and
+// hands back everything the writer recorded.
+func (h *runHarness) recordEventStream(t *testing.T, cookie *http.Cookie, runID string) (*deadlineResponse, func() []deadlineStep) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	recorder := newDeadlineResponse()
+	go func() {
+		defer close(recorder.served)
+		req := apiRequest(http.MethodGet, "/api/v1/runs/"+runID+"/events", "", cookie).WithContext(ctx)
+		Handler(h.engine).ServeHTTP(recorder, req)
+	}()
+	return recorder, func() []deadlineStep {
+		t.Helper()
+		cancel()
+		select {
+		case <-recorder.served:
+		case <-time.After(time.Minute):
+			t.Fatal("the stream did not end after its request was canceled")
+		}
+		return recorder.steps
 	}
 }

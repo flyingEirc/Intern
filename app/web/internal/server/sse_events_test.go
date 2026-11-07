@@ -475,30 +475,53 @@ func TestEventStreamNeverWritesJSONAfterTheFirstByte(t *testing.T) {
 	}
 }
 
-// TestEventStreamOutlivesServerWriteTimeout is the per-write deadline case: the
-// server's own WriteTimeout is a fraction of a second, yet the stream keeps
-// answering long past it because every write extends the deadline through
-// ResponseController.
+// TestEventStreamOutlivesServerWriteTimeout is the per-write deadline case. The
+// server's WriteTimeout starts counting when a request's header is read, so a
+// stream can only outlive it if every frame write first pushes the connection's
+// write deadline out through ResponseController. The stream is served to a
+// writer that records those calls, and the proof is their order: each frame is
+// written right after a deadline far past it. Nothing waits for a timer and no
+// real WriteTimeout is set: a tiny one fails the response before its first byte
+// on a busy machine, whether or not the handler extends deadlines, and the
+// client then reads a TLS bad record MAC instead of a stream.
 func TestEventStreamOutlivesServerWriteTimeout(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "deadline", "operator")
 	_, run := h.seedPolicyWithRun(t, "deadline-stream")
-	h.restart(t, 200*time.Millisecond)
+	stream, end := h.recordEventStream(t, cookie, run.ID)
 
-	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
-	defer cleanup()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", response.StatusCode)
-	}
-	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
-		t.Fatalf("first frame = %q", first)
-	}
-	// Well past the configured WriteTimeout: an event must still cross the wire.
-	time.Sleep(700 * time.Millisecond)
+	stream.awaitFrame(t, "event: message")
 	h.appendLog(t, run.ID, "after-write-timeout")
-	live := readFrame(t, reader)
-	if !strings.Contains(live, "after-write-timeout") {
-		t.Fatalf("frame after the server WriteTimeout = %q", live)
+	stream.awaitFrame(t, "after-write-timeout")
+	if status := stream.status.Load(); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertEveryWriteExtendsTheDeadline(t, end())
+}
+
+// assertEveryWriteExtendsTheDeadline requires each recorded frame write to come
+// right after a SetWriteDeadline that put the deadline far past the write.
+func assertEveryWriteExtendsTheDeadline(t *testing.T, steps []deadlineStep) {
+	t.Helper()
+	writes := 0
+	for i, step := range steps {
+		if !step.write {
+			continue
+		}
+		writes++
+		if i == 0 || steps[i-1].write {
+			t.Fatalf("frame write %d was not preceded by a write deadline extension", writes)
+		}
+		set := steps[i-1]
+		if ahead := set.deadline.Sub(set.at); ahead < sseWriteDeadline/2 {
+			t.Fatalf("frame write %d: the deadline was set only %s ahead, want about %s", writes, ahead, sseWriteDeadline)
+		}
+		if !set.deadline.After(step.at) {
+			t.Fatalf("frame write %d happened after its own deadline", writes)
+		}
+	}
+	if writes < 2 {
+		t.Fatalf("recorded %d frame writes, want the replay and the live event", writes)
 	}
 }
 
