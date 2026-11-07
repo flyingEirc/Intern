@@ -586,16 +586,9 @@ func startLoginToolCarrier(t *testing.T, ctx context.Context, root, mysqlImage s
 	t.Helper()
 	pkg := loadPhysicalClientPackage(t, root, mysqlImage)
 	values := map[string]string{"MYSQL_IMAGE": mysqlImage, "CLIENT_RPM_URL": pkg.URL, "CLIENT_RPM_SHA256": pkg.SHA256}
-	args := make(map[string]*string, len(values))
-	for key, value := range values {
-		args[key] = &value
-	}
 	carrier, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{
-			Context: root, Dockerfile: "Dockerfile", BuildArgs: args,
-			BuildOptionsModifier: func(options *client.ImageBuildOptions) { options.Target = "client-tools" },
-		},
-		ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Mounts: mounts,
+		FromDockerfile: clientToolsImage.build(t, root, "amd64", values),
+		ImagePlatform:  "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Mounts: mounts,
 		ConfigModifier: func(config *container.Config) { config.User = fmt.Sprintf("%d:%d", uid, gid) },
 		WaitingFor:     wait.ForExec([]string{"/usr/bin/test", "-x", "/extract/usr/bin/mysql_config_editor"}),
 	}, Started: true})

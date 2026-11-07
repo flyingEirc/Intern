@@ -334,7 +334,7 @@ func startS2Fixture(t *testing.T, ctx context.Context, root string, nw *tc.Docke
 		})
 	}
 	fixture, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{Context: filepath.Join(root, "app/web/integration"), Dockerfile: "ftps.Dockerfile", BuildLogWriter: os.Stderr},
+		FromDockerfile: ftpsImage.build(t, root, "amd64", nil),
 		ImagePlatform:  "linux/amd64",
 		Networks:       []string{nw.Name}, NetworkAliases: map[string][]string{nw.Name: {s2NetworkAlias}},
 		Mounts: []tc.ContainerMount{tc.VolumeMount("", "/data"), tc.VolumeMount(auditVolume, "/audit")},
@@ -420,11 +420,8 @@ func startS2ChainWorker(t *testing.T, ctx context.Context, root string, nw *tc.D
 	t.Helper()
 	mounts = append(mounts, tc.VolumeMount(exportVolume, "/export"))
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{
-			Context: filepath.Join(root, "app/web/integration"), Dockerfile: "restore.Dockerfile", BuildLogWriter: os.Stderr,
-			BuildArgs: map[string]*string{"MYSQL_IMAGE": &mysqlImage, "PXB_IMAGE": &pxbImage},
-		},
-		ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
+		FromDockerfile: restoreImage.build(t, root, "amd64", map[string]string{"MYSQL_IMAGE": mysqlImage, "PXB_IMAGE": pxbImage}),
+		ImagePlatform:  "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name}, Mounts: mounts,
 		Env: map[string]string{
 			"INTERN_W4_PASSWORD":          backupPassword,

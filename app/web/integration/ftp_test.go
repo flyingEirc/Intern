@@ -82,7 +82,7 @@ func TestS1NativeContainers(t *testing.T) {
 		require(t, nw.Remove(cleanup))
 	})
 	server, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{Context: filepath.Join(root, "app/web/integration"), Dockerfile: "ftp.Dockerfile", BuildLogWriter: os.Stderr},
+		FromDockerfile: ftpImage.build(t, root, arch, nil),
 		ImagePlatform:  "linux/" + arch,
 		Networks:       []string{nw.Name}, NetworkAliases: map[string][]string{nw.Name: {"s1-ftp"}},
 		Mounts: []tc.ContainerMount{tc.VolumeMount("", "/data")},

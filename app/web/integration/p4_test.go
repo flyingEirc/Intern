@@ -227,11 +227,8 @@ func startP4Worker(t *testing.T, ctx context.Context, root string, nw *tc.Docker
 	t.Helper()
 	mounts = append(mounts, tc.VolumeMount(exportVolume, "/export"))
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
-		FromDockerfile: tc.FromDockerfile{
-			Context: filepath.Join(root, "app/web/integration"), Dockerfile: "restore.Dockerfile", BuildLogWriter: os.Stderr,
-			BuildArgs: map[string]*string{"MYSQL_IMAGE": &mysqlImage, "PXB_IMAGE": &pxbImage},
-		},
-		ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
+		FromDockerfile: restoreImage.build(t, root, "amd64", map[string]string{"MYSQL_IMAGE": mysqlImage, "PXB_IMAGE": pxbImage}),
+		ImagePlatform:  "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name}, Mounts: mounts, Env: env,
 		Files: []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/restore-worker.test", FileMode: 0o755}},
 		Tmpfs: map[string]string{
