@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
 # Fails unless this self-hosted runner has what the jobs assume, naming everything
 # that is missing in one message: a Linux x86_64 host, the host tools the gates
-# call and, per flag, a C compiler for the race detector, unzip for the Bun
-# setup and a native Linux amd64 Docker engine. The real component gates must
-# block on a missing or mismatched runtime; they never skip and never fall back
-# to mocks (docs/guide/quality.md), so a runner without the engine gets one
-# explicit failure here instead of a dozen opaque ones later.
+# call and, per flag, a C compiler for the race detector and a native Linux amd64
+# Docker engine. The real component gates must block on a missing or mismatched
+# runtime; they never skip and never fall back to mocks (docs/guide/quality.md),
+# so a runner without the engine gets one explicit failure here instead of a
+# dozen opaque ones later.
 #
-#   require-runner.sh [--cc] [--bun] [--docker] [--compose]
+#   require-runner.sh [--cc] [--docker] [--compose]
 #     --cc       a C compiler (go test -race needs cgo)
-#     --bun      unzip (oven-sh/setup-bun extracts the Bun release zip with it)
 #     --docker   the Docker CLI reaches a native linux/amd64 engine
 #     --compose  --docker plus the Compose plugin and a kernel that can apply the
 #                cgroup I/O weight compose.yaml asks for (the D1 deployment job)
 set -euo pipefail
 
-want_cc=0 want_bun=0 want_docker=0 want_compose=0
+want_cc=0 want_docker=0 want_compose=0
 for arg in "$@"; do
 	case "$arg" in
 	--cc) want_cc=1 ;;
-	--bun) want_bun=1 ;;
 	--docker) want_docker=1 ;;
 	--compose) want_docker=1 want_compose=1 ;;
 	*)
-		echo 'usage: require-runner.sh [--cc] [--bun] [--docker] [--compose]' >&2
+		echo 'usage: require-runner.sh [--cc] [--docker] [--compose]' >&2
 		exit 2
 		;;
 	esac
@@ -53,14 +51,6 @@ fi
 
 if ((want_cc)) && ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
 	need 'no C compiler (cc or gcc): go test -race needs cgo; install build-essential'
-fi
-
-# oven-sh/setup-bun downloads a release zip and extracts it with the host's
-# unzip. Without it the action fails later with "Unable to locate executable
-# file: unzip", after the runner has already been held by the job. Only
-# quality-fast installs Bun, so only that job asks for this (--cc --bun).
-if ((want_bun)) && ! command -v unzip >/dev/null 2>&1; then
-	need 'unzip is not installed: oven-sh/setup-bun extracts the Bun release with it (sudo apt-get install -y unzip)'
 fi
 
 # docker_gate runs the Docker CLI under a deadline and stores its combined output
