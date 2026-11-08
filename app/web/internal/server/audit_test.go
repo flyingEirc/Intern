@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
@@ -200,14 +201,45 @@ func assertRateLimitResponse(t *testing.T, retryAfter string, data []byte) {
 	}
 }
 
+// TestLoginHTTPIPLimitAcrossUsernames proves that one IP's login attempts share
+// a single bucket whatever username they name. Every attempt names a new
+// account, so no per-user bucket can deny it and the 429 can only come from the
+// IP bucket: a burst of 30 that gets one token back every two seconds. Tokens
+// come back in real time, so which attempt is denied depends on how long the
+// requests took on this machine. The test measures that time and asserts exactly
+// what a correct bucket allows for it: at least the whole burst, and at most the
+// burst plus one token for every refill interval that really passed. On a quick
+// machine that is 30 attempts allowed and the 31st denied.
 func TestLoginHTTPIPLimitAcrossUsernames(t *testing.T) {
+	const (
+		burst       = 30
+		refill      = 2 * time.Second
+		attemptsCap = 300
+	)
 	f := newAuthFixture(t)
-	for i := range 31 {
-		status := 401
-		if i == 30 {
-			status = 429
+	start := time.Now()
+	allowed := 0
+	for {
+		if allowed >= attemptsCap {
+			t.Fatalf("the IP bucket still allowed attempt %d", allowed+1)
 		}
-		f.request(t, "POST", "/api/v1/auth/login", `{"username":"missing`+strconv.Itoa(i)+`","password":"wrong-password"}`, nil, status)
+		body := `{"username":"missing` + strconv.Itoa(allowed) + `","password":"wrong-password"}`
+		response, err := f.client.roundTrip(apiRequest("POST", "/api/v1/auth/login", body, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Code == 429 {
+			break
+		}
+		if response.Code != 401 {
+			t.Fatalf("attempt %d: status = %d, body = %s; want 401 or 429", allowed+1, response.Code, response.Body)
+		}
+		allowed++
+	}
+	elapsed := time.Since(start)
+	if most := burst + int(elapsed/refill); allowed < burst || allowed > most {
+		t.Fatalf("%d attempts were allowed in %s; a burst of %d that refills one token per %s allows %d to %d",
+			allowed, elapsed, burst, refill, burst, most)
 	}
 }
 

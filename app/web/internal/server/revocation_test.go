@@ -141,35 +141,53 @@ func TestSessionIdleExpiry(t *testing.T) {
 	f.request(t, "GET", "/api/v1/auth/session", "", cookie, 401)
 }
 
+// TestSessionAbsoluteExpiryDespiteActivity proves the two session clocks
+// together: activity keeps renewing the idle expiry, and the absolute lifetime
+// still ends the session. No clock is waited on. ageSession moves the stored
+// session back by the time that would have passed, so the real session manager
+// and store decide every step and no wall-clock window has to be hit.
 func TestSessionAbsoluteExpiryDespiteActivity(t *testing.T) {
 	f := newAuthFixture(t)
-	f.service.Sessions.IdleTimeout, f.service.Sessions.Lifetime = 200*time.Millisecond, 400*time.Millisecond
+	f.service.Sessions.IdleTimeout, f.service.Sessions.Lifetime = 10*time.Minute, 30*time.Minute
 	f.seed(t, "viewer", "viewer")
 	cookie := f.login(t, "viewer", testPassword)
-	start := time.Now()
-	deadline := time.NewTimer(2 * time.Second)
-	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		response, err := f.client.roundTrip(apiRequest("GET", "/api/v1/auth/session", "", cookie))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if response.Code == 401 {
-			if time.Since(start) < 300*time.Millisecond {
-				t.Fatal("activity did not extend idle timeout")
-			}
-			break
-		}
-		if response.Code != 200 {
-			t.Fatal("unexpected session response")
-		}
-		select {
-		case <-deadline.C:
-			t.Fatal("absolute lifetime not enforced")
-		case <-ticker.C:
-		}
+	// Eight minutes is inside the ten-minute idle timeout, so every request finds
+	// a live session and renews its idle expiry. The second and third requests
+	// come 16 and 24 minutes after login: the session is alive only because the
+	// earlier requests renewed it.
+	for range 3 {
+		f.ageSession(t, cookie.Value, 8*time.Minute)
+		f.request(t, "GET", "/api/v1/auth/session", "", cookie, 200)
+	}
+	// 32 minutes after login the 30-minute lifetime is over. The last request was
+	// only eight minutes ago, inside the idle timeout, so only the absolute
+	// lifetime can have ended the session.
+	f.ageSession(t, cookie.Value, 8*time.Minute)
+	f.request(t, "GET", "/api/v1/auth/session", "", cookie, 401)
+}
+
+// ageSession moves one stored session back in time by elapsed. The row's expiry
+// and the absolute deadline inside its payload shift together, which is exactly
+// what waiting that long would have done to them.
+func (f *authFixture) ageSession(t *testing.T, token string, elapsed time.Duration) {
+	t.Helper()
+	var payload []byte
+	var expiry float64
+	if err := f.database.DB().QueryRowContext(t.Context(),
+		`SELECT data, expiry FROM sessions WHERE token = ?`, token).Scan(&payload, &expiry); err != nil {
+		t.Fatal(err)
+	}
+	deadline, values, err := f.service.Sessions.Codec.Decode(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aged, err := f.service.Sessions.Codec.Encode(deadline.Add(-elapsed), values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.database.DB().ExecContext(t.Context(),
+		`UPDATE sessions SET data = ?, expiry = ? WHERE token = ?`, aged, expiry-elapsed.Seconds(), token); err != nil {
+		t.Fatal(err)
 	}
 }
 

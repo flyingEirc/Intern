@@ -7,13 +7,13 @@ import (
 	"crypto/x509"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,9 +37,6 @@ type runHarness struct {
 	pool       *x509.CertPool
 	certFile   string
 	keyFile    string
-	server     *http.Server
-	stop       context.CancelFunc
-	done       chan error
 }
 
 // newRunHarness starts a real TLS listener serving the run routes.
@@ -63,7 +60,7 @@ func newRunHarness(t *testing.T, opts ...EngineOption) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, dispatcher: dispatcher, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
@@ -88,7 +85,7 @@ func newUnconfiguredRunHarness(t *testing.T) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, dispatcher: dispatcher, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
@@ -105,25 +102,19 @@ func newControlHarness(t *testing.T, control DispatcherControl) *runHarness {
 	}
 	f.engine = engine
 	h := &runHarness{t: t, fixture: f, engine: engine}
-	h.listen(t, 0)
+	h.listen(t)
 	return h
 }
 
-// listen starts (or restarts) the real server with the given WriteTimeout. The
-// timeout case uses a deliberately short one to prove the per-write deadline.
-func (h *runHarness) listen(t *testing.T, writeTimeout time.Duration) {
+// listen starts the real TLS server of the harness on a free loopback address.
+func (h *runHarness) listen(t *testing.T) {
 	t.Helper()
 	h.certFile, h.keyFile, h.pool = tlsMaterial(t, t.TempDir())
 	h.address = freeAddress(t)
 	config := Config{Listen: h.address, CertFile: h.certFile, KeyFile: h.keyFile, ShutdownTimeout: 5 * time.Second}
 	srv := New(config, Handler(h.engine))
-	if writeTimeout > 0 {
-		srv.WriteTimeout = writeTimeout
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h.server, h.stop = srv, cancel
-	h.done = make(chan error, 1)
-	go func() { h.done <- Run(ctx, srv, config) }()
+	go func() { _ = Run(ctx, srv, config) }()
 	waitListening(t, h.address, true)
 	t.Cleanup(func() {
 		cancel()
@@ -141,16 +132,6 @@ func (h *runHarness) stopRuns() {
 		h.t.Fatalf("stop dispatcher: %v", err)
 	}
 	h.dispatcher = nil
-}
-
-// restart serves the same engine again with a different WriteTimeout, which is
-// how the write-deadline case outlives the server's own limit.
-func (h *runHarness) restart(t *testing.T, writeTimeout time.Duration) {
-	t.Helper()
-	h.stop()
-	_ = h.server.Close()
-	<-h.done
-	h.listen(t, writeTimeout)
 }
 
 // streamClient opens the event stream with its own TLS client and returns a
@@ -484,48 +465,166 @@ func (h *runHarness) materializeDispatcher(t *testing.T) {
 	t.Cleanup(func() { _ = dispatcher.Stop() })
 }
 
-// slowStreamClient opens the event stream over a real TLS connection whose
-// receive buffer is deliberately tiny. That is a genuinely slow consumer at the
-// transport level: the kernel stops accepting bytes, the server's write blocks,
-// and the subscriber buffer overflows exactly as it would for a stalled client.
-func (h *runHarness) slowStreamClient(t *testing.T, cookie *http.Cookie, path string) (*http.Response, *bufio.Reader, func()) {
+// stalledResponse is the response writer of a client that has stopped reading.
+// Its first body write blocks until unblock, as a socket write does once the
+// peer never drains its receive window, but without depending on kernel buffer
+// sizes or a clock: stalled closes as soon as a write is blocked, so a test knows
+// the consumer is stuck before it produces anything.
+type stalledResponse struct {
+	header      http.Header
+	status      atomic.Int32
+	stalled     chan struct{}
+	release     chan struct{}
+	stalledOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func newStalledResponse() *stalledResponse {
+	return &stalledResponse{header: http.Header{}, stalled: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (r *stalledResponse) Header() http.Header { return r.header }
+
+func (r *stalledResponse) WriteHeader(status int) { r.status.Store(int32(status)) }
+
+func (r *stalledResponse) Flush() {}
+
+func (r *stalledResponse) Write(body []byte) (int, error) {
+	r.stalledOnce.Do(func() { close(r.stalled) })
+	<-r.release
+	return len(body), nil
+}
+
+// unblock lets every blocked and later write return. It is safe to call more
+// than once.
+func (r *stalledResponse) unblock() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+
+// stallEventStream serves one run's event stream to a consumer that stops
+// reading at the first frame and returns once that write is blocked, so
+// everything the test produces afterwards is produced against a stuck consumer.
+// The returned function cancels the request, releases the consumer and waits
+// for the handler to return. The minutes below only end a stream that never
+// starts or never ends; they are not a speed bound.
+func (h *runHarness) stallEventStream(t *testing.T, cookie *http.Cookie, runID string) (end func()) {
 	t.Helper()
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: h.pool, MinVersion: tls.VersionTLS12},
-		DialTLSContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: 10 * time.Second, Control: smallReceiveBuffer(t)}
-			return tls.DialWithDialer(dialer, network, h.address, &tls.Config{RootCAs: h.pool, ServerName: "127.0.0.1"})
-		},
+	ctx, cancel := context.WithCancel(t.Context())
+	consumer := newStalledResponse()
+	t.Cleanup(func() {
+		cancel()
+		consumer.unblock()
+	})
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		req := apiRequest(http.MethodGet, "/api/v1/runs/"+runID+"/events", "", cookie).WithContext(ctx)
+		Handler(h.engine).ServeHTTP(consumer, req)
+	}()
+	select {
+	case <-consumer.stalled:
+	case <-served:
+		t.Fatalf("the stream ended before its first frame, status = %d", consumer.status.Load())
+	case <-time.After(time.Minute):
+		t.Fatal("the stream never wrote its first frame")
 	}
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+h.address+path, nil)
-	if err != nil {
-		t.Fatal(err)
+	if status := consumer.status.Load(); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
 	}
-	req.AddCookie(cookie)
-	response, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response, bufio.NewReader(response.Body), func() {
-		_ = response.Body.Close()
-		client.CloseIdleConnections()
+	return func() {
+		t.Helper()
+		cancel()
+		consumer.unblock()
+		select {
+		case <-served:
+		case <-time.After(time.Minute):
+			t.Fatal("the stream did not end after its request was canceled")
+		}
 	}
 }
 
-// smallReceiveBuffer shrinks SO_RCVBUF on the client socket, which is what makes
-// the consumer slow enough to overflow the server's subscriber buffer.
-func smallReceiveBuffer(t *testing.T) func(network, address string, conn syscall.RawConn) error {
-	return func(_, _ string, raw syscall.RawConn) error {
-		var sockErr error
-		if err := raw.Control(func(fd uintptr) {
-			sockErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 2048)
-		}); err != nil {
-			return err
+// deadlineResponse is the response writer of a connection that supports write
+// deadlines. It records, in order, every deadline the handler sets and every
+// body write, so a test can prove that each write was preceded by a fresh
+// deadline without waiting for any deadline to expire.
+type deadlineResponse struct {
+	header http.Header
+	status atomic.Int32
+	// steps is appended by the handler goroutine only and read after served
+	// closes, which orders every append before the read.
+	steps  []deadlineStep
+	frames chan string
+	served chan struct{}
+}
+
+// deadlineStep is one recorded call: a SetWriteDeadline, or a body write.
+type deadlineStep struct {
+	at       time.Time
+	deadline time.Time
+	write    bool
+}
+
+func newDeadlineResponse() *deadlineResponse {
+	return &deadlineResponse{header: http.Header{}, frames: make(chan string, 64), served: make(chan struct{})}
+}
+
+func (r *deadlineResponse) Header() http.Header { return r.header }
+
+func (r *deadlineResponse) WriteHeader(status int) { r.status.Store(int32(status)) }
+
+func (r *deadlineResponse) Flush() {}
+
+func (r *deadlineResponse) SetWriteDeadline(deadline time.Time) error {
+	r.steps = append(r.steps, deadlineStep{at: time.Now(), deadline: deadline})
+	return nil
+}
+
+func (r *deadlineResponse) Write(body []byte) (int, error) {
+	r.steps = append(r.steps, deadlineStep{at: time.Now(), write: true})
+	r.frames <- string(body)
+	return len(body), nil
+}
+
+// awaitFrame returns once a written frame contains want. The minute only ends a
+// stream that never writes it; it is not a speed bound.
+func (r *deadlineResponse) awaitFrame(t *testing.T, want string) {
+	t.Helper()
+	giveUp := time.After(time.Minute)
+	for {
+		select {
+		case frame := <-r.frames:
+			if strings.Contains(frame, want) {
+				return
+			}
+		case <-r.served:
+			t.Fatalf("the stream ended before a frame containing %q, status = %d", want, r.status.Load())
+		case <-giveUp:
+			t.Fatalf("no frame containing %q was written", want)
 		}
-		if sockErr != nil {
-			t.Logf("cannot shrink the receive buffer: %v", sockErr)
+	}
+}
+
+// recordEventStream serves one run's event stream to a deadlineResponse. The
+// returned function cancels the request, waits for the handler to return and
+// hands back everything the writer recorded.
+func (h *runHarness) recordEventStream(t *testing.T, cookie *http.Cookie, runID string) (*deadlineResponse, func() []deadlineStep) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	recorder := newDeadlineResponse()
+	go func() {
+		defer close(recorder.served)
+		req := apiRequest(http.MethodGet, "/api/v1/runs/"+runID+"/events", "", cookie).WithContext(ctx)
+		Handler(h.engine).ServeHTTP(recorder, req)
+	}()
+	return recorder, func() []deadlineStep {
+		t.Helper()
+		cancel()
+		select {
+		case <-recorder.served:
+		case <-time.After(time.Minute):
+			t.Fatal("the stream did not end after its request was canceled")
 		}
-		return nil
+		return recorder.steps
 	}
 }

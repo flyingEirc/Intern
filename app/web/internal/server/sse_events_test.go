@@ -122,7 +122,12 @@ func TestEventStreamReplaysFromTheStoredLog(t *testing.T) {
 }
 
 // TestEventStreamHeartbeat proves the periodic comment frame arrives without any
-// run activity, which is what keeps a quiet stream alive through proxies.
+// run activity, which is what keeps a quiet stream alive through proxies. The
+// heartbeat ticks independently of the replay, so on a loaded machine a ping can
+// legitimately reach the wire before the replayed event: pings ahead of it are
+// accepted, anything else is not. Once the replay is delivered the stream is
+// idle, because the replayed event is the only one the run has, so everything
+// after it must be heartbeat comments and they must keep coming.
 func TestEventStreamHeartbeat(t *testing.T) {
 	h := newRunHarness(t, WithSSEHeartbeat(40*time.Millisecond))
 	cookie := h.login(t, "heartbeat", "operator")
@@ -133,53 +138,63 @@ func TestEventStreamHeartbeat(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
-	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
-		t.Fatalf("first frame = %q", first)
+	if replay := readFirstEvent(t, reader); !strings.Contains(replay, "event: message") {
+		t.Fatalf("replay frame = %q", replay)
 	}
-	// The next frame must be the heartbeat comment: no event was written.
-	sawHeartbeat := false
-	for range 3 {
-		frame := readFrame(t, reader)
-		if strings.HasPrefix(frame, ":") {
-			if !strings.Contains(frame, "ping") {
-				t.Fatalf("heartbeat = %q", frame)
-			}
-			sawHeartbeat = true
-			break
-		}
-		if !strings.Contains(frame, "event: message") {
-			t.Fatalf("unexpected frame while idle: %q", frame)
-		}
-	}
-	if !sawHeartbeat {
-		t.Fatal("no heartbeat comment arrived")
+	for range 2 {
+		assertHeartbeat(t, readFrame(t, reader))
 	}
 }
 
-// TestEventStreamDropsSlowConsumerWithoutBlockingTheRun fills the 256-event
-// subscriber buffer faster than the client reads and proves the run keeps
-// committing events: the producer is never blocked by the stream.
+// heartbeatsBeforeReplay bounds how many heartbeats may reach the wire before
+// the replayed event. It only ends a replay that never arrives: at the 40ms
+// interval it is the twenty seconds readFrame allows a single frame.
+const heartbeatsBeforeReplay = 500
+
+// readFirstEvent returns the first frame that is not a comment. Every comment
+// ahead of it must still be a well-formed heartbeat.
+func readFirstEvent(t *testing.T, reader *bufio.Reader) string {
+	t.Helper()
+	for range heartbeatsBeforeReplay {
+		frame := readFrame(t, reader)
+		if !strings.HasPrefix(frame, ":") {
+			return frame
+		}
+		assertHeartbeat(t, frame)
+	}
+	t.Fatalf("%d heartbeats arrived and the replayed event never did", heartbeatsBeforeReplay)
+	return ""
+}
+
+// assertHeartbeat requires one frame of an idle stream to be the heartbeat
+// comment: nothing else may be written while the run has no activity.
+func assertHeartbeat(t *testing.T, frame string) {
+	t.Helper()
+	if !strings.HasPrefix(frame, ":") {
+		t.Fatalf("unexpected frame while idle: %q", frame)
+	}
+	if !strings.Contains(frame, "ping") {
+		t.Fatalf("heartbeat = %q", frame)
+	}
+}
+
+// TestEventStreamDropsSlowConsumerWithoutBlockingTheRun stalls a subscriber in
+// the middle of its first frame and then commits more events than the 256-event
+// subscriber buffer holds. Every one of them must commit while the consumer is
+// still stuck. The proof is the order of events, not a clock: the consumer is
+// released only after the burst, so a producer that waited on it could never
+// finish, and the store ends every write after 30 seconds, so such a wait fails
+// instead of hanging. The overflow rule itself is pinned at the boundary the
+// server owns by TestEventStreamDropsFullSubscriberWithoutBlockingIt.
 func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "slow", "operator")
 	_, run := h.seedPolicyWithRun(t, "slow-consumer")
-
-	// A stalled TLS client is attached while the log grows: the run must keep
-	// committing events regardless of what the socket accepts.
-	response, reader, cleanup := h.slowStreamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events")
-	defer cleanup()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", response.StatusCode)
-	}
-	readFrame(t, reader)
+	endStream := h.stallEventStream(t, cookie, run.ID)
 
 	const burst = 900
-	start := time.Now()
 	for i := range burst {
 		h.appendLog(t, run.ID, fmt.Sprintf("burst-%03d", i))
-	}
-	if elapsed := time.Since(start); elapsed > 20*time.Second {
-		t.Fatalf("appending %d events took %s: the producer is blocked by the consumer", burst, elapsed)
 	}
 	logs, err := h.fixture.database.RunLogsAfter(t.Context(), run.ID, 0, store.MaxRunLogRows+1)
 	if err != nil {
@@ -194,6 +209,7 @@ func TestEventStreamDropsSlowConsumerWithoutBlockingTheRun(t *testing.T) {
 	if last := h.logRowsFor(t, run.ID); last.Event != "after-burst" {
 		t.Fatalf("last stored event = %q", last.Event)
 	}
+	endStream()
 }
 
 // TestEventStreamDropsFullSubscriberWithoutBlockingIt exercises the overflow
@@ -459,30 +475,53 @@ func TestEventStreamNeverWritesJSONAfterTheFirstByte(t *testing.T) {
 	}
 }
 
-// TestEventStreamOutlivesServerWriteTimeout is the per-write deadline case: the
-// server's own WriteTimeout is a fraction of a second, yet the stream keeps
-// answering long past it because every write extends the deadline through
-// ResponseController.
+// TestEventStreamOutlivesServerWriteTimeout is the per-write deadline case. The
+// server's WriteTimeout starts counting when a request's header is read, so a
+// stream can only outlive it if every frame write first pushes the connection's
+// write deadline out through ResponseController. The stream is served to a
+// writer that records those calls, and the proof is their order: each frame is
+// written right after a deadline far past it. Nothing waits for a timer and no
+// real WriteTimeout is set: a tiny one fails the response before its first byte
+// on a busy machine, whether or not the handler extends deadlines, and the
+// client then reads a TLS bad record MAC instead of a stream.
 func TestEventStreamOutlivesServerWriteTimeout(t *testing.T) {
 	h := newRunHarness(t)
 	cookie := h.login(t, "deadline", "operator")
 	_, run := h.seedPolicyWithRun(t, "deadline-stream")
-	h.restart(t, 200*time.Millisecond)
+	stream, end := h.recordEventStream(t, cookie, run.ID)
 
-	response, reader, cleanup := h.streamClient(t, cookie, "/api/v1/runs/"+run.ID+"/events", nil)
-	defer cleanup()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d", response.StatusCode)
-	}
-	if first := readFrame(t, reader); !strings.Contains(first, "event: message") {
-		t.Fatalf("first frame = %q", first)
-	}
-	// Well past the configured WriteTimeout: an event must still cross the wire.
-	time.Sleep(700 * time.Millisecond)
+	stream.awaitFrame(t, "event: message")
 	h.appendLog(t, run.ID, "after-write-timeout")
-	live := readFrame(t, reader)
-	if !strings.Contains(live, "after-write-timeout") {
-		t.Fatalf("frame after the server WriteTimeout = %q", live)
+	stream.awaitFrame(t, "after-write-timeout")
+	if status := stream.status.Load(); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	assertEveryWriteExtendsTheDeadline(t, end())
+}
+
+// assertEveryWriteExtendsTheDeadline requires each recorded frame write to come
+// right after a SetWriteDeadline that put the deadline far past the write.
+func assertEveryWriteExtendsTheDeadline(t *testing.T, steps []deadlineStep) {
+	t.Helper()
+	writes := 0
+	for i, step := range steps {
+		if !step.write {
+			continue
+		}
+		writes++
+		if i == 0 || steps[i-1].write {
+			t.Fatalf("frame write %d was not preceded by a write deadline extension", writes)
+		}
+		set := steps[i-1]
+		if ahead := set.deadline.Sub(set.at); ahead < sseWriteDeadline/2 {
+			t.Fatalf("frame write %d: the deadline was set only %s ahead, want about %s", writes, ahead, sseWriteDeadline)
+		}
+		if !set.deadline.After(step.at) {
+			t.Fatalf("frame write %d happened after its own deadline", writes)
+		}
+	}
+	if writes < 2 {
+		t.Fatalf("recorded %d frame writes, want the replay and the live event", writes)
 	}
 }
 
