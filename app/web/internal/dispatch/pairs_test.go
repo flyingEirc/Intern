@@ -27,6 +27,7 @@ type sharedFTPFixture struct {
 	source      store.Source
 	policyA     store.Policy // local l1, replica ftp
 	policyB     store.Policy // local l2, replica ftp
+	lastFullAt  time.Time    // start of the last chain completeForPolicy published
 }
 
 func newSharedFTPFixture(t *testing.T) *sharedFTPFixture {
@@ -59,10 +60,21 @@ func (s *sharedFTPFixture) install(t *testing.T) {
 }
 
 // completeForPolicy publishes one completed full backup for one policy at the
-// current time, so the run's claim snapshot names that policy's pair.
+// current time, so the run's claim snapshot names that policy's pair. Each call
+// starts a new chain, and chain order is chains.started_at order, so a later
+// call must start strictly later. Two wall-clock reads milliseconds apart do not
+// promise that: on a loaded CI runner the clock can stall or step back between
+// them, which once ordered the second chain first. A start that did not advance
+// is therefore moved just past the previous one. UTC drops the monotonic
+// reading, so the comparison sees the wall time that is stored.
 func (s *sharedFTPFixture) completeForPolicy(t *testing.T, policy store.Policy, backupID string) (backupIDOut, runID string) {
 	t.Helper()
-	return s.publishMember(t, policy, backupID, "full", time.Now())
+	at := time.Now().UTC()
+	if !at.After(s.lastFullAt) {
+		at = s.lastFullAt.Add(time.Millisecond)
+	}
+	s.lastFullAt = at
+	return s.publishMember(t, policy, backupID, "full", at)
 }
 
 // publishMember publishes one completed physical member for one policy at an
