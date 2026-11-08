@@ -184,10 +184,16 @@ jobs:
         with:
           go-version: '1.27.0'
           cache: false
+      # -p 4 caps how many packages build and test at once; it does not slow the
+      # job down. Measured on this runner's WSL VM (2026-11-08, 16 cores):
+      # `go test -race` peaked at 2405 MiB with the default and 968 MiB with
+      # -p 4, while wall time stayed at 185-186s because one 164s package sets
+      # the critical path. The runner services cap each job at 2G, so the
+      # default's headroom is what would otherwise be swapped or OOM-killed.
       - name: Build
-        run: go build ./internal/... ./app/cli/... ./app/web/...
+        run: go build -p 4 ./internal/... ./app/cli/... ./app/web/...
       - name: Behavior and race tests
-        run: go test -race -shuffle=on ./internal/... ./app/cli/... ./app/web/...
+        run: go test -race -p 4 -shuffle=on ./internal/... ./app/cli/... ./app/web/...
       # The gates' own accept and reject cases, including an empty GITHUB_SHA,
       # run here too.
       - name: W4 evidence gate accept and reject cases
@@ -248,8 +254,8 @@ jobs:
           (cd app/web/frontend && bun run build)
           rm -rf app/web/internal/webui/dist
           cp -R app/web/frontend/out app/web/internal/webui/dist
-          go build -tags webui -o .cache/intern-web-webui ./app/web
-          go test -race -tags webui ./app/web/internal/webui/ ./app/web/cmd/
+          go build -tags webui -p 4 -o .cache/intern-web-webui ./app/web
+          go test -race -tags webui -p 4 ./app/web/internal/webui/ ./app/web/cmd/
       - name: Publish the OpenAPI contract with its digest
         run: |
           set -euo pipefail
@@ -268,12 +274,22 @@ jobs:
           path: .cache/contract/
           if-no-files-found: error
       - name: Install pinned golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+        run: go install -p 4 github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+      # A cold lint cache (config edit, version bump, cache eviction) is the
+      # largest spike in this job: 3328 MiB anonymous at the default concurrency,
+      # which is above the runner's 2G hard limit. GOGC=30 with --concurrency 2
+      # brings that cold peak to 1719 MiB; warm runs stay near 550 MiB. The cache
+      # lives in the shared runner home, so only the first job after an eviction
+      # pays the cold cost and its neighbours run warm.
       - name: Lint including integration code
-        run: golangci-lint run --build-tags=integration ./internal/... ./app/cli/... ./app/web/...
+        env:
+          GOGC: '30'
+        run: golangci-lint run --concurrency 2 --build-tags=integration ./internal/... ./app/cli/... ./app/web/...
       # The export staged above lets the webui-tagged embed file compile.
       - name: Lint the webui build of the Web module
-        run: golangci-lint run --build-tags=webui ./app/web/...
+        env:
+          GOGC: '30'
+        run: golangci-lint run --concurrency 2 --build-tags=webui ./app/web/...
 
   container-mysql:
     needs: [scope, quality-fast]
