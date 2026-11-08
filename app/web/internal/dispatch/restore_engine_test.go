@@ -157,3 +157,25 @@ func mustWrite(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// TestRestorePlanViewUsesContractRunKinds proves plan links carry the
+// contract's RunKind values. The engine plans with the catalog kinds
+// physical-full / physical-incremental; served verbatim they made every real
+// plan fail the RestorePlanLink schema, so the UI rejected the whole plan.
+func TestRestorePlanViewUsesContractRunKinds(t *testing.T) {
+	view := restorePlanView(restore.Plan{
+		Links: []restore.PlanLink{
+			{BackupID: "full", Seq: 1, Kind: "physical-full", Source: "ftp", RepositoryID: "repo"},
+			{BackupID: "inc", Seq: 2, Kind: "physical-incremental", FromLSN: 10, ToLSN: 20, Source: "local"},
+		},
+		Digest: "digest",
+	}, false)
+	got := []string{view.Links[0].Kind, view.Links[1].Kind}
+	want := []string{store.RunKindFull, store.RunKindIncremental}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("plan link kinds = %v, want %v", got, want)
+	}
+	if view.Digest != "digest" {
+		t.Fatalf("digest changed to %q", view.Digest)
+	}
+}

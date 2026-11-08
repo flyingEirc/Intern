@@ -315,7 +315,13 @@ export function SourceDetail() {
         </CardContent>
       </Card>
 
-      <SourceProtection sourceId={data.id} />
+      <SourceProtection
+        sourceId={data.id}
+        canPlanRestore={hasPermission(
+          session.data?.permissions,
+          "restores:plan",
+        )}
+      />
     </div>
   );
 }

@@ -24,6 +24,11 @@ export class ApiError extends Error {
    * envelope carries it; the message alone cannot describe which check failed.
    */
   readonly preflight: PreflightResult | undefined;
+  /**
+   * The fixed machine code of a `restore_refused` error (`error.detail.code`).
+   * Absent on every other error, and on a refusal whose body omits it.
+   */
+  readonly detailCode: string | undefined;
 
   constructor(init: {
     status: number;
@@ -32,6 +37,7 @@ export class ApiError extends Error {
     requestId?: string;
     retryAfter?: number;
     preflight?: PreflightResult;
+    detailCode?: string;
   }) {
     super(init.message);
     this.name = "ApiError";
@@ -40,6 +46,7 @@ export class ApiError extends Error {
     this.requestId = init.requestId;
     this.retryAfter = init.retryAfter;
     this.preflight = init.preflight;
+    this.detailCode = init.detailCode;
   }
 }
 
@@ -96,6 +103,7 @@ export function toApiError(
     requestId: parsed.data.error.request_id,
     retryAfter: retryAfterSeconds(response),
     preflight: parsed.data.error.preflight,
+    detailCode: parsed.data.error.detail?.code,
   });
 }
 

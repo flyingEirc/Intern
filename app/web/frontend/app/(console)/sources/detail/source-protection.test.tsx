@@ -1,4 +1,4 @@
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   chain,
@@ -38,7 +38,10 @@ describe("SourceProtection", () => {
     // Two days against one: the remote point is older and stays its own row.
     expect(local?.textContent).not.toEqual(remote?.textContent);
     expect(screen.queryByText("尚无保护点")).not.toBeInTheDocument();
-    expect(screen.getByText("物理全量")).toBeInTheDocument();
+    expect(screen.getByText("查看副本状态")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "恢复到此备份" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows an absent point as absent instead of borrowing the other side", async () => {
@@ -60,5 +63,29 @@ describe("SourceProtection", () => {
     expect(
       screen.getByText("还没有异地保护点：没有任何副本仓库完成过校验。"),
     ).toBeInTheDocument();
+  });
+
+  it("offers a restore link on a completed chain member when planning is allowed", async () => {
+    routeFetch({
+      "GET /api/v1/auth/session": [() => json(200, sessions.operator())],
+      "GET /api/v1/repositories": [
+        () => json(200, { items: [], next_before: null }),
+      ],
+      [`GET /api/v1/sources/${sourceId}/chains`]: [
+        () => json(200, { items: [chain()] }),
+      ],
+      [`GET /api/v1/sources/${sourceId}/protection`]: [
+        () => json(200, protection()),
+      ],
+    });
+    renderWithClient(<SourceProtection sourceId={sourceId} canPlanRestore />);
+
+    const href = `/restores/new?backup_id=${chain().members[0]?.id}`;
+    await waitFor(() => {
+      expect(document.querySelector(`a[href="${href}"]`)).not.toBeNull();
+    });
+    expect(document.querySelector(`a[href="${href}"]`)).toHaveTextContent(
+      "恢复到此备份",
+    );
   });
 });

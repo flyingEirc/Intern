@@ -12,6 +12,9 @@ describe("console navigation", () => {
     expect(navTitle("/runs/detail")).toBe("运行详情");
     expect(navTitle("/backups/detail")).toBe("备份详情");
     expect(navTitle("/replicas")).toBe("副本复制");
+    expect(navTitle("/restores")).toBe("恢复");
+    expect(navTitle("/restores/new")).toBe("新建恢复");
+    expect(navTitle("/restores/detail")).toBe("恢复详情");
     expect(navTitle("/unknown")).toBe("Intern");
   });
 
@@ -33,5 +36,14 @@ describe("console navigation", () => {
     expect(
       navItemsFor(["session:self", "runs:read"]).map((item) => item.href),
     ).toContain("/runs");
+  });
+
+  it("shows the restore entry only to sessions with restores:read", () => {
+    expect(
+      navItemsFor(["session:self", "restores:read"]).map((item) => item.href),
+    ).toContain("/restores");
+    expect(
+      navItemsFor(["session:self", "resources:read"]).map((item) => item.href),
+    ).not.toContain("/restores");
   });
 });

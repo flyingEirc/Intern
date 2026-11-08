@@ -7,6 +7,9 @@ import type {
   PolicySchedule,
   Protection,
   Replica,
+  Restore,
+  RestoreLog,
+  RestorePlan,
   Run,
   RunLog,
 } from "@/lib/api/generated/types.gen";
@@ -21,6 +24,8 @@ export const replicaRepositoryId = "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a04";
 export const runId = "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a05";
 export const backupId = "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a06";
 export const chainId = "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a07";
+export const restoreId = "0190c1f64f2a7c1e9b556f0f8d1e2a09";
+export const planDigest = "ab".repeat(32);
 
 export function sessionBody(permissions: Permission[]) {
   return { user, permissions };
@@ -30,6 +35,7 @@ const viewerPermissions: Permission[] = [
   "session:self",
   "resources:read",
   "runs:read",
+  "restores:read",
 ];
 
 const operatorPermissions: Permission[] = [
@@ -37,11 +43,21 @@ const operatorPermissions: Permission[] = [
   "runs:trigger",
   "runs:cancel",
   "replicas:retry",
+  "restores:plan",
+];
+
+const adminPermissions: Permission[] = [
+  ...operatorPermissions,
+  "repositories:manage",
+  "users:manage",
+  "audit:read",
+  "restores:execute",
 ];
 
 export const sessions = {
   viewer: () => sessionBody(viewerPermissions),
   operator: () => sessionBody(operatorPermissions),
+  admin: () => sessionBody(adminPermissions),
 };
 
 export function policy(overrides: Partial<Policy> = {}): Policy {
@@ -163,7 +179,9 @@ export function chain(overrides: Partial<Chain> = {}): Chain {
     started_at: createdAt,
     sealed_at: createdAt,
     pinned: false,
-    members: [backup()],
+    // The chains endpoint never fills member replicas (see the contract
+    // description of listSourceChains); pages read them elsewhere.
+    members: [backup({ replicas: [] })],
     ...overrides,
   };
 }
@@ -192,3 +210,109 @@ export function protection(overrides: Partial<Protection> = {}): Protection {
 }
 
 export const emptyList = { items: [], next_before: null };
+
+export function restorePlan(overrides: Partial<RestorePlan> = {}): RestorePlan {
+  return {
+    backup_id: backupId,
+    chain_id: chainId,
+    source_id: sourceId,
+    server_uuid: "11111111-2222-3333-4444-555555555555",
+    server_version: "8.4.11",
+    tool_version: "8.4.0-7",
+    target_to_lsn: 2000,
+    links: [
+      {
+        backup_id: backupId,
+        seq: 1,
+        kind: "full",
+        from_lsn: 0,
+        to_lsn: 1000,
+        source: "local",
+        repository_id: repositoryId,
+        payload_size: 4096,
+        metadata_size: 128,
+      },
+      {
+        backup_id: "0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a08",
+        seq: 2,
+        kind: "incremental",
+        from_lsn: 1000,
+        to_lsn: 2000,
+        source: "ftp",
+        repository_id: replicaRepositoryId,
+        payload_size: 512,
+        metadata_size: 64,
+      },
+    ],
+    required_work_bytes: 8192,
+    required_export_bytes: 8192,
+    available_work_bytes: 1048576,
+    available_export_bytes: 2097152,
+    export_path: "/var/lib/intern/export/{restore_id}",
+    risks: [
+      "no_auto_replace_production",
+      "server_uuid_duplicate",
+      "pitr_unavailable",
+    ],
+    plan_digest: planDigest,
+    rehearsal_available: true,
+    ...overrides,
+  };
+}
+
+export function restoreLog(overrides: Partial<RestoreLog> = {}): RestoreLog {
+  return {
+    restore_id: restoreId,
+    seq: 1,
+    ts: createdAt,
+    level: "info",
+    message: "restore phase extracting",
+    data: { phase: "extracting" },
+    ...overrides,
+  };
+}
+
+export function restore(overrides: Partial<Restore> = {}): Restore {
+  return {
+    id: restoreId,
+    backup_id: backupId,
+    status: "completed",
+    phase: null,
+    plan: restorePlan(),
+    plan_digest: planDigest,
+    rehearse: true,
+    verify_sql: ["SELECT 1"],
+    requested_by: user.id,
+    work_dir: null,
+    export_path: `/var/lib/intern/export/${restoreId}/data`,
+    export_bytes: 8192,
+    created_at: createdAt,
+    started_at: createdAt,
+    finished_at: createdAt,
+    cancel_requested: false,
+    error_class: null,
+    error_code: null,
+    side_effects: {
+      work_dir_removed: true,
+      pending_export_removed: true,
+      export_published: true,
+    },
+    verify_status: "passed",
+    verify_result: {
+      status: "passed",
+      started: true,
+      system_tables_readable: true,
+      schemas: [{ name: "app", tables: 1, rows: 2 }],
+      check_table: [{ table: "app.records", status: "OK" }],
+      queries: [
+        { sql: "SELECT 1", columns: ["1"], rows: [["1"]] },
+        {
+          sql: "SELECT COUNT(*) FROM app.records",
+          columns: ["COUNT(*)"],
+          rows: [["2"]],
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
