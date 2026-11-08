@@ -43,7 +43,10 @@
 - **接口客户端**：`lib/api/generated` 由 `@hey-api/openapi-ts` 从 `app/web/api/openapi.yaml` 生成（类型、fetch SDK、TanStack Query 选项、Zod 模式），SDK 用 Zod 校验每个 JSON 响应；错误统一经 `lib/api/errors.ts` 变为 `ApiError`（状态码、契约错误码、请求 ID、`Retry-After`）。生成物入库，禁止手改；契约变更后运行 `mise run frontend:generate` 并一并提交，`frontend:check` 的漂移检查会拒绝未重新生成的提交。
 - **会话**：任一请求 401 时由 Query 缓存统一清空缓存并跳转 `/login?next=<原路径>`（`next` 只接受同源路径）；预期 401 的请求（登录、登录页探测、注销）以 `meta.handlesUnauthorized` 标明。
 - **组件**：shadcn/ui 使用 Base UI 底座（`components.json` 的 `base-nova`），用 `bunx --bun shadcn@latest add` 添加到 `components/ui`，遵循 shadcn 规则（`FieldGroup`/`Field` 表单、语义色、`render` 代替 `asChild`）；缺失组件先搜索开源实现并在 Issue 记录来源与许可证。`components/ui` 由 Biome 格式化，只对其上游写法关闭少数规则（见 `biome.json`）。
-- **测试**：Vitest + Testing Library 覆盖契约校验、错误映射、表单规则与会话失效；端到端由 agent-browser 驱动真实 `bin/intern-web`（`mise run frontend:e2e`，截图与 `manifest.json` 写入 `.cache/e2e/<提交>`），UI 证据按 [Issue 流程](../workflow/issue.md) 附到 Issue。
+- **测试**：Vitest + Testing Library 覆盖契约校验、错误映射、表单规则、会话失效与各资源表单的边界；两套 agent-browser 端到端，截图与 `manifest.json` 写入 `.cache/`，UI 证据按 [Issue 流程](../workflow/issue.md) 附到 Issue：
+  - `mise run frontend:e2e`：对真实 `bin/intern-web`（`webui` 构建、回环 HTTP）跑登录、会话失效、注销与改密。
+  - `mise run frontend:e2e:stack`：`e2e/stack.ts` 用仓库自带的 `app/web/deploy/compose.yaml` 起真实栈（Intern 镜像、MySQL 8.4.11、PXB 8.4.0-7、明文与显式 TLS 的 Pure-FTPd 1.0.54 夹具），再用 agent-browser 验证仓库、数据源、策略与预检（`e2e/f2.ts`）。栈在 arm64 开发机上以 linux/amd64 模拟运行，结果只作开发证据；约束性验收在原生 linux/amd64。栈的清理由 `stop()` 负责，失败路径同样执行。
+  - 资源页面的详情与编辑页用查询参数（`/repositories/detail?id=`），不使用动态段。
 - **许可证**：Web 镜像的前端阶段用 `scripts/collect-licenses.ts` 收集 `dependencies` 闭包的许可证文本，随镜像放在 `/usr/share/licenses/intern/web-ui/`；只在构建期使用的工具放 `devDependencies`。
 
 ## 安全与恢复约束

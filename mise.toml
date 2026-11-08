@@ -52,6 +52,15 @@ run = '''
 exec bun e2e/run.ts "$@"
 '''
 
+[tasks."frontend:e2e:stack"]
+description = "agent-browser end-to-end for the resource pages against the real Compose stack (MySQL 8.4.11 + PXB 8.4.0-7 + Pure-FTPd 1.0.54; amd64 emulation on arm64 hosts)"
+dir = "{{config_root}}/app/web/frontend"
+raw_args = true
+run = '''
+#!/usr/bin/env sh
+exec bun e2e/f2.ts "$@"
+'''
+
 [tasks.run]
 description = "Run the CLI (mise run run --help)"
 raw_args = true
