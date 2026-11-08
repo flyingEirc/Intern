@@ -17,6 +17,9 @@ import {
   getSourceOptions,
   getSourceProtectionOptions,
   getSourceQueryKey,
+  getUserOptions,
+  getUserQueryKey,
+  listAuditLogsInfiniteOptions,
   listPoliciesInfiniteOptions,
   listPoliciesOptions,
   listPoliciesQueryKey,
@@ -35,6 +38,8 @@ import {
   listSourcesInfiniteOptions,
   listSourcesOptions,
   listSourcesQueryKey,
+  listUsersOptions,
+  listUsersQueryKey,
   previewPolicyScheduleOptions,
 } from "@/lib/api/generated/@tanstack/react-query.gen";
 import { listRestoreLogs, listRunLogs } from "@/lib/api/generated/sdk.gen";
@@ -45,6 +50,7 @@ import type {
   RunLog,
   RunStatus,
 } from "@/lib/api/generated/types.gen";
+import { auditIdNumber } from "@/lib/resources/audit";
 import { isTerminalRestore } from "@/lib/resources/restore";
 import { sequenceNumber } from "@/lib/runs/events";
 
@@ -368,4 +374,34 @@ export function invalidateRestore(client: QueryClient, id: string) {
       query: { limit: logPageSize },
     }),
   });
+}
+
+export function useUsers(enabled: boolean) {
+  return useQuery({ ...listUsersOptions(), enabled });
+}
+
+export function useUser(id: string | null) {
+  return useQuery({
+    ...getUserOptions({ path: { id: id ?? "" } }),
+    enabled: id !== null,
+  });
+}
+
+/**
+ * Newest audit rows first. The first page has no cursor; `next_before` is the
+ * last id on the page, narrowed to the number the generated query accepts.
+ */
+export function useAuditLogPages(enabled: boolean) {
+  return useInfiniteQuery({
+    ...listAuditLogsInfiniteOptions({ query: { limit: pageSize } }),
+    initialPageParam: undefined as unknown as number,
+    getNextPageParam: (last) =>
+      last.next_before === null ? undefined : auditIdNumber(last.next_before),
+    enabled,
+  });
+}
+
+export function invalidateUsers(client: QueryClient, id: string) {
+  client.invalidateQueries({ queryKey: listUsersQueryKey() });
+  client.invalidateQueries({ queryKey: getUserQueryKey({ path: { id } }) });
 }

@@ -8,6 +8,8 @@ import {
   LayoutDashboardIcon,
   ListChecksIcon,
   type LucideIcon,
+  ScrollTextIcon,
+  UsersIcon,
 } from "lucide-react";
 import type { Permission } from "@/lib/api/generated/types.gen";
 
@@ -56,6 +58,18 @@ export const navItems: NavItem[] = [
     icon: HistoryIcon,
     permission: "restores:read",
   },
+  {
+    href: "/users",
+    title: "用户",
+    icon: UsersIcon,
+    permission: "users:manage",
+  },
+  {
+    href: "/audit",
+    title: "审计日志",
+    icon: ScrollTextIcon,
+    permission: "audit:read",
+  },
   { href: "/account", title: "账户与密码", icon: KeyRoundIcon },
 ];
 
@@ -81,6 +95,8 @@ const pageTitles: Record<string, string> = {
   "/backups/detail": "备份详情",
   "/restores/new": "新建恢复",
   "/restores/detail": "恢复详情",
+  "/users/new": "新建用户",
+  "/users/detail": "用户详情",
 };
 
 /**

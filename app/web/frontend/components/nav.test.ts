@@ -15,6 +15,10 @@ describe("console navigation", () => {
     expect(navTitle("/restores")).toBe("恢复");
     expect(navTitle("/restores/new")).toBe("新建恢复");
     expect(navTitle("/restores/detail")).toBe("恢复详情");
+    expect(navTitle("/users")).toBe("用户");
+    expect(navTitle("/users/new")).toBe("新建用户");
+    expect(navTitle("/users/detail")).toBe("用户详情");
+    expect(navTitle("/audit")).toBe("审计日志");
     expect(navTitle("/unknown")).toBe("Intern");
   });
 
@@ -45,5 +49,22 @@ describe("console navigation", () => {
     expect(
       navItemsFor(["session:self", "resources:read"]).map((item) => item.href),
     ).not.toContain("/restores");
+  });
+
+  it("shows users and audit only to the permissions that own them", () => {
+    const admin = navItemsFor([
+      "session:self",
+      "users:manage",
+      "audit:read",
+    ]).map((item) => item.href);
+    expect(admin).toContain("/users");
+    expect(admin).toContain("/audit");
+    const operator = navItemsFor([
+      "session:self",
+      "resources:read",
+      "runs:read",
+    ]).map((item) => item.href);
+    expect(operator).not.toContain("/users");
+    expect(operator).not.toContain("/audit");
   });
 });
