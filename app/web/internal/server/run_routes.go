@@ -74,6 +74,10 @@ func registerRuns(engine *gin.Engine, database *store.Store, dispatcher Dispatch
 
 	policies := engine.Group("/api/v1/policies")
 	policies.POST("/:id/runs", permissions.RequirePermission(auth.RunsTrigger), h.triggerRun)
+	// The preview is read-only and uses the scheduler's own cron function, so it
+	// needs neither the dispatcher's loops nor a configured runtime: a deployment
+	// without a KEK or work root still answers it.
+	policies.GET("/:id/schedule", permissions.RequirePermission(auth.ResourcesRead), h.policySchedule)
 
 	engine.GET("/api/v1/sources/:id/chains", permissions.RequirePermission(auth.ResourcesRead), h.sourceChains)
 	engine.GET("/api/v1/backups/:id", permissions.RequirePermission(auth.ResourcesRead), h.backup)
@@ -94,6 +98,54 @@ type DispatcherControl interface {
 	ChainViews(ctx context.Context, sourceID string) ([]dispatch.ChainView, error)
 	SourceExists(ctx context.Context, sourceID string) (bool, error)
 	TriggerRun(ctx context.Context, policyID, kind, key, requestHash, actorID string) (dispatch.TriggerOutcome, any)
+}
+
+// schedulePreviewCount bounds the preview. The default matches the contract.
+const (
+	schedulePreviewDefault = 10
+	schedulePreviewMax     = 50
+)
+
+// policySchedule answers the read-only preview. It reads the policy and its
+// stored next_* columns and computes the fires with the scheduler's own
+// function; it never writes the schedule or an audit row.
+func (h runHandlers) policySchedule(c *gin.Context) {
+	count, ok := scheduleCount(c)
+	if !ok {
+		return
+	}
+	policy, err := h.database.Policy(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		h.resourceError(c, err, "Policy")
+		return
+	}
+	nextFull, nextIncremental, err := h.database.PolicySchedule(c.Request.Context(), policy.ID)
+	if err != nil {
+		h.resourceError(c, err, "Policy")
+		return
+	}
+	preview, err := dispatch.PreviewSchedule(policy, nextFull, nextIncremental, time.Now(), count)
+	if err != nil {
+		h.logger.ErrorContext(c.Request.Context(), "cannot preview schedule", "policy_id", policy.ID, "error", err)
+		internalError(c)
+		return
+	}
+	render.JSON(c, http.StatusOK, preview)
+}
+
+// scheduleCount reads the count query: absent means the default, and anything
+// that is not an integer from 1 to 50 is a validation failure.
+func scheduleCount(c *gin.Context) (int, bool) {
+	value, exists := c.GetQuery("count")
+	if !exists {
+		return schedulePreviewDefault, true
+	}
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 1 || count > schedulePreviewMax {
+		validationError(c, fmt.Errorf("count must be an integer between 1 and %d", schedulePreviewMax))
+		return 0, false
+	}
+	return count, true
 }
 
 // runTriggerRequest is the manual trigger body.

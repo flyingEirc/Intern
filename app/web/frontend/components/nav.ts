@@ -1,9 +1,11 @@
 import {
   CalendarClockIcon,
+  CopyIcon,
   DatabaseIcon,
   HardDriveIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  ListChecksIcon,
   type LucideIcon,
 } from "lucide-react";
 import type { Permission } from "@/lib/api/generated/types.gen";
@@ -35,6 +37,18 @@ export const navItems: NavItem[] = [
     icon: CalendarClockIcon,
     permission: "resources:read",
   },
+  {
+    href: "/runs",
+    title: "运行记录",
+    icon: ListChecksIcon,
+    permission: "runs:read",
+  },
+  {
+    href: "/replicas",
+    title: "副本复制",
+    icon: CopyIcon,
+    permission: "resources:read",
+  },
   { href: "/account", title: "账户与密码", icon: KeyRoundIcon },
 ];
 
@@ -56,6 +70,8 @@ const pageTitles: Record<string, string> = {
   "/sources/detail": "数据源详情",
   "/policies/new": "新建策略",
   "/policies/detail": "策略详情",
+  "/runs/detail": "运行详情",
+  "/backups/detail": "备份详情",
 };
 
 /**

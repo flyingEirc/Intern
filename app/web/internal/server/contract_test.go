@@ -32,6 +32,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 )
 
 type readinessFunc func(context.Context) error
@@ -262,6 +263,7 @@ func TestOperationSecurityAndExplicitErrors(t *testing.T) {
 		"DELETE /api/v1/policies/{id}":       {"401", "403", "404"},
 		"POST /api/v1/policies/{id}/enable":  {"401", "403", "404", "409", "503"},
 		"POST /api/v1/policies/{id}/disable": {"401", "403", "404"},
+		"GET /api/v1/policies/{id}/schedule": {"400", "401", "403", "404"},
 
 		"POST /api/v1/policies/{id}/runs":                          {"400", "401", "403", "404", "409", "503"},
 		"GET /api/v1/runs":                                         {"400", "401", "403"},
@@ -605,6 +607,212 @@ func (f *runContractFixture) triggerRun(t *testing.T, policyID, kind, key string
 		t.Fatal(err)
 	}
 	return run
+}
+
+// schedulePreviewResponse is the preview wire shape the contract test decodes.
+type schedulePreviewResponse struct {
+	PolicyID string `json:"policy_id"`
+	Enabled  bool   `json:"enabled"`
+	Timezone string `json:"timezone"`
+	Fires    []struct {
+		Kind   string    `json:"kind"`
+		At     time.Time `json:"at"`
+		Missed bool      `json:"missed"`
+	} `json:"fires"`
+}
+
+// TestPolicySchedulePreviewContract validates the preview through the real
+// engine: the body matches the contract, the fires are chronological and
+// exactly count long, and previewing an enabled policy whose schedule is not
+// initialized yet neither fills the stored columns nor writes an audit row.
+// No role lacks resources:read, so the forbidden outcome is not reachable; the
+// permission matrix locks the per-role statuses and the no-session case is 401.
+func TestPolicySchedulePreviewContract(t *testing.T) {
+	f := newRunContractFixture(t)
+	before := auditCount(t, f)
+	if full, incremental := policyScheduleColumns(t, f, f.policy.ID); full != nil || incremental != nil {
+		t.Fatalf("seeded policy schedule = %v %v, want uninitialized", full, incremental)
+	}
+
+	response := f.request(t, "GET", "/api/v1/policies/"+f.policy.ID+"/schedule?count=3", "", f.cookie, http.StatusOK)
+	preview := decodeResponse[schedulePreviewResponse](t, response)
+	assertPreviewFires(t, preview, f)
+
+	// The default count applies when the query is absent.
+	defaulted := decodeResponse[schedulePreviewResponse](t,
+		f.request(t, "GET", "/api/v1/policies/"+f.policy.ID+"/schedule", "", f.cookie, http.StatusOK))
+	if len(defaulted.Fires) != 10 {
+		t.Fatalf("default fires = %d, want 10", len(defaulted.Fires))
+	}
+
+	if full, incremental := policyScheduleColumns(t, f, f.policy.ID); full != nil || incremental != nil {
+		t.Fatalf("preview wrote the schedule: %v %v", full, incremental)
+	}
+	if after := auditCount(t, f); after != before {
+		t.Fatalf("audit rows = %d, want %d: the preview must not record one", after, before)
+	}
+
+	// A disabled policy previews too, reporting itself disabled.
+	disabled := f.request(t, "GET", "/api/v1/policies/"+f.disabledPolicy(t)+"/schedule?count=1", "", f.cookie, http.StatusOK)
+	if decodeResponse[schedulePreviewResponse](t, disabled).Enabled {
+		t.Fatal("disabled policy preview reports enabled")
+	}
+
+	f.request(t, "GET", "/api/v1/policies/"+f.policy.ID+"/schedule", "", nil, http.StatusUnauthorized)
+	f.request(t, "GET", "/api/v1/policies/"+uuid.Must(uuid.NewV7()).String()+"/schedule", "", f.cookie, http.StatusNotFound)
+	for _, count := range []string{"0", "51", "abc", "1.5", "-3"} {
+		f.invalidRequest(t, "GET", "/api/v1/policies/"+f.policy.ID+"/schedule?count="+count, "", f.cookie, http.StatusBadRequest)
+	}
+}
+
+// assertPreviewFires checks the preview's identity and that its fires are a
+// chronological UTC sequence of the two run kinds, none of them missed.
+func assertPreviewFires(t *testing.T, preview schedulePreviewResponse, f *runContractFixture) {
+	t.Helper()
+	if preview.PolicyID != f.policy.ID || !preview.Enabled || preview.Timezone != f.policy.Timezone {
+		t.Fatalf("preview identity = %+v", preview)
+	}
+	if len(preview.Fires) != 3 {
+		t.Fatalf("fires = %d, want 3", len(preview.Fires))
+	}
+	for i, fire := range preview.Fires {
+		assertOneFire(t, fire, i, preview)
+	}
+}
+
+// assertOneFire checks one fire's kind, missed mark, UTC zone and order.
+func assertOneFire(t *testing.T, fire struct {
+	Kind   string    `json:"kind"`
+	At     time.Time `json:"at"`
+	Missed bool      `json:"missed"`
+}, i int, preview schedulePreviewResponse,
+) {
+	t.Helper()
+	if fire.Kind != "full" && fire.Kind != "incremental" {
+		t.Fatalf("fire %d kind = %q", i, fire.Kind)
+	}
+	if fire.Missed {
+		t.Fatalf("fire %d of an uninitialized policy is marked missed", i)
+	}
+	if fire.At.Location() != time.UTC {
+		t.Fatalf("fire %d location = %s, want UTC", i, fire.At.Location())
+	}
+	if i > 0 && !fire.At.After(preview.Fires[i-1].At) {
+		t.Fatalf("fires out of order: %s then %s", preview.Fires[i-1].At, fire.At)
+	}
+}
+
+// disabledPolicy creates one disabled policy on the fixture's source and
+// repository and returns its id.
+func (f *runContractFixture) disabledPolicy(t *testing.T) string {
+	t.Helper()
+	policy, err := f.database.CreatePolicy(t.Context(), store.PolicyInput{
+		Name: "preview-disabled", SourceID: f.policy.SourceID, LocalRepositoryID: f.policy.LocalRepositoryID,
+		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC", MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+	}, store.SystemAudit("policies.create", store.AuditDetail{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return policy.ID
+}
+
+// policyScheduleColumns reads the stored next trigger times.
+func policyScheduleColumns(t *testing.T, f *runContractFixture, policyID string) (*time.Time, *time.Time) {
+	t.Helper()
+	full, incremental, err := f.database.PolicySchedule(t.Context(), policyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return full, incremental
+}
+
+// auditCount counts the audit rows, so a read can prove it added none.
+func auditCount(t *testing.T, f *runContractFixture) int {
+	t.Helper()
+	var count int
+	if err := f.database.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM audit_logs`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// unsealedBackupWire is the subset of Backup this case asserts. Pointers stay
+// nil only when the JSON value is null; the contract check already rejected a
+// response that omitted the required field.
+type unsealedBackupWire struct {
+	ID          string  `json:"id"`
+	ParentID    *string `json:"parent_id"`
+	FromLSN     string  `json:"from_lsn"`
+	ToLSN       string  `json:"to_lsn"`
+	LastLSN     string  `json:"last_lsn"`
+	CompletedAt *string `json:"completed_at"`
+}
+
+// TestUnsealedFullChainMatchesContract is the shape a real full leaves behind
+// before the chain is sealed: no parent, no LSN yet, no completion and no seal.
+// kin-openapi rejects the response when any required field is omitted, which is
+// what omitempty did, and the decoded values are null or an empty string.
+func TestUnsealedFullChainMatchesContract(t *testing.T) {
+	f := newRunContractFixture(t)
+	backupID := f.beginUnsealedFull(t)
+
+	chains := f.request(t, "GET", "/api/v1/sources/"+f.policy.SourceID+"/chains", "", f.cookie, http.StatusOK)
+	page := decodeResponse[struct {
+		Items []struct {
+			SealedAt *string              `json:"sealed_at"`
+			Members  []unsealedBackupWire `json:"members"`
+		} `json:"items"`
+	}](t, chains)
+	if len(page.Items) != 1 || len(page.Items[0].Members) != 1 {
+		t.Fatalf("chains = %+v, want one unsealed chain with one full", page.Items)
+	}
+	if page.Items[0].SealedAt != nil {
+		t.Fatalf("sealed_at = %q, want null", *page.Items[0].SealedAt)
+	}
+	assertUnsealedBackup(t, page.Items[0].Members[0], backupID)
+
+	backup := f.request(t, "GET", "/api/v1/backups/"+backupID, "", f.cookie, http.StatusOK)
+	assertUnsealedBackup(t, decodeResponse[unsealedBackupWire](t, backup), backupID)
+}
+
+// beginUnsealedFull records one running full and its chain, and does not
+// complete the backup, so the chain stays unsealed and the LSN columns unset.
+func (f *runContractFixture) beginUnsealedFull(t *testing.T) string {
+	t.Helper()
+	physical := physicalstore.New(f.database.DB())
+	sourceID := f.policy.SourceID
+	plan, err := physical.Plan(t.Context(), physicalstore.PlanRequest{
+		SourceID: sourceID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
+		ToolVersion: "8.4.0-7", Kind: "full", MaxChainLength: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupID := "unsealed-full"
+	err = physical.Begin(t.Context(), physicalstore.BeginRequest{
+		Plan: plan, SourceID: sourceID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
+		ToolVersion: "8.4.0-7", InstanceID: f.database.InstanceID(), RunID: backupID, BackupID: backupID,
+		ObjectPath:   f.database.InstanceID() + "/" + sourceID + "/" + plan.ChainID + "/" + backupID,
+		StagingToken: backupID, WorkDir: filepath.Join(t.TempDir(), "work"), KeyID: "key", CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backupID
+}
+
+// assertUnsealedBackup requires the absent fields to be present as null or "".
+func assertUnsealedBackup(t *testing.T, backup unsealedBackupWire, backupID string) {
+	t.Helper()
+	if backup.ID != backupID {
+		t.Fatalf("backup id = %q, want %q", backup.ID, backupID)
+	}
+	if backup.ParentID != nil || backup.CompletedAt != nil {
+		t.Fatalf("parent_id=%v completed_at=%v, want null", backup.ParentID, backup.CompletedAt)
+	}
+	if backup.FromLSN != "" || backup.ToLSN != "" || backup.LastLSN != "" {
+		t.Fatalf("lsn = %q %q %q, want empty", backup.FromLSN, backup.ToLSN, backup.LastLSN)
+	}
 }
 
 // TestRunEventStreamContract covers the SSE route's pre-stream JSON failures

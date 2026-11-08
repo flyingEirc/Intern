@@ -34,6 +34,8 @@
 - W5（#37）恢复 API 真实组件入口：在原生 Linux amd64 Docker 上执行 `go test -v -tags=integration -count=1 -timeout=50m ./app/web/integration -run '^TestW5NativeContainers$'`（CI job `container-restore-api`，证据门禁 `.github/scripts/verify-w5-evidence.sh`，其接受/拒绝用例为 `.github/scripts/w5-gate-cases.sh`）。worker 在 `app/web/integration/restore.Dockerfile` 镜像内（`MYSQL_IMAGE`/`PXB_IMAGE` 取 `internal/physical/compat.json` 的 digest）以源库 mysql uid 运行真实的 serve：dispatcher + HTTP + `internal/restore`，对面是真实 `mysql:8.4.11`、真实 Pure-FTPd 与真实导出卷。证据只从回读状态计算：API 与 SQLite 的 restore 行、本地仓库、FTP 命名空间、导出目录权限与字节，以及用新 `mysql:8.4.11` 容器直接启动每个已发布导出后的数据快照与同一次运行记录的恢复点快照逐点一致。缺 runtime、平台不符、缺 `INTERN_W5_EXPORT_ROOT/XBSTREAM/MYSQLD` 都失败，不 skip。
 - W5 终态语义补充：`restores.error_class` 是闭合集合 `unavailable|refused|restore_failed|canceled|interrupted`，其中 `refused` 专指确认摘要之后目录漂移（执行期 `plan_changed` 等），`error_code` 用引擎固定码；`side_effects` 在每一条终态行都明示，包括从未被认领、因取消而终结的排队行（三个目标都记为不存在）。已发布导出永不被取消或重启回收删除；引擎在进入导出阶段时上报 `exporting` 阶段。`restores.phase` 只表示运行中的实时阶段：**每条终态写入都把 `phase` 置 NULL**（completed、failed、canceled 均如此，排队取消同样是 NULL），因此 `GET /api/v1/restores/{id}` 对终态行返回 `phase: null`；引擎真正走过的阶段序列只保留在 `restore_logs`（`GET /api/v1/restores/{id}/logs`）中，完成并演练的恢复记录为 fetching、authenticating、extracting、preparing、exporting、rehearsing（逐环重复按首次出现去重）。
 
+调度预览（F3 [#57](https://github.com/flyingEirc/Intern/issues/57)，契约 0.4.0）：`GET /api/v1/policies/{id}/schedule?count=N`（1–50，默认 10，`resources:read`）只读，用调度器同一个 `schedule()`（`robfig/cron` `ParseStandard` + 策略时区）计算下 N 次触发，不写 `next_*` 列、不写审计。已启用且已初始化的策略从存储的 `next_full_at`/`next_incremental_at` 开始；不晚于当前时刻的存储值以 `missed: true` 返回一次，该类型其后从当前时刻起算（与调度器合并错过触发一致）；未启用或未初始化的策略从当前时刻起算并 `missed: false`，表示启用后的预计时间。同一时刻的全量与增量只返回一次全量（调度器只排队全量并推进两条调度）。前端不在浏览器计算 cron。
+
 ## Web 前端
 
 `app/web/frontend` 由 `bun create next-app@latest` 以默认选项创建（TypeScript、Tailwind CSS、App Router、`@/*` 别名，lint 选 Biome），依赖在 `package.json` 中精确固定并由 `bun.lock` 冻结；Bun 版本固定在 mise.toml。约束如下（F1 [#54](https://github.com/flyingEirc/Intern/issues/54)）：
@@ -45,7 +47,7 @@
 - **组件**：shadcn/ui 使用 Base UI 底座（`components.json` 的 `base-nova`），用 `bunx --bun shadcn@latest add` 添加到 `components/ui`，遵循 shadcn 规则（`FieldGroup`/`Field` 表单、语义色、`render` 代替 `asChild`）；缺失组件先搜索开源实现并在 Issue 记录来源与许可证。`components/ui` 由 Biome 格式化，只对其上游写法关闭少数规则（见 `biome.json`）。
 - **测试**：Vitest + Testing Library 覆盖契约校验、错误映射、表单规则、会话失效与各资源表单的边界；两套 agent-browser 端到端，截图与 `manifest.json` 写入 `.cache/`，UI 证据按 [Issue 流程](../workflow/issue.md) 附到 Issue：
   - `mise run frontend:e2e`：对真实 `bin/intern-web`（`webui` 构建、回环 HTTP）跑登录、会话失效、注销与改密。
-  - `mise run frontend:e2e:stack`：`e2e/stack.ts` 用仓库自带的 `app/web/deploy/compose.yaml` 起真实栈（Intern 镜像、MySQL 8.4.11、PXB 8.4.0-7、明文与显式 TLS 的 Pure-FTPd 1.0.54 夹具），再用 agent-browser 验证仓库、数据源、策略与预检（`e2e/f2.ts`）。栈在 arm64 开发机上以 linux/amd64 模拟运行，结果只作开发证据；约束性验收在原生 linux/amd64。栈的清理由 `stop()` 负责，失败路径同样执行。
+  - `mise run frontend:e2e:stack`：`e2e/stack.ts` 用仓库自带的 `app/web/deploy/compose.yaml` 起真实栈（Intern 镜像、MySQL 8.4.11、PXB 8.4.0-7、明文与显式 TLS 的 Pure-FTPd 1.0.54 夹具），再用 agent-browser 验证仓库、数据源、策略与预检（`e2e/f2.ts`），以及调度预览、手动全量/增量、实时日志、取消、链与本地/异地保护点、FTP 副本失败与重试（`e2e/f3.ts`，副本失败通过把 FTP 容器移出 Compose 网络制造真实中断）。两个脚本共用 `e2e/harness.ts`，中断（SIGINT/SIGTERM）时同样清理栈。栈在 arm64 开发机上以 linux/amd64 模拟运行，结果只作开发证据；约束性验收在原生 linux/amd64。栈的清理由 `stop()` 负责，失败路径同样执行。
   - 资源页面的详情与编辑页用查询参数（`/repositories/detail?id=`），不使用动态段。
 - **许可证**：Web 镜像的前端阶段用 `scripts/collect-licenses.ts` 收集 `dependencies` 闭包的许可证文本，随镜像放在 `/usr/share/licenses/intern/web-ui/`；只在构建期使用的工具放 `devDependencies`。
 

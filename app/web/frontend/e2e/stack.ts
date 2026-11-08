@@ -137,6 +137,11 @@ export type Stack = {
   noKek:
     | { origin: string; admin: { username: string; password: string } }
     | undefined;
+  /**
+   * Takes the plain FTP server off the Compose network (`down`) or back (`up`):
+   * a real outage for replica failure and retry scenarios, not a simulated error.
+   */
+  setFtp(state: "down" | "up"): void;
   /** Removes every container, volume, network and temporary file this stack created. */
   stop(): Promise<void>;
 };
@@ -981,6 +986,25 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       },
       localRepositoryRoot,
       noKek: { origin: noKekOrigin, admin: noKekAdmin },
+      setFtp: (state) => {
+        // Detaching the running container from the Compose network is a real
+        // outage that keeps the server's state: restarting the fixture would
+        // lose its one-shot password file, so the service is not stopped.
+        const container = composeMust("find the plain FTP container", [
+          "ps",
+          "--quiet",
+          "ftp",
+        ]).stdout.trim();
+        const network = `${project}_default`;
+        docker(
+          state === "down"
+            ? "detach the plain FTP server"
+            : "reattach the plain FTP server",
+          state === "down"
+            ? ["network", "disconnect", network, container]
+            : ["network", "connect", "--alias", "ftp", network, container],
+        );
+      },
       stop: cleanup,
     };
   } catch (error) {

@@ -256,6 +256,19 @@ export const zRunTrigger = z.object({
     kind: zRunKind
 });
 
+export const zScheduleFire = z.object({
+    kind: zRunKind,
+    at: z.iso.datetime(),
+    missed: z.boolean()
+});
+
+export const zPolicySchedule = z.object({
+    policy_id: z.string(),
+    enabled: z.boolean(),
+    timezone: z.string(),
+    fires: z.array(zScheduleFire)
+});
+
 export const zRunStatus = z.enum([
     'queued',
     'running',
@@ -522,7 +535,7 @@ export const zReplicaPage = z.object({
 export const zBackup = z.object({
     id: z.string(),
     chain_id: z.string(),
-    parent_id: z.string(),
+    parent_id: z.string().nullable(),
     kind: z.enum(['physical-full', 'physical-incremental']),
     status: z.enum([
         'running',
@@ -537,7 +550,7 @@ export const zBackup = z.object({
     payload_size: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     payload_sha256: z.string(),
     local_present: z.boolean(),
-    completed_at: z.iso.datetime(),
+    completed_at: z.iso.datetime().nullable(),
     replicas: z.array(zReplica)
 });
 
@@ -546,7 +559,7 @@ export const zChain = z.object({
     source_id: z.string(),
     server_uuid: z.string(),
     started_at: z.iso.datetime(),
-    sealed_at: z.iso.datetime(),
+    sealed_at: z.iso.datetime().nullable(),
     pinned: z.boolean(),
     members: z.array(zBackup)
 });
@@ -958,6 +971,19 @@ export const zTriggerPolicyRunPath = z.object({
  * Run created or replayed with the same idempotency key
  */
 export const zTriggerPolicyRunResponse = zRunAccepted;
+
+export const zPreviewPolicySchedulePath = z.object({
+    id: z.string()
+});
+
+export const zPreviewPolicyScheduleQuery = z.object({
+    count: z.int().gte(1).lte(50).optional().default(10)
+});
+
+/**
+ * The policy's next fires
+ */
+export const zPreviewPolicyScheduleResponse = zPolicySchedule;
 
 export const zListRunsQuery = z.object({
     policy_id: z.string().optional(),

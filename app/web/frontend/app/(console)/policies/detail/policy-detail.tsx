@@ -51,6 +51,7 @@ import {
   useRepositoryChoices,
   useSourceChoices,
 } from "@/lib/resources/queries";
+import { PolicySchedule } from "./policy-schedule";
 
 export function PolicyDetail() {
   const id = useSearchParams().get("id");
@@ -296,6 +297,11 @@ export function PolicyDetail() {
           </CardHeader>
         </Card>
       )}
+
+      <PolicySchedule
+        policyId={data.id}
+        canTrigger={hasPermission(session.data?.permissions, "runs:trigger")}
+      />
     </div>
   );
 }

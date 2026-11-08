@@ -57,6 +57,7 @@ import {
   invalidateSources,
   useRepositoryChoices,
 } from "@/lib/resources/queries";
+import { SourceProtection } from "./source-protection";
 
 export function SourceDetail() {
   const id = useSearchParams().get("id");
@@ -313,6 +314,8 @@ export function SourceDetail() {
           )}
         </CardContent>
       </Card>
+
+      <SourceProtection sourceId={data.id} />
     </div>
   );
 }
