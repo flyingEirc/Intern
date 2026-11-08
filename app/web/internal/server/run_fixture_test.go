@@ -305,9 +305,13 @@ func (h *runHarness) seedPolicyOnly(t *testing.T, key string) store.Policy {
 	return h.seedPolicy(t, "sse-policy-"+key, source.ID, repository.ID)
 }
 
-// seedPolicyWithRun seeds the rows one run needs and returns the queued run.
+// seedPolicyWithRun stops the worker loops, then seeds the rows one run needs
+// and returns the queued run. The stop comes first: a live dispatcher could
+// claim the run between the insert and a later stop and fail it on the
+// unconfigured runtime, writing events the test does not own.
 func (h *runHarness) seedPolicyWithRun(t *testing.T, key string) (store.Policy, store.Run) {
 	t.Helper()
+	h.stopRuns()
 	repository := h.seedRepository(t, "sse-local-"+key)
 	source := h.seedSource(t, "sse-source-"+key)
 	policy := h.seedPolicy(t, "sse-policy-"+key, source.ID, repository.ID)
