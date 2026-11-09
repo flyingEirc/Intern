@@ -815,7 +815,9 @@ jobs:
         run: .github/scripts/e2e-stack-clean.sh
       # The same build as mise run build: the static export staged for the
       # webui embed, then bin/intern (the stack generates its KEK with it) and
-      # the webui bin/intern-web the native suites start.
+      # the webui bin/intern-web the native suites start. -p 4 keeps the two Go
+      # builds inside the runner services' 2G per-job cap, as quality-fast's
+      # builds do.
       - name: Build bin/intern and the webui bin/intern-web
         env:
           NEXT_TELEMETRY_DISABLED: '1'
@@ -826,8 +828,8 @@ jobs:
           (cd app/web/frontend && bun install --frozen-lockfile && rm -rf out && bun run build)
           rm -rf app/web/internal/webui/dist
           cp -R app/web/frontend/out app/web/internal/webui/dist
-          go build -o bin/intern ./app/cli
-          go build -tags webui -o bin/intern-web ./app/web
+          go build -p 4 -o bin/intern ./app/cli
+          go build -tags webui -p 4 -o bin/intern-web ./app/web
       # Chrome's own sandbox needs unprivileged user namespaces, which Ubuntu
       # 24.04 restricts through AppArmor where AppArmor is active, so whether
       # the browser starts would depend on the host. The suites load only this
