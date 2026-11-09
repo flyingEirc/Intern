@@ -29,6 +29,11 @@
 #       runs every tier regardless of the diff.
 #   workflow_dispatch on main, tag, schedule, any other event
 #       no base: every tier.
+#   workflow_dispatch with the ui input (true), on any branch (issue #74)
+#       the UI acceptance run: fast only, whatever the diff, so the ui-e2e job
+#       (which needs quality-fast) is the only heavy job of the run. No
+#       container tier runs, so it is never merge-gate evidence. ui and full
+#       together are refused (exit 1): they ask for opposite runs.
 # A base that is missing or unusable (zero or unreachable before, no
 # origin/main, no merge base, failed diff) is the widest verdict of that event
 # with the reason logged: every tier, or fast for a branch push. It never fails
@@ -65,7 +70,20 @@ merge_base() {
     fi
 }
 
-case "${EVENT_NAME}:${REF:-}" in
+event=$EVENT_NAME
+if [[ $event == workflow_dispatch && ${UI_INPUT:-} == true ]]; then
+    event=workflow_dispatch_ui
+fi
+case "${event}:${REF:-}" in
+    workflow_dispatch_ui:*)
+        if [[ ${FULL_INPUT:-} == true ]]; then
+            echo 'quality-scope: ui=true and full=true ask for opposite runs; dispatch them separately' >&2
+            exit 1
+        fi
+        cli=false
+        web=false
+        why='workflow_dispatch with ui=true: the fast checks and the UI end-to-end job, no container tier (not merge-gate evidence)'
+        ;;
     push:refs/heads/main)
         rule=main
         before=${BEFORE_SHA:-}

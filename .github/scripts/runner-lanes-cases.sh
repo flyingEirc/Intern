@@ -12,7 +12,10 @@
 # 10 GiB (run 42355033628: lint took 25.2 min and timed out with 0 issues while
 # the first CLI profile missed its MySQL readiness window). Every web job also
 # keeps its own `needs.scope.outputs.web` gate, and quality-gate must still
-# depend on every job it validates.
+# depend on every job it validates. The UI acceptance job ui-e2e (#74) waits for
+# quality-fast like the entry points, runs only for a workflow_dispatch with the
+# ui input, and stays outside quality-gate's needs: its runs are never merge-gate
+# evidence.
 #
 # This script is the single source of that contract. Reject cases mutate a copy
 # of the real workflow and assert each mutation changed its input.
@@ -26,8 +29,9 @@ scope='    needs: scope'
 fast_barrier='    needs: [scope, quality-fast]'
 web_if="    if: needs.scope.outputs.web == 'true'"
 cli_if="    if: needs.scope.outputs.cli == 'true'"
+ui_if="    if: github.event_name == 'workflow_dispatch' && inputs.ui && needs.scope.outputs.fast == 'true'"
 
-order=(quality-fast container-mysql container-physical container-ftp container-web container-replication container-restore container-restore-api container-ftps container-deploy container-dispatch)
+order=(quality-fast container-mysql container-physical container-ftp container-web container-replication container-restore container-restore-api container-ftps container-deploy container-dispatch ui-e2e)
 declare -A want=(
 	[quality-fast]="$scope"
 	[container-mysql]="$fast_barrier"
@@ -40,6 +44,7 @@ declare -A want=(
 	[container-ftps]='    needs: [scope, container-restore-api]'
 	[container-deploy]='    needs: [scope, container-physical]'
 	[container-dispatch]='    needs: [scope, container-deploy]'
+	[ui-e2e]="$fast_barrier"
 )
 web_jobs=(container-physical container-ftp container-web container-replication container-restore container-restore-api container-ftps container-deploy container-dispatch)
 gate_jobs=(scope quality-fast container-mysql container-physical container-ftp container-replication container-web container-dispatch container-restore container-restore-api container-deploy container-ftps)
@@ -106,6 +111,11 @@ verify() {
 		printf 'container-mysql: if is "%s", want "%s"\n' "$got" "$cli_if"
 		return 1
 	fi
+	got=$(field_of ui-e2e if "$file")
+	if [[ $got != "$ui_if" ]]; then
+		printf 'ui-e2e: if is "%s", want "%s"\n' "$got" "$ui_if"
+		return 1
+	fi
 	got=$(max_parallel_of "$file")
 	if [[ $got != '      max-parallel: 1' ]]; then
 		printf 'container-mysql: max-parallel is "%s", want "      max-parallel: 1"\n' "$got"
@@ -128,6 +138,12 @@ verify() {
 		done
 		if ((!found)); then
 			printf 'quality-gate does not depend on %s\n' "$job"
+			return 1
+		fi
+	done
+	for dep in "${deps[@]}"; do
+		if [[ $dep == ui-e2e ]]; then
+			printf 'quality-gate depends on ui-e2e, which is outside the merge gate\n'
 			return 1
 		fi
 	done
@@ -198,6 +214,15 @@ expect_bad 'the cli matrix runs both profiles in parallel' \
 gate_line=$(field_of quality-gate needs "$workflow")
 expect_bad 'quality-gate drops one job from its needs list' \
 	"$(mutate gate-missing quality-gate "$gate_line" "${gate_line/container-restore, /}")"
+
+expect_bad 'the UI job bypasses the fast-tier barrier' \
+	"$(mutate ui-fast ui-e2e "$fast_barrier" "$scope")"
+
+expect_bad 'the UI job runs without the ui input' \
+	"$(mutate ui-input ui-e2e "$ui_if" "    if: needs.scope.outputs.fast == 'true'")"
+
+expect_bad 'quality-gate is made to depend on the UI job' \
+	"$(mutate gate-ui quality-gate "$gate_line" "${gate_line%]}, ui-e2e]")"
 
 if verify "$work/absent.yml" >/dev/null 2>&1; then
 	report 'the workflow is missing' 'a missing workflow was accepted'

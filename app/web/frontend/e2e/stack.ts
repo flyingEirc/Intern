@@ -258,6 +258,12 @@ const ftpsFixtureDockerfile = path.join(
   "fixtures/ftps.Dockerfile",
 );
 const compatFile = path.join(repo, "internal/physical/compat.json");
+// Every resource the stack creates outside Compose (volumes, the no-KEK
+// container, exported MySQL servers) carries this label with the project name;
+// Compose labels its own resources with com.docker.compose.project. Together
+// they let .github/scripts/e2e-stack-clean.sh find a stack a cancelled CI job
+// never cleaned up.
+const projectLabel = "io.intern.e2e.project";
 
 const alpineImage =
   "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6";
@@ -458,13 +464,25 @@ function generateTls(secretsDir: string, mysqlImage: string): void {
     { timeoutMs: 120_000 },
   );
 }
+/** Create a named volume labelled with the stack's project. */
+function createVolume(label: string, volume: string, project: string): void {
+  docker(label, [
+    "volume",
+    "create",
+    "--label",
+    `${projectLabel}=${project}`,
+    volume,
+  ]);
+}
+
 /** Copy the secrets into a named volume owned by the container user. */
 function prepareSecretsVolume(
   volume: string,
+  project: string,
   secretsDir: string,
   mysqlImage: string,
 ): void {
-  docker("create secrets volume", ["volume", "create", volume]);
+  createVolume("create secrets volume", volume, project);
   const script = [
     "set -eu",
     "cp /in/intern_kek /in/intern_tls_cert /in/intern_tls_key /in/ca.pem /out/",
@@ -497,8 +515,12 @@ function prepareSecretsVolume(
  * (uid 999, mode 0750). A named volume honors chown; an OrbStack bind mount
  * does not, which is why the export root is not the host directory.
  */
-function prepareExportVolume(volume: string, mysqlImage: string): void {
-  docker("create export volume", ["volume", "create", volume]);
+function prepareExportVolume(
+  volume: string,
+  project: string,
+  mysqlImage: string,
+): void {
+  createVolume("create export volume", volume, project);
   const observed = docker("own the export volume", [
     "run",
     "--rm",
@@ -700,7 +722,15 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   // export volume instead: an OrbStack bind mount stays root-owned.
   mkdirSync(exportDir, { recursive: true, mode: 0o750 });
 
-  const project = `intern-e2e-${randomBytes(4).toString("hex")}`;
+  // On a GitHub runner (RUNNER_NAME set) the project name carries the first 8
+  // hex digits of sha256(RUNNER_NAME): runners sharing one Docker engine then
+  // never remove each other's stacks, and e2e-stack-clean.sh can still remove
+  // this runner's leftovers when a cancelled job never reached cleanup().
+  const runner = process.env.RUNNER_NAME;
+  const runnerScope = runner
+    ? `${createHash("sha256").update(runner).digest("hex").slice(0, 8)}-`
+    : "";
+  const project = `intern-e2e-${runnerScope}${randomBytes(4).toString("hex")}`;
   const secretsVolume = `${project}-secrets`;
   const ftpVolume = `${project}-ftp-data`;
   const ftpsVolume = `${project}-ftps-data`;
@@ -873,10 +903,15 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     }
 
     // ---------------------------------------------------------------- volumes ---
-    prepareSecretsVolume(secretsVolume, secretsDir, compat.mysql_image);
-    prepareExportVolume(exportVolume, compat.mysql_image);
-    docker("create plain FTP data volume", ["volume", "create", ftpVolume]);
-    docker("create FTPS data volume", ["volume", "create", ftpsVolume]);
+    prepareSecretsVolume(
+      secretsVolume,
+      project,
+      secretsDir,
+      compat.mysql_image,
+    );
+    prepareExportVolume(exportVolume, project, compat.mysql_image);
+    createVolume("create plain FTP data volume", ftpVolume, project);
+    createVolume("create FTPS data volume", ftpsVolume, project);
     // The fixtures chroot each account to its home, so the repository base path
     // is relative to that home. Pre-create it as the FTP user would.
     docker("prepare FTP data volumes", [
@@ -1090,7 +1125,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     );
 
     // ------------------------------------------------------- KEK-less instance ---
-    docker("create no-KEK metadata volume", ["volume", "create", noKekVolume]);
+    createVolume("create no-KEK metadata volume", noKekVolume, project);
     docker("start no-KEK intern", [
       "run",
       "--detach",
@@ -1101,7 +1136,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       "--user",
       "999:999",
       "--label",
-      `io.intern.e2e.project=${project}`,
+      `${projectLabel}=${project}`,
       "--publish",
       "127.0.0.1::8443",
       "--env",
@@ -1347,6 +1382,8 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
             "999:999",
             "--label",
             `io.intern.e2e.export=${project}`,
+            "--label",
+            `${projectLabel}=${project}`,
             "--publish",
             "127.0.0.1::3306",
             "--volume",
