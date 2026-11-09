@@ -402,7 +402,7 @@ sha256sum bin/intern-web
 
 ## 13. 限制与支持矩阵
 
-- **Web 首版未交付**：阶段 F（[#19](https://github.com/flyingEirc/Intern/issues/19)）的页面已实现，但涉及真实组件的界面端到端验收（F2–F4、界面全链路 #65）目前只有 arm64 上模拟 linux/amd64 的开发证据，原生 Linux amd64 验收与 CI 结果未完成；本文不构成首版交付声明。
+- **Web 首版**：阶段 B–F 已于 2026-11-09 全部合入 main（前端 F1–F6，[#19](https://github.com/flyingEirc/Intern/issues/19)）。界面验收在原生 linux/amd64 自托管 runner 上通过：[run 42550256352](https://github.com/flyingEirc/Intern/actions/runs/42550256352) 跑 F1、F5 与真实组件栈上的 F2–F4、界面全链路六个套件。首版没有发布 tag 或公开镜像，镜像按第 2 节从源码构建；支持范围以下一条的矩阵为准。
 - **支持矩阵**：`internal/physical/compat.json` 只有一条记录 —— `mysql-community` 8.4.11 + PXB 8.4.0-7 + `linux/amd64`，`status: "candidate"`、`verified: false`，证据 Issue 是 [#27](https://github.com/flyingEirc/Intern/issues/27)。矩阵外版本、其他 MySQL 版本、arm64、云平台、TLS/最小权限的其他组合都**未验证**，未验证前不得列入已支持范围（[质量规范](quality.md)）。阶段 D 已用上述组件在真实容器中完成恢复与 prepare（已原生验收），阶段 E 的部署形态由 `container-deploy` 在候选 `9e05e52`（CircleCI 历史记录）与 `9489f6c`（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)）验收；矩阵本身未改。
 - **PITR**：首版只有物理全量 + 页增量链的**检查点恢复**；binlog 归档与完整物理 PITR 属 N1，未交付，不得宣称。
 - **仓库后端**：只有本地仓库 + FTP/FTPS 副本；S3/SFTP 未实现。自动保留清理属 N2（未交付），当前保留是手动判定，未 verified 的副本不会被删除。
