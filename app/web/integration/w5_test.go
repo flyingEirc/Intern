@@ -98,6 +98,7 @@ func TestW5NativeContainers(t *testing.T) {
 	require(t, err)
 	digest := sha256.Sum256(data)
 	mysqlImage, pxbImage := candidateImages(t)
+	legacyProgram, candidateProgram := buildMigrationPrograms(t, ctx, root)
 	secrets := distinctSecrets(t, 6)
 	rootPassword, backupPassword := secrets[0], secrets[1]
 	ftpPassword, ftpQuotaPassword := secrets[2], secrets[3]
@@ -126,6 +127,7 @@ func TestW5NativeContainers(t *testing.T) {
 			"INTERN_W5_MYSQLD": "/usr/sbin/mysqld",
 			"HOME":             "/tmp", "TMPDIR": "/tmp",
 		})
+	copyMigrationPrograms(t, ctx, worker, legacyProgram, candidateProgram)
 	workerInfo, err := worker.Inspect(ctx)
 	require(t, err)
 	serverInfo, err := server.Inspect(ctx)
@@ -165,6 +167,7 @@ func TestW5NativeContainers(t *testing.T) {
 	}
 	verifyW5HarnessEvidence(t, started, len(restores), mysqlImage)
 	t.Logf("W5-A6 exports_started=%d snapshots_match=true new_mysql=%s", started, mysqlImage)
+	verifyMigrationExports(t, ctx, text, mysqlImage, rootPassword, exportVolume)
 }
 
 // startW5Worker builds the W5 worker from the P4 restore image: the pinned MySQL

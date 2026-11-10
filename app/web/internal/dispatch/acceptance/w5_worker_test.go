@@ -73,6 +73,7 @@ func TestW5Worker(t *testing.T) {
 			t.Fatalf("W5 case %s failed: the shared chain state it was to produce is unknown, so no later case runs", step.name)
 		}
 	}
+	pgMigrationScenario(t)
 }
 
 // requireW5Restore refuses a partially configured restore deployment.
