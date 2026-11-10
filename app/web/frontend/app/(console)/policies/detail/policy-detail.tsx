@@ -289,7 +289,7 @@ export function PolicyDetail() {
           <dd>{data.parallel}</dd>
           <dt className="text-muted-foreground">限速</dt>
           <dd>
-            {data.throttle === 0 ? "不额外限速" : `${data.throttle} 字节/秒`}
+            {data.throttle === 0 ? "不额外限速" : `每秒 ${data.throttle} 块`}
           </dd>
           <dt className="text-muted-foreground">压缩级别</dt>
           <dd>{data.zstd_level}</dd>

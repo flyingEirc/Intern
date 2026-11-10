@@ -1588,7 +1588,7 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
 	defer func() { f.report(d1KeyCase+"%s", d1Cases[2]) }()
-	f.policyID = f.createPolicy(t, "d1-policy", 0)
+	f.policyID = f.createPolicy(t, "d1-policy")
 	f.report(d1KeyTopo+"compose-mysql->intern-web->local-repository policy=%s source=%s repository=%s replica=none",
 		f.policyID, f.sourceID, f.repositoryID)
 	f.fullBackup = f.backup(t, ctx, "full", "d1-a3-full")
@@ -1606,20 +1606,39 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 		f.snapshot, actual)
 }
 
-// createPolicy installs one policy exactly as the API contract requires it, and
-// returns its id. throttle is the xtrabackup chunk budget, so a positive value
-// is how the SIGTERM case keeps a real run in flight.
-func (f *d1Fixture) createPolicy(t *testing.T, name string, throttle int64) string {
+// createPolicy installs one policy through the public API and returns its id.
+// The body is only the business fields the contract accepts. max_chain_length,
+// parallel, throttle, zstd_level and page_tracking stay server defaults; the
+// API rejects them. The SIGTERM case pins throttle afterwards with
+// pinSIGTERMThrottle, a test-fixture write, not this request.
+func (f *d1Fixture) createPolicy(t *testing.T, name string) string {
 	t.Helper()
 	// Both schedules sit half a day away from now, so the in-process scheduler can
 	// never fire a run of its own during the acceptance and every run, parent and
 	// counter the cases assert is one the harness triggered itself.
 	quiet := (time.Now().UTC().Hour() + 12) % 24
 	body := fmt.Sprintf(`{"name":%q,"source_id":%q,"local_repository_id":%q,`+
-		`"full_cron":"0 %d * * *","incremental_cron":"30 %d * * *","timezone":"UTC",`+
-		`"max_chain_length":5,"parallel":1,"throttle":%d,"zstd_level":3,"page_tracking":false,"enabled":false}`,
-		name, f.sourceID, f.repositoryID, quiet, quiet, throttle)
+		`"full_cron":"0 %d * * *","incremental_cron":"30 %d * * *","timezone":"UTC","enabled":false}`,
+		name, f.sourceID, f.repositoryID, quiet, quiet)
 	return f.createdID(f.api(http.MethodPost, "/api/v1/policies", body, "", http.StatusCreated))
+}
+
+// pinSIGTERMThrottle is a D1 test fixture, not a product path, and only the
+// SIGTERM case may call it. The policy API refuses throttle, so after create
+// this writes throttle=1 on that one d1-throttled row. xtrabackup then receives
+// --throttle=1 and the full backup stays in flight until the stop lands.
+func (f *d1Fixture) pinSIGTERMThrottle(ctx context.Context, policyID string) {
+	f.t.Helper()
+	if !d1UUID.MatchString(policyID) {
+		f.fatal("refusing to pin throttle on policy id %q", policyID)
+	}
+	statement := `UPDATE policies SET throttle = 1 WHERE id = '` + policyID +
+		`' AND name = 'd1-throttled' RETURNING throttle`
+	out, code := f.execIn(ctx, "postgres", "psql", "-U", "intern", "-d", "intern",
+		"-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
+	if code != 0 || strings.TrimSpace(out) != "1" {
+		f.fatal("the SIGTERM fixture could not pin throttle=1 on %s: exit=%d %s", policyID, code, out)
+	}
 }
 
 // enablePolicy turns one policy on through the API, which runs the policy
@@ -2153,14 +2172,17 @@ func (f *d1Fixture) refuseServe(ctx context.Context, override string) string {
 	return out
 }
 
-// requireGracefulStop is the SIGTERM case. It keeps a real backup in flight with
-// a throttled policy, stops within the declared grace period, and after the
-// restart proves the interrupted run is recorded as interrupted or canceled and
-// never as a completed backup.
+// requireGracefulStop is the SIGTERM case. The policy is created with business
+// fields only; pinSIGTERMThrottle then sets throttle=1 so a real xtrabackup
+// stays in flight. The stop is issued only after that run is observed running,
+// must finish inside the declared grace period, and after the restart the run
+// is failed/backup_failed rather than a completed backup. The evidence lines
+// keep observed_running=true, grace_seconds, stop_seconds and no_false_completed.
 func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	t.Helper()
 	before := f.completedRuns(t)
-	f.slowPolicyID = f.createPolicy(t, "d1-throttled", 1)
+	f.slowPolicyID = f.createPolicy(t, "d1-throttled")
+	f.pinSIGTERMThrottle(ctx, f.slowPolicyID)
 	f.enablePolicy(t, f.slowPolicyID)
 	f.seedRows(t, ctx, 64)
 	// The throttled full copies about 10 MB per second. A few hundred megabytes of

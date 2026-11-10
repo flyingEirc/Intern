@@ -133,7 +133,7 @@ docker compose exec -T intern intern-web migrate status # 只读 JSON 状态，�
 
 `compose.yaml` 里 `intern` 服务的 healthcheck 就是 `/usr/local/bin/intern-web healthcheck`（`interval: 10s`、`timeout: 5s`、`retries: 6`、`start_period: 20s`）。`healthcheck` 用与 `serve` 相同的 `INTERN_LISTEN` 与 TLS 设置推导探测地址，绑定 `0.0.0.0` 时改用回环；**只有回环目标**才跳过证书校验（容器探测自己），任何其他目标都按系统根正常校验；探测不带凭据、响应最多读 16 KiB。可用 `--url` 指定地址、`--timeout` 设定整体时限（必须为正）。
 
-起栈之后、创建数据源之前，还要在源实例里建备份账号：`docker compose exec mysql mysql -uroot -p`（密码从 `.env` 的 `MYSQL_ROOT_PASSWORD` 取，不要写进命令行历史），授权模板见 [控制面方案第 3.2 节](../roadmap/Web备份控制面与流式管道-2026-10-17.md)；账号必须是 `'intern_bkp'@'localhost'` 而不是按容器 IP 授权的账号，因为参考部署的每次连接都走共享 socket 卷。若策略启用 `page_tracking`，还需要 `SELECT` on `mysql.component`（预检查询 `component_mysqlbackup`）。参考部署不创建业务库：第 6 节建数据源后先用 `…/preflight` 验证，再建策略。
+起栈之后、创建数据源之前，还要在源实例里建备份账号：`docker compose exec mysql mysql -uroot -p`（密码从 `.env` 的 `MYSQL_ROOT_PASSWORD` 取，不要写进命令行历史），授权模板见 [控制面方案第 3.2 节](../roadmap/Web备份控制面与流式管道-2026-10-17.md)；账号必须是 `'intern_bkp'@'localhost'` 而不是按容器 IP 授权的账号，因为参考部署的每次连接都走共享 socket 卷。若历史策略行的 `page_tracking` 为真（服务端默认 `false`，不能通过 API 设置），还需要 `SELECT` on `mysql.component`（预检查询 `component_mysqlbackup`）。参考部署不创建业务库：第 6 节建数据源后先用 `…/preflight` 验证，再建策略。
 
 停止：`docker compose stop intern`（默认宽限期来自 `stop_grace_period: 120s`，见第 9 节）。**不要用 `docker compose down -v`**：`-v` 会删除命名卷，metadata、backups、work 与 `intern-postgres` 随之丢失；`docker compose down`（不带 `-v`）只删容器和网络。
 
@@ -252,13 +252,13 @@ curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/sources/$SRC/preflight" \
 # 5) 仓库可写探测（仅 admin；FTP 按其 tls_mode 打开并带本实例命名空间标记，不发布对象）
 curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/repositories/$REPO/probe"
 
-# 6) 策略：字段全部必填，replica_repository_id 可为 null
+# 6) 策略：只提交业务字段。replica_repository_id 可省略或为 null。
+#    max_chain_length、parallel、throttle、zstd_level、page_tracking 是服务端默认，不能通过 API 设置。
 POLICY=$(curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies" \
   -H 'Content-Type: application/json' \
   -d "{\"name\":\"core\",\"source_id\":\"$SRC\",\"local_repository_id\":\"$REPO\",
        \"replica_repository_id\":null,\"full_cron\":\"0 2 * * *\",\"incremental_cron\":\"0 * * * *\",
-       \"timezone\":\"UTC\",\"max_chain_length\":5,\"parallel\":1,\"throttle\":0,
-       \"zstd_level\":3,\"page_tracking\":false,\"enabled\":false}" | jq -r .id)
+       \"timezone\":\"UTC\",\"enabled\":false}" | jq -r .id)
 
 # 7) 启用（服务端先跑真实预检与副本探测，全部成功才在同一事务里置 enabled=1）
 curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies/$POLICY/enable"
@@ -269,7 +269,7 @@ RUN=$(curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies/$POLICY/ru
   -d '{"kind":"full"}' | jq -r .run_id)
 ```
 
-`full_cron` / `incremental_cron` 是 5 字段标准 cron（`cron.ParseStandard`），`timezone` 必须是非空 IANA 名称（空串与 `Local` 被拒）。`throttle` 直接映射为 `xtrabackup --throttle=N`：`0` 表示不下传该参数（不限速），`>0` 表示每秒最多读 N 个块，**值越小越慢**（候选验收用例用 `throttle: 1` 拖住一次真实全量来覆盖 SIGTERM 窗口）。`parallel ≥ 1`（低于 1 按 1 传给 xtrabackup）、`max_chain_length ≥ 1`、`zstd_level` 1–22（编码端并发固定为 1）、`page_tracking` 给 xtrabackup 加 `--page-tracking`，依赖 `component_mysqlbackup`。创建或更新策略时直接把 `enabled` 置 `true` 与调用 `…/enable` 走同一条路径：先跑真实预检与副本探测，不过就整条请求拒绝（`409 preflight_failed`，预检输入不全则是 `503`），不落任何行。停用：`POST /api/v1/policies/{id}/disable`（不需要预检）。调度器在 `serve` 进程内常驻，容器停了调度就停。
+`full_cron` / `incremental_cron` 是 5 字段标准 cron（`cron.ParseStandard`），`timezone` 必须是非空 IANA 名称（空串与 `Local` 被拒）。`max_chain_length`、`parallel`、`throttle`、`zstd_level`、`page_tracking` 是服务端默认，不能通过 API 设置：创建时由 `store.DefaultPolicyTuning()` 写成 `7`、`1`、`0`、`3`、`false`，请求体带上任一字段直接 `400`；更新只改业务字段，不覆盖这五列的历史值。响应仍把它们当作只读诊断。`throttle` 直接映射为 `xtrabackup --throttle=N`：`0` 表示不下传该参数（不额外限速），`>0` 表示每秒最多读 N 个块，**值越小越慢**。`parallel` 默认 `1`，传给 xtrabackup 时低于 1 按 1。`max_chain_length` 默认 `7`，限制单条物理链深度，不是业务调度频率上限。`zstd_level` 默认 `3`，只是历史记录值，现有流编码器仍固定并发 1 且未应用该 level。`page_tracking` 默认 `false`，为真时才给 xtrabackup 加 `--page-tracking`，依赖 `component_mysqlbackup`。D1 的 SIGTERM 用例在 API 创建之后用测试夹具把该策略行写成 `throttle=1`，拖住一次真实全量；这不是产品路径。创建或更新策略时直接把 `enabled` 置 `true` 与调用 `…/enable` 走同一条路径：先跑真实预检与副本探测，不过就整条请求拒绝（`409 preflight_failed`，预检输入不全则是 `503`），不落任何行。停用：`POST /api/v1/policies/{id}/disable`（不需要预检）。调度器在 `serve` 进程内常驻，容器停了调度就停。
 
 ## 7. 状态查看
 
@@ -331,7 +331,7 @@ docker run --rm --platform linux/amd64 -u 999:999 \
 
 `intern-web serve` 收到 SIGTERM/SIGINT 后按顺序：停止接收新请求 → 在 `--shutdown-timeout`（默认 30s）窗口内优雅关停 → 排干 dispatcher 的两个 worker。窗口之后在途 handler 仍可能继续排干：分离审计预算 + PostgreSQL `statement_timeout` 5 秒 + 500 毫秒余量。普通请求取消不释放 owner 连接；真实 PG 断链则停止调度与服务，并以非零状态退出。
 
-因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例的做法是保持一个被 `throttle=1` 拖住的真实全量在飞行中，再用 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码为 0、没有 OOMKilled。
+因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例先经 API 创建只含业务字段的策略，再由测试夹具把该行 `throttle` 写成 `1`（`xtrabackup --throttle=1`，每秒一块，不是运维接口），保持真实全量在飞行中，观察到 `running` 后才 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码为 0、没有 OOMKilled，证据行保留 `observed_running=true`、`grace_seconds`、`stop_seconds` 与 `no_false_completed`。
 
 被中断的运行**永不记成 completed**，`backup_id` 为空，completed 计数不增长：在宽限期内完成的优雅 SIGTERM 会把仍在复制的运行记为 `failed`、`error_class=backup_failed`；进程被强杀（SIGKILL/崩溃）时，下一次启动的恢复流程把遗留的 `running` 行收敛为 `failed`、`error_class=interrupted`；只有显式取消才是 `canceled`。若 worker 活过了 bounded 排干窗口，`serve` 会返回错误（不吞掉），状态交给下次启动回收。已发布导出与已提交备份不受影响。
 
