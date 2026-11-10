@@ -5,6 +5,7 @@ import { BanIcon, CopyIcon } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useState } from "react";
+import { Diagnostics } from "@/components/resources/diagnostics";
 import {
   DetailSkeleton,
   PageHeader,
@@ -164,7 +165,7 @@ function RestoreBody({
     <div className="flex flex-col gap-4">
       <PageHeader
         title="恢复详情"
-        description="状态、阶段、日志与终态副作用。执行中每 2 秒刷新；恢复没有实时事件流。"
+        description="查看恢复进度、导出结果与演练记录。"
       >
         {canCancel && !isTerminalRestore(data.status) ? (
           <AlertDialog open={cancelOpen} onOpenChange={setCancelOpen}>
@@ -187,7 +188,7 @@ function RestoreBody({
               <AlertDialogHeader>
                 <AlertDialogTitle>取消这次恢复？</AlertDialogTitle>
                 <AlertDialogDescription>
-                  排队中的恢复不会启动。正在执行的会在安全点停止，已发布的导出不会被删除。终态恢复不能再取消。
+                  排队中的恢复不会启动。正在执行的会在安全点停止，已发布的导出不会被删除。已经结束的恢复不能再取消。
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -234,9 +235,7 @@ function RestoreBody({
           <Alert>
             <BanIcon />
             <AlertTitle>恢复已经结束</AlertTitle>
-            <AlertDescription>
-              终态恢复不能再取消，状态以服务端为准。
-            </AlertDescription>
+            <AlertDescription>恢复已经结束，无法再取消。</AlertDescription>
           </Alert>
         ) : (
           <ResourceError title="取消失败" error={cancel.error} />
@@ -275,23 +274,19 @@ function RestoreBody({
             <dd>{formatDateTime(data.started_at)}</dd>
             <dt className="text-muted-foreground">结束</dt>
             <dd>{formatDateTime(data.finished_at)}</dd>
-            <dt className="text-muted-foreground">计划摘要</dt>
-            <dd className="font-mono text-xs" title={data.plan_digest}>
-              {shortenDigest(data.plan_digest)}
-            </dd>
             <dt className="text-muted-foreground">导出路径</dt>
             <dd className="font-mono text-xs break-all">
               {data.export_path ?? "—"}
             </dd>
             <dt className="text-muted-foreground">导出大小</dt>
             <dd>{formatBytes(data.export_bytes)}</dd>
-            <dt className="text-muted-foreground">错误类</dt>
+            <dt className="text-muted-foreground">失败类型</dt>
             <dd>
               {data.error_class
                 ? restoreErrorClassLabel[data.error_class]
                 : "—"}
             </dd>
-            <dt className="text-muted-foreground">错误码</dt>
+            <dt className="text-muted-foreground">错误编号</dt>
             <dd className="font-mono text-xs">{data.error_code ?? "—"}</dd>
           </dl>
         </CardContent>
@@ -300,9 +295,9 @@ function RestoreBody({
       {isTerminalRestore(data.status) ? (
         <Card>
           <CardHeader>
-            <CardTitle>终态副作用</CardTitle>
+            <CardTitle>恢复结束后保留的内容</CardTitle>
             <CardDescription>
-              这三项记录这次恢复实际留下了什么，不是对已发生写入的撤销。
+              这里说明这次恢复实际留下了哪些目录和导出，不是对已发生写入的撤销。
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -314,7 +309,7 @@ function RestoreBody({
               </ul>
             ) : (
               <p className="text-sm text-muted-foreground">
-                服务端没有返回副作用记录。
+                暂无清理与导出状态记录。
               </p>
             )}
           </CardContent>
@@ -327,9 +322,8 @@ function RestoreBody({
             <CardTitle>用新的 MySQL 容器启动导出</CardTitle>
             <CardDescription>
               导出已发布到 {data.export_path}
-              。下面的命令与运维文档一致：宿主机目录映射到容器的
-              /exports，镜像取部署锁定的 MySQL 镜像。Intern 从不自动替换生产
-              datadir。
+              。下面的命令在宿主机上启动一个新的数据库实例：目录映射到容器的
+              /exports，镜像取部署锁定的 MySQL 镜像。
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -387,19 +381,29 @@ function RestoreBody({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>计划</CardTitle>
-          <CardDescription>
-            确认时的计划：目标 LSN {data.plan.target_to_lsn}，导出路径{" "}
-            <span className="font-mono text-xs">{data.plan.export_path}</span>
-            。工作空间需要 {formatBytes(data.plan.required_work_bytes)}
-            （当时可用 {formatBytes(data.plan.available_work_bytes)}），导出需要{" "}
-            {formatBytes(data.plan.required_export_bytes)}（当时可用{" "}
-            {formatBytes(data.plan.available_export_bytes)}）。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
+      <Diagnostics
+        title="恢复诊断"
+        description="排查导出位置、数据范围或风险提示的原始代码时再展开。"
+      >
+        <div className="flex flex-col gap-4">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt className="text-muted-foreground">计划摘要</dt>
+            <dd className="font-mono text-xs" title={data.plan_digest}>
+              {shortenDigest(data.plan_digest)}
+            </dd>
+            <dt className="text-muted-foreground">目标 LSN</dt>
+            <dd className="font-mono text-xs">{data.plan.target_to_lsn}</dd>
+            <dt className="text-muted-foreground">工作目录</dt>
+            <dd>
+              需要 {formatBytes(data.plan.required_work_bytes)}（当时可用{" "}
+              {formatBytes(data.plan.available_work_bytes)}）
+            </dd>
+            <dt className="text-muted-foreground">导出空间</dt>
+            <dd>
+              需要 {formatBytes(data.plan.required_export_bytes)}（当时可用{" "}
+              {formatBytes(data.plan.available_export_bytes)}）
+            </dd>
+          </dl>
           <Table>
             <TableHeader>
               <TableRow>
@@ -435,8 +439,8 @@ function RestoreBody({
               </p>
             ))}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </Diagnostics>
 
       <Card>
         <CardHeader>

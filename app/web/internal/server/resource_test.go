@@ -45,8 +45,7 @@ func sourceBody(name string) string {
 
 func policyBody(name, sourceID, repositoryID string) string {
 	return `{"name":"` + name + `","source_id":"` + sourceID + `","local_repository_id":"` + repositoryID + `",` +
-		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","max_chain_length":3,` +
-		`"parallel":2,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`
+		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","enabled":false}`
 }
 
 func newRepositoryDir(t *testing.T) string {
@@ -62,8 +61,8 @@ func newRepositoryDir(t *testing.T) string {
 // supplied secret markers and for the stored ciphertext.
 func assertNoSecrets(t *testing.T, f *authFixture, response string, secrets ...string) {
 	t.Helper()
-	stored := rawResourceSecrets(t, f.dir)
-	all := response + rawAudit(t, f.dir) + f.logs.String() + stored
+	stored := rawResourceSecrets(t, f.dsn)
+	all := response + rawAudit(t, f.dsn) + f.logs.String() + stored
 	for _, secret := range secrets {
 		if secret != "" && strings.Contains(all, secret) {
 			t.Fatalf("secret %q leaked", secret)
@@ -73,24 +72,33 @@ func assertNoSecrets(t *testing.T, f *authFixture, response string, secrets ...s
 
 // rawResourceSecrets reads every repository and source text column, so a leaked
 // value cannot hide in a column the API does not return.
-func rawResourceSecrets(t *testing.T, dir string) string {
+func rawResourceSecrets(t *testing.T, dsn string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	var text string
-	query := `SELECT COALESCE(group_concat(name || kind || config_json || hex(secret_ciphertext) || tls_mode, ''), '') FROM repositories`
-	if err = db.QueryRowContext(t.Context(), query).Scan(&text); err != nil {
+	rows, err := db.QueryContext(t.Context(), `SELECT to_jsonb(r)::text, secret_ciphertext FROM repositories r
+	UNION ALL SELECT to_jsonb(s)::text, secret_ciphertext FROM sources s`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var sources string
-	query = `SELECT COALESCE(group_concat(name || socket || datadir || username || hex(secret_ciphertext), ''), '') FROM sources`
-	if err = db.QueryRowContext(t.Context(), query).Scan(&sources); err != nil {
+	defer rows.Close()
+	var text strings.Builder
+	for rows.Next() {
+		var encoded string
+		var raw []byte
+		if err = rows.Scan(&encoded, &raw); err != nil {
+			t.Fatal(err)
+		}
+		text.WriteString(encoded)
+		text.Write(raw)
+	}
+	if err = rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	return text + sources
+	return text.String()
 }
 
 func TestRepositoryCRUDIsWriteOnly(t *testing.T) {
@@ -114,9 +122,9 @@ func TestRepositoryCRUDIsWriteOnly(t *testing.T) {
 	assertFTPRotation(t, f, cookie, ftpCreated.ID)
 	f.request(t, "DELETE", "/api/v1/repositories/"+ftpCreated.ID, "", cookie, http.StatusNoContent)
 	f.request(t, "GET", "/api/v1/repositories/"+ftpCreated.ID, "", cookie, http.StatusNotFound)
-	expectAuditCount(t, f.dir, "repositories.create", "success", 2)
-	expectAuditCount(t, f.dir, "repositories.update", "success", 2)
-	expectAuditCount(t, f.dir, "repositories.delete", "success", 1)
+	expectAuditCount(t, f.dsn, "repositories.create", "success", 2)
+	expectAuditCount(t, f.dsn, "repositories.update", "success", 2)
+	expectAuditCount(t, f.dsn, "repositories.delete", "success", 1)
 }
 
 func assertLocalRepository(t *testing.T, repository store.Repository, root string) {
@@ -148,7 +156,7 @@ func assertFTPRotation(t *testing.T, f *authFixture, cookie *http.Cookie, id str
 	rotation := `{"name":"ftp-a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,` +
 		`"base_path":"/backups","username":"backup"},"password":"{{SECRET_ftp_b_password}}"}`
 	f.request(t, "PUT", "/api/v1/repositories/"+id, rotation, cookie, http.StatusOK)
-	first := storedCiphertext(t, f.dir, "repositories", id)
+	first := storedCiphertext(t, f.dsn, "repositories", id)
 	if first == "" {
 		t.Fatal("rotation removed the ciphertext")
 	}
@@ -159,7 +167,7 @@ func assertFTPRotation(t *testing.T, f *authFixture, cookie *http.Cookie, id str
 	second := f.request(t, "PUT", "/api/v1/repositories/"+id,
 		`{"name":"ftp-a","kind":"ftp","tls_mode":"plain","ftp":{"host":"127.0.0.1","port":21,"base_path":"/backups","username":"backup"}}`,
 		cookie, http.StatusOK)
-	if storedCiphertext(t, f.dir, "repositories", id) != first {
+	if storedCiphertext(t, f.dsn, "repositories", id) != first {
 		t.Fatal("an omitted password replaced the stored secret")
 	}
 	assertNoSecrets(t, f, second.Body.String(), "{{SECRET_ftp_b_password}}")
@@ -190,13 +198,13 @@ func (f *authFixture) requestRejected(t *testing.T, method, path, body string, c
 // storedCiphertext returns the stored ciphertext of a sealed column.
 func storedCiphertext(t *testing.T, dir, table, id string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	var ciphertext []byte
-	query := `SELECT secret_ciphertext FROM ` + table + ` WHERE id = ?`
+	query := `SELECT secret_ciphertext FROM ` + table + ` WHERE id = $1`
 	if err = db.QueryRowContext(t.Context(), query, id).Scan(&ciphertext); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +258,7 @@ func TestRepositoryValidationRejectsUnsafeShapes(t *testing.T) {
 			assertSingleError(t, response, render.ValidationFailed)
 		})
 	}
-	expectAuditCount(t, f.dir, "repositories.create", "success", 0)
+	expectAuditCount(t, f.dsn, "repositories.create", "success", 0)
 }
 
 // repositoryBodyPassword is distinctive enough for assertNoSecrets to prove the
@@ -341,10 +349,10 @@ func TestFTPSRepositoryCRUD(t *testing.T) {
 func requireFTPSRepositoryLifecycle(t *testing.T, f *authFixture, cookie *http.Cookie, bundle, mode string, port int64, creates int) {
 	t.Helper()
 	repository := createFTPSRepository(t, f, cookie, bundle, mode, port)
-	if got := countAudit(t, f.dir, "repositories.create", "success"); got != creates {
+	if got := countAudit(t, f.dsn, "repositories.create", "success"); got != creates {
 		t.Fatalf("creates audited = %d, want %d", got, creates)
 	}
-	if strings.Contains(rawAudit(t, f.dir), `"plaintext_ftp":true`) {
+	if strings.Contains(rawAudit(t, f.dsn), `"plaintext_ftp":true`) {
 		t.Fatal("an FTPS create recorded plaintext_ftp")
 	}
 	read := f.request(t, "GET", "/api/v1/repositories/"+repository.ID, "", cookie, http.StatusOK)
@@ -429,27 +437,27 @@ func TestDeleteRefusesReferencedRows(t *testing.T) {
 	}
 	f.request(t, "DELETE", "/api/v1/repositories/"+seeded.freeRepository, "", cookie, http.StatusNoContent)
 	f.request(t, "DELETE", "/api/v1/sources/"+seeded.freeSource, "", cookie, http.StatusNoContent)
-	expectAuditCount(t, f.dir, "repositories.delete", "success", 1)
-	expectAuditCount(t, f.dir, "sources.delete", "success", 1)
+	expectAuditCount(t, f.dsn, "repositories.delete", "success", 1)
+	expectAuditCount(t, f.dsn, "sources.delete", "success", 1)
 	// A physical chain keeps its source, even when no policy uses it.
 	chained := f.createSourceRow(t, t.Context(), "chained-source", f.sealer)
-	insertChain(t, f.dir, chained)
+	insertChain(t, f.dsn, chained)
 	f.request(t, "DELETE", "/api/v1/sources/"+chained, "", cookie, http.StatusConflict)
-	expectAuditCount(t, f.dir, "sources.delete", "success", 1)
+	expectAuditCount(t, f.dsn, "sources.delete", "success", 1)
 }
 
 // insertChain adds one physical chain row that refers to sourceID. chains is
-// owned by the physical migration, so this uses the shared file directly.
-func insertChain(t *testing.T, dir, sourceID string) {
+// owned by the physical migration, so this uses the shared database directly.
+func insertChain(t *testing.T, dsn, sourceID string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	_, err = db.ExecContext(t.Context(), `INSERT INTO chains
 		(id, source_id, server_uuid, server_version, tool_version, started_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6)`,
 		"chain-1", sourceID, "00000000-0000-0000-0000-000000000000", "8.4.11", "8.4.0-7", "2026-01-01T00:00:00Z")
 	if err != nil {
 		t.Fatal(err)
@@ -507,18 +515,14 @@ func TestPolicyValidationAndRoleKinds(t *testing.T) {
 	ftp := f.createFTPRepositoryRow(t, t.Context(), "ftp-a", "{{SECRET_policy_ftp}}", f.sealer)
 
 	for name, body := range map[string]string{
-		"bad full cron":     strings.Replace(policyBody("p", source, local), `"full_cron":"0 2 * * *"`, `"full_cron":"not a cron"`, 1),
-		"bad incremental":   strings.Replace(policyBody("p", source, local), `"incremental_cron":"0 * * * *"`, `"incremental_cron":"61 * * * *"`, 1),
-		"bad timezone":      strings.Replace(policyBody("p", source, local), `"timezone":"UTC"`, `"timezone":"Mars/Base"`, 1),
-		"missing source":    strings.Replace(policyBody("p", source, local), `"source_id":"`+source+`"`, `"source_id":"missing"`, 1),
-		"missing local":     strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"missing"`, 1),
-		"local is ftp":      strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"`+ftp+`"`, 1),
-		"replica is local":  strings.Replace(policyBody("p", source, local), `"page_tracking":false`, `"replica_repository_id":"`+local+`","page_tracking":false`, 1),
-		"zero chain length": strings.Replace(policyBody("p", source, local), `"max_chain_length":3`, `"max_chain_length":0`, 1),
-		"zero parallel":     strings.Replace(policyBody("p", source, local), `"parallel":2`, `"parallel":0`, 1),
-		"negative throttle": strings.Replace(policyBody("p", source, local), `"throttle":0`, `"throttle":-1`, 1),
-		"zstd out of range": strings.Replace(policyBody("p", source, local), `"zstd_level":3`, `"zstd_level":23`, 1),
-		"empty name":        strings.Replace(policyBody("p", source, local), `"name":"p"`, `"name":""`, 1),
+		"bad full cron":    strings.Replace(policyBody("p", source, local), `"full_cron":"0 2 * * *"`, `"full_cron":"not a cron"`, 1),
+		"bad incremental":  strings.Replace(policyBody("p", source, local), `"incremental_cron":"0 * * * *"`, `"incremental_cron":"61 * * * *"`, 1),
+		"bad timezone":     strings.Replace(policyBody("p", source, local), `"timezone":"UTC"`, `"timezone":"Mars/Base"`, 1),
+		"missing source":   strings.Replace(policyBody("p", source, local), `"source_id":"`+source+`"`, `"source_id":"missing"`, 1),
+		"missing local":    strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"missing"`, 1),
+		"local is ftp":     strings.Replace(policyBody("p", source, local), `"local_repository_id":"`+local+`"`, `"local_repository_id":"`+ftp+`"`, 1),
+		"replica is local": strings.Replace(policyBody("p", source, local), `"enabled":false`, `"replica_repository_id":"`+local+`","enabled":false`, 1),
+		"empty name":       strings.Replace(policyBody("p", source, local), `"name":"p"`, `"name":""`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := f.requestRejected(t, "POST", "/api/v1/policies", body, cookie, http.StatusBadRequest)
@@ -531,16 +535,16 @@ func TestPolicyValidationAndRoleKinds(t *testing.T) {
 		t.Fatalf("policy = %+v", policy)
 	}
 	f.request(t, "POST", "/api/v1/policies", policyBody("POLICY-A", source, local), cookie, http.StatusConflict)
-	replica := strings.Replace(policyBody("policy-b", source, local), `"page_tracking":false`,
-		`"replica_repository_id":"`+ftp+`","page_tracking":false`, 1)
+	replica := strings.Replace(policyBody("policy-b", source, local), `"enabled":false`,
+		`"replica_repository_id":"`+ftp+`","enabled":false`, 1)
 	withReplica := decodeResponse[store.Policy](t, f.request(t, "POST", "/api/v1/policies", replica, cookie, http.StatusCreated))
 	if withReplica.ReplicaRepositoryID == nil || *withReplica.ReplicaRepositoryID != ftp {
 		t.Fatalf("replica = %+v", withReplica.ReplicaRepositoryID)
 	}
 	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/disable", "", cookie, http.StatusOK)
 	assertNoSecrets(t, f, created.Body.String()+replica, "{{SECRET_policy_ftp}}")
-	expectAuditCount(t, f.dir, "policies.create", "success", 2)
-	expectAuditCount(t, f.dir, "policies.disable", "success", 1)
+	expectAuditCount(t, f.dsn, "policies.create", "success", 2)
+	expectAuditCount(t, f.dsn, "policies.disable", "success", 1)
 }
 
 // TestPolicyEnableRequiresPreflight covers the deployment that has no preflight
@@ -561,7 +565,7 @@ func TestPolicyEnableRequiresPreflight(t *testing.T) {
 	if err != nil || reloaded.Enabled || reloaded.LastPreflight != nil {
 		t.Fatalf("enable persisted without preflight: %+v %v", reloaded, err)
 	}
-	expectAuditCount(t, f.dir, "policies.enable", "success", 0)
+	expectAuditCount(t, f.dsn, "policies.enable", "success", 0)
 	// Disable is always allowed.
 	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/disable", "", cookie, http.StatusOK)
 }
@@ -702,8 +706,8 @@ func TestRepositoryPutRejectsKindAndShapeChanges(t *testing.T) {
 		f.request(t, "POST", "/api/v1/repositories", localRepository("local-a", root), cookie, http.StatusCreated))
 	ftp := decodeResponse[store.Repository](t,
 		f.request(t, "POST", "/api/v1/repositories", ftpRepository("ftp-a", "{{SECRET_ftp_shape}}"), cookie, http.StatusCreated))
-	localCiphertext := storedCiphertext(t, f.dir, "repositories", local.ID)
-	ftpCiphertext := storedCiphertext(t, f.dir, "repositories", ftp.ID)
+	localCiphertext := storedCiphertext(t, f.dsn, "repositories", local.ID)
+	ftpCiphertext := storedCiphertext(t, f.dsn, "repositories", ftp.ID)
 	rejects := map[string]struct{ id, body string }{
 		"local to ftp": {local.ID, ftpRepository("local-a", "{{SECRET_ftp_put_never}}")},
 		"ftp root":     {ftp.ID, `{"name":"ftp-a","kind":"ftp","tls_mode":"plain","root":"` + root + `"}`},
@@ -729,10 +733,10 @@ func assertRepositoryPutUnchanged(t *testing.T, f *authFixture, localID, ftpID, 
 	if err != nil || unchangedFTP.Kind != store.RepositoryFTP || unchangedFTP.Local != nil {
 		t.Fatalf("ftp after rejected put: %+v %v", unchangedFTP, err)
 	}
-	if storedCiphertext(t, f.dir, "repositories", localID) != localCiphertext {
+	if storedCiphertext(t, f.dsn, "repositories", localID) != localCiphertext {
 		t.Fatal("rejected put wrote a local secret")
 	}
-	if storedCiphertext(t, f.dir, "repositories", ftpID) != ftpCiphertext {
+	if storedCiphertext(t, f.dsn, "repositories", ftpID) != ftpCiphertext {
 		t.Fatal("rejected put replaced the ftp secret")
 	}
 }
@@ -752,7 +756,7 @@ func TestPolicyTimezoneRejectsLocalAndEmpty(t *testing.T) {
 		})
 	}
 	var count int
-	if err := queryOne(t, f.dir, `SELECT COUNT(*) FROM policies`, &count); err != nil {
+	if err := queryOne(t, f.dsn, `SELECT COUNT(*) FROM policies`, &count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -767,21 +771,21 @@ func TestDeleteRefusesReplicaReferencedRepository(t *testing.T) {
 	f.seed(t, "admin", "admin")
 	cookie := f.login(t, "admin", testPassword)
 	repository := f.createRepositoryRow(t, t.Context(), "replica-target", newRepositoryDir(t), f.sealer)
-	insertReplica(t, f.dir, repository)
+	insertReplica(t, f.dsn, repository)
 	response := f.request(t, "DELETE", "/api/v1/repositories/"+repository, "", cookie, http.StatusConflict)
 	assertSingleError(t, response, render.Conflict)
 	if _, err := f.database.Repository(t.Context(), repository); err != nil {
 		t.Fatalf("replica-referenced repository was deleted: %v", err)
 	}
-	expectAuditCount(t, f.dir, "repositories.delete", "success", 0)
+	expectAuditCount(t, f.dsn, "repositories.delete", "success", 0)
 }
 
 // insertReplica adds one replicas row that refers to repositoryID. replicas is
 // owned by the replication migration; backups.chain_id belongs to the physical
-// migration, so this uses the shared intern.db file directly.
-func insertReplica(t *testing.T, dir, repositoryID string) {
+// migration, so this uses the shared database directly.
+func insertReplica(t *testing.T, dsn, repositoryID string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,14 +793,14 @@ func insertReplica(t *testing.T, dir, repositoryID string) {
 	ctx := t.Context()
 	_, err = db.ExecContext(ctx, `INSERT INTO chains
 		(id, source_id, server_uuid, server_version, tool_version, started_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6)`,
 		"replica-chain", "replica-source", "00000000-0000-0000-0000-000000000000", "8.4.11", "8.4.0-7", "2026-01-01T00:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO backups
 		(id, chain_id, seq, kind, status, instance_id, run_id, object_path, key_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		"replica-backup", "replica-chain", 1, "physical-full", "completed", "instance", "run",
 		"instance/source/chain/backup", "key", "2026-01-01T00:00:00Z")
 	if err != nil {
@@ -804,7 +808,7 @@ func insertReplica(t *testing.T, dir, repositoryID string) {
 	}
 	_, err = db.ExecContext(ctx, `INSERT INTO replicas
 		(backup_id, repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		"replica-backup", repositoryID, "replicate:replica-backup:"+repositoryID, "pending",
 		"2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
 	if err != nil {

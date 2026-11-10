@@ -1,5 +1,5 @@
 // Package store persists physical chains and their cleanup ownership in the
-// caller's control-plane SQLite database, independently of the CLI catalog.
+// caller's control-plane PostgreSQL database, independently of the CLI catalog.
 package store
 
 import (
@@ -11,9 +11,9 @@ import (
 	"github.com/flyingEirc/Intern/internal/physical/store/internal/storesql"
 )
 
-// Store does not own the database. The caller must use foreign_keys(1), WAL,
-// synchronous(FULL), busy_timeout and _txlock=immediate, with one connection.
-// A single process owner coordinates active runs and recovery.
+// Store does not own the database. The caller provides one PostgreSQL connection
+// protected by the control-plane database ownership lock. A single process
+// owner coordinates active runs and recovery.
 type Store struct {
 	db *sql.DB
 }
@@ -88,7 +88,12 @@ type Backup struct {
 	CreatedAt, CompletedAt                                 time.Time
 }
 
-func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (retErr error) {
+func (s *Store) withTx(ctx context.Context, fn func(context.Context, *storesql.Queries) error) (retErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -100,7 +105,7 @@ func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (r
 			}
 		}
 	}()
-	if err = fn(storesql.New(tx)); err != nil {
+	if err = fn(ctx, storesql.New(tx)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -108,5 +113,5 @@ func (s *Store) withTx(ctx context.Context, fn func(*storesql.Queries) error) (r
 
 func text(value string) sql.NullString { return sql.NullString{String: value, Valid: true} }
 
-// Fixed-width UTC timestamps retain chronological ordering in SQLite TEXT.
+// Fixed-width UTC timestamps retain chronological ordering in TEXT.
 func timestamp(value time.Time) string { return value.UTC().Format("2006-01-02T15:04:05.000000000Z") }

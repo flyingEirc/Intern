@@ -130,8 +130,7 @@ async function choosePoint() {
   const user = userEvent.setup();
   await user.click(await screen.findByRole("combobox", { name: "数据源" }));
   await user.click(await screen.findByRole("option", { name: "生产库" }));
-  await user.click(await screen.findByRole("radio", { name: chain().id }));
-  await user.click(await screen.findByRole("radio", { name: "物理全量 1" }));
+  await user.click(await screen.findByRole("radio", { name: /物理全量 · / }));
   return user;
 }
 
@@ -141,12 +140,13 @@ describe("RestoreWizard", () => {
     renderWithClient(<RestoreWizard />);
 
     const option = await screen.findByRole("radio", {
-      name: "任意时间点恢复（PITR）暂不可用",
+      name: "任意时间点恢复（暂不支持）",
     });
     expect(option).toHaveAttribute("aria-disabled", "true");
-    expect(screen.getAllByText(/binlog 归档尚未实现/).length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      screen.getByText(/当前版本只能恢复到已完成的备份时间点/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/binlog|路线图|检查点|备份链/)).toBeNull();
   });
 
   it("shows each point's verified copies from the replica queue", async () => {
@@ -154,7 +154,7 @@ describe("RestoreWizard", () => {
     routeFetch(catalog());
     renderWithClient(<RestoreWizard />);
     await choosePoint();
-    expect(await screen.findByText("异地 FTP（已校验）")).toBeInTheDocument();
+    expect(await screen.findByText("异地 FTP")).toBeInTheDocument();
     const queue = fetchMock.mock.calls
       .map(([input]) => new URL((input as Request).url))
       .find((url) => url.pathname === "/api/v1/replicas");
@@ -169,16 +169,21 @@ describe("RestoreWizard", () => {
     renderWithClient(<RestoreWizard />);
     const user = await choosePoint();
     await user.click(screen.getByRole("button", { name: "生成计划" }));
+    await user.click(await screen.findByRole("button", { name: "恢复诊断" }));
 
     expect(await screen.findByText("本地目录")).toBeInTheDocument();
     expect(screen.getByText("FTP 副本")).toBeInTheDocument();
-    expect(screen.getByText("异地 FTP")).toBeInTheDocument();
+    expect(screen.getAllByText("异地 FTP").length).toBeGreaterThan(0);
     expect(screen.getByText("no_auto_replace_production")).toBeInTheDocument();
     expect(
-      screen.getByText(/从不自动替换生产实例的 datadir/),
+      screen.getByText("恢复结果导出到独立目录，不会改动正在运行的数据库。"),
     ).toBeInTheDocument();
     expect(screen.getByText("pitr_unavailable")).toBeInTheDocument();
-    expect(screen.getByText(/不是任意时间点恢复/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "只能恢复到所选备份完成时的数据，之后的变更不包含在内。",
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(planDigest.slice(0, 12), { exact: false }),
     ).toBeInTheDocument();
@@ -304,6 +309,7 @@ describe("RestoreWizard", () => {
       throw new Error("重新生成计划 button missing");
     }
     await user.click(replan);
+    await user.click(await screen.findByRole("button", { name: "恢复诊断" }));
     await screen.findByText(fresh.slice(0, 12), { exact: false });
     await user.type(screen.getByLabelText("管理员密码"), "secret-password");
     await user.click(screen.getByRole("button", { name: "执行恢复" }));
@@ -324,12 +330,13 @@ describe("RestoreWizard", () => {
     renderWithClient(<RestoreWizard />);
     const user = await choosePoint();
     await user.click(screen.getByRole("button", { name: "生成计划" }));
+    await user.click(await screen.findByRole("switch", { name: "执行演练" }));
     await user.type(
       await screen.findByLabelText("管理员密码"),
       "secret-password",
     );
 
-    const editor = screen.getByLabelText("校验语句（verify_sql）");
+    const editor = screen.getByLabelText("校验语句");
     await user.click(editor);
     await user.paste(Array.from({ length: 17 }, () => "SELECT 1").join("\n"));
     await user.click(screen.getByRole("button", { name: "执行恢复" }));

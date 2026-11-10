@@ -40,6 +40,7 @@ describe("LoginForm", () => {
     search = new URLSearchParams({ next: "/account", reason: "expired" });
     routeFetch({
       "GET /api/v1/auth/session": [() => json(401, unauthorizedBody)],
+      "GET /api/v1/auth/setup": [() => json(200, { required: false })],
       "POST /api/v1/auth/login": [() => json(200, { user })],
     });
     const { onUnauthorized } = renderWithClient(<LoginForm />);
@@ -57,13 +58,22 @@ describe("LoginForm", () => {
       username: "admin",
       password: "correct-horse-battery",
     });
-    // The 401 probe and nothing else is an expected answer here.
     expect(onUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it("routes a first visit to setup", async () => {
+    routeFetch({
+      "GET /api/v1/auth/session": [() => json(401, unauthorizedBody)],
+      "GET /api/v1/auth/setup": [() => json(200, { required: true })],
+    });
+    renderWithClient(<LoginForm />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/setup"));
   });
 
   it("shows the fixed message for wrong credentials and stays", async () => {
     routeFetch({
       "GET /api/v1/auth/session": [() => json(401, unauthorizedBody)],
+      "GET /api/v1/auth/setup": [() => json(200, { required: false })],
       "POST /api/v1/auth/login": [
         () =>
           json(401, {
@@ -86,6 +96,7 @@ describe("LoginForm", () => {
   it("tells the user when to retry after rate limiting", async () => {
     routeFetch({
       "GET /api/v1/auth/session": [() => json(401, unauthorizedBody)],
+      "GET /api/v1/auth/setup": [() => json(200, { required: false })],
       "POST /api/v1/auth/login": [
         () =>
           json(
@@ -111,6 +122,7 @@ describe("LoginForm", () => {
   it("validates input before sending anything", async () => {
     routeFetch({
       "GET /api/v1/auth/session": [() => json(401, unauthorizedBody)],
+      "GET /api/v1/auth/setup": [() => json(200, { required: false })],
     });
     renderWithClient(<LoginForm />);
     await userEvent.setup().click(screen.getByRole("button", { name: "登录" }));
@@ -129,6 +141,7 @@ describe("LoginForm", () => {
       "GET /api/v1/auth/session": [
         () => json(200, { user, permissions: ["session:self"] }),
       ],
+      "GET /api/v1/auth/setup": [() => json(200, { required: false })],
     });
     renderWithClient(<LoginForm />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/"));

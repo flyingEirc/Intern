@@ -18,8 +18,11 @@ afterEach(() => {
 async function fill() {
   const u = userEvent.setup();
   await u.type(screen.getByLabelText("名称"), "primary");
-  await u.type(screen.getByLabelText("Socket"), "/run/mysqld/mysqld.sock");
-  await u.type(screen.getByLabelText("Datadir"), "/var/lib/mysql");
+  await u.type(
+    screen.getByLabelText("连接路径（Unix socket）"),
+    "/run/mysqld/mysqld.sock",
+  );
+  await u.type(screen.getByLabelText("数据目录"), "/var/lib/mysql");
   await u.type(screen.getByLabelText("用户名"), "backup");
   await u.type(screen.getByLabelText("密码"), "source-password");
 }

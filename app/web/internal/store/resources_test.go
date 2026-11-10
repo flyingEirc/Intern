@@ -10,6 +10,7 @@ import (
 
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func testSealer(t *testing.T) *credential.Sealer {
@@ -48,7 +49,7 @@ func createTestSourceWith(t *testing.T, s *Store, sealer SecretSealer, name, sec
 // the real database: swapping ciphertext between rows or fields is refused, and a
 // different KEK cannot open the value.
 func TestStoredCiphertextIsBoundToItsRowAndField(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
+	dir := pgtest.New(t)
 	s := openTestStore(t, dir)
 	sealer := testSealer(t)
 	first := createTestSourceWith(t, s, sealer, "first", "{{SECRET_first_source}}")
@@ -121,7 +122,7 @@ func assertWrongKEKRefused(t *testing.T, s *Store, sourceID, repositoryID string
 // TestSecretRotationReplacesCiphertextInPlace covers the rotation contract: a new
 // password yields new ciphertext for the same row and the old one no longer opens.
 func TestSecretRotationReplacesCiphertextInPlace(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
+	dir := pgtest.New(t)
 	s := openTestStore(t, dir)
 	sealer := testSealer(t)
 	source := createTestSourceWith(t, s, sealer, "source", "{{SECRET_before_rotation}}")
@@ -156,7 +157,7 @@ func TestSecretRotationReplacesCiphertextInPlace(t *testing.T) {
 }
 
 func TestResourceNamesAndKindsAreEnforcedBySchema(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
+	dir := pgtest.New(t)
 	s := openTestStore(t, dir)
 	sealer := testSealer(t)
 	root := filepath.Join(t.TempDir(), "repository")
@@ -196,7 +197,7 @@ type policyFixture struct {
 
 func newPolicyFixture(t *testing.T) policyFixture {
 	t.Helper()
-	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	s := openTestStore(t, pgtest.New(t))
 	sealer := testSealer(t)
 	return policyFixture{
 		store: s,
@@ -216,7 +217,6 @@ func (f policyFixture) create(t *testing.T) Policy {
 	policy, err := f.store.CreatePolicy(t.Context(), PolicyInput{
 		Name: "policy", SourceID: f.source.ID, LocalRepositoryID: f.local.ID, ReplicaRepositoryID: &f.ftp.ID,
 		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, SystemAudit("policies.create", AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)
@@ -263,18 +263,18 @@ func publishP8State(t *testing.T, s *Store, policyID, sourceID, localID, replica
 	now := ScheduleStamp(time.Now())
 	statements := []string{
 		`INSERT INTO chains (id, source_id, server_uuid, server_version, tool_version, started_at)
-		 VALUES ('chain-p8', ?, 'server-uuid', '8.4.11', '8.4.0-7', ?)`,
+		 VALUES ('chain-p8', $1, 'server-uuid', '8.4.11', '8.4.0-7', $2)`,
 		`INSERT INTO backups (id, chain_id, seq, kind, status, instance_id, run_id, object_path, key_id,
 		                      local_present, created_at, completed_at)
-		 VALUES (?, 'chain-p8', 1, 'physical-full', 'completed', 'instance-p8', ?, ?, 'key', 1, ?, ?)`,
+		 VALUES ($1, 'chain-p8', 1, 'physical-full', 'completed', 'instance-p8', $2, $3, 'key', 1, $4, $5)`,
 		`INSERT INTO runs (id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status,
 		                   scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size,
 		                   local_repository_id, replica_repository_id)
-		 VALUES ('run-p8', ?, ?, 'full', 'cron', 'run-p8-key', 'hash', 'completed', ?, ?, ?, ?, ?, 'chain-p8',
-		         512, ?, ?)`,
+		 VALUES ('run-p8', $1, $2, 'full', 'cron', 'run-p8-key', 'hash', 'completed', $3, $4, $5, $6, $7, 'chain-p8',
+		         512, $8, $9)`,
 		`INSERT INTO replicas (backup_id, repository_id, local_repository_id, idem_key, status,
 		                       next_attempt_at, created_at, updated_at)
-		 VALUES (?, ?, ?, 'replicate:run-p8', 'pending', ?, ?, ?)`,
+		 VALUES ($1, $2, $3, 'replicate:run-p8', 'pending', $4, $5, $6)`,
 	}
 	arguments := [][]any{
 		{sourceID, now},
@@ -337,7 +337,6 @@ func movePolicyOff(t *testing.T, s *Store, policy Policy, localID, replicaID str
 	if _, err := s.UpdatePolicy(t.Context(), policy.ID, PolicyInput{
 		Name: policy.Name, SourceID: policy.SourceID, LocalRepositoryID: localID, ReplicaRepositoryID: &replicaID,
 		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, SystemAudit("policies.update", AuditDetail{})); err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +374,7 @@ func queueCopyOn(t *testing.T, s *Store, repositoryID, localRepositoryID string)
 	t.Helper()
 	if _, err := s.DB().ExecContext(t.Context(), `INSERT INTO replicas
 (backup_id, repository_id, local_repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
-VALUES ('backup-p8', ?, ?, 'replicate:run-p8', 'pending', ?, ?, ?)`,
+VALUES ('backup-p8', $1, $2, 'replicate:run-p8', 'pending', $3, $4, $5)`,
 		repositoryID, localRepositoryID, ScheduleStamp(time.Now()), ScheduleStamp(time.Now()), ScheduleStamp(time.Now())); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +400,7 @@ func TestDeletedPolicyReleasesItsReferences(t *testing.T) {
 }
 
 func TestResourcePaginationIsBounded(t *testing.T) {
-	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	s := openTestStore(t, pgtest.New(t))
 	for _, name := range []string{"a", "b", "c"} {
 		createTestSource(t, s, name, "{{SECRET_"+name+"}}")
 	}
@@ -427,36 +426,36 @@ func mustRepository(t *testing.T, s *Store, sealer SecretSealer, in RepositoryIn
 	return repository
 }
 
-func rawCiphertext(t *testing.T, dir, table, id string) []byte {
+func rawCiphertext(t *testing.T, dsn, table, id string) []byte {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	var ciphertext []byte
-	query := `SELECT COALESCE(secret_ciphertext, X'') FROM ` + table + ` WHERE id = ?`
+	query := `SELECT COALESCE(secret_ciphertext, ''::bytea) FROM ` + table + ` WHERE id = $1`
 	if err = db.QueryRowContext(t.Context(), query, id).Scan(&ciphertext); err != nil {
 		t.Fatal(err)
 	}
 	return ciphertext
 }
 
-func writeCiphertext(t *testing.T, dir, table, id string, ciphertext []byte) {
+func writeCiphertext(t *testing.T, dsn, table, id string, ciphertext []byte) {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	query := `UPDATE ` + table + ` SET secret_ciphertext = ? WHERE id = ?`
+	query := `UPDATE ` + table + ` SET secret_ciphertext = $1 WHERE id = $2`
 	if _, err = db.ExecContext(t.Context(), query, ciphertext, id); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSecretWriteWithoutSealerIsUnavailable(t *testing.T) {
-	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
+	s := openTestStore(t, pgtest.New(t))
 	_, err := s.CreateSource(t.Context(), SourceInput{
 		Name: "source", Socket: "/run/mysqld/mysqld.sock", Datadir: "/var/lib/mysql",
 		Username: "backup", Secret: []byte("{{SECRET_unconfigured}}"),

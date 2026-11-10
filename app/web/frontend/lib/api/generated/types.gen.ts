@@ -8,6 +8,20 @@ export type LoginRequest = {
     username: string;
 };
 
+/**
+ * Unknown fields are rejected. This shape intentionally has no role or low-level policy tuning fields: the first user is always an admin.
+ */
+export type SetupRequest = {
+    username: Username;
+};
+
+export type SetupStatusResponse = {
+    /**
+     * True only while anonymous one-time setup is still open.
+     */
+    required: boolean;
+};
+
 export type Username = string;
 
 /**
@@ -192,6 +206,9 @@ export type ProbeResult = {
     };
 };
 
+/**
+ * Business policy with five server-owned tuning diagnostics. Those five values are read-only on the wire; a business edit preserves historical values instead of silently replacing them.
+ */
 export type Policy = {
     id: string;
     name: string;
@@ -201,36 +218,52 @@ export type Policy = {
     full_cron: string;
     incremental_cron: string;
     timezone: string;
-    max_chain_length: number;
-    parallel: number;
-    throttle: number;
-    zstd_level: number;
-    page_tracking: boolean;
+    /**
+     * Server-owned maximum physical chain length.
+     */
+    readonly max_chain_length: number;
+    /**
+     * Server-owned tool concurrency.
+     */
+    readonly parallel: number;
+    /**
+     * Server-owned throttle; zero applies no extra limit.
+     */
+    readonly throttle: number;
+    /**
+     * Server-owned stored Zstandard level; the current encoder uses fixed concurrency.
+     */
+    readonly zstd_level: number;
+    /**
+     * Server-owned page-tracking diagnostic.
+     */
+    readonly page_tracking: boolean;
     enabled: boolean;
     last_preflight: PreflightRecord | null;
     created_at: string;
     updated_at: string;
 };
 
+/**
+ * Only business fields are configurable. Low-level tuning is supplied once by the server at creation and is never accepted as a write field; a business update preserves the existing tuning columns.
+ */
 export type PolicyWrite = {
     name: string;
     source_id: string;
     local_repository_id: string;
     replica_repository_id?: string | null;
     /**
-     * Standard 5-field cron expression, validated with cron.ParseStandard.
+     * Standard 5-field cron expression for full backups, validated with cron.ParseStandard.
      */
     full_cron: string;
+    /**
+     * Standard 5-field cron expression for incremental backups, previewed by the same schedule engine.
+     */
     incremental_cron: string;
     /**
      * Non-empty IANA time zone name. The empty string and Local are rejected.
      */
     timezone: string;
-    max_chain_length: number;
-    parallel: number;
-    throttle: number;
-    zstd_level: number;
-    page_tracking: boolean;
     enabled: boolean;
 };
 
@@ -571,7 +604,7 @@ export type Error = {
          */
         code: string;
     };
-    code: 'bad_request' | 'invalid_json' | 'unsupported_media_type' | 'payload_too_large' | 'not_found' | 'method_not_allowed' | 'internal' | 'unavailable' | 'unauthorized' | 'forbidden' | 'cross_origin_rejected' | 'rate_limited' | 'conflict' | 'validation_failed' | 'preflight_failed' | 'restore_refused' | 'plan_changed' | 'confirmation_failed';
+    code: 'bad_request' | 'invalid_json' | 'unsupported_media_type' | 'payload_too_large' | 'not_found' | 'method_not_allowed' | 'internal' | 'unavailable' | 'unauthorized' | 'forbidden' | 'cross_origin_rejected' | 'rate_limited' | 'conflict' | 'setup_completed' | 'validation_failed' | 'preflight_failed' | 'restore_refused' | 'plan_changed' | 'confirmation_failed';
     message: string;
     request_id: string;
 };
@@ -579,6 +612,14 @@ export type Error = {
 export type LoginRequestWritable = {
     username: string;
     password: string;
+};
+
+/**
+ * Unknown fields are rejected. This shape intentionally has no role or low-level policy tuning fields: the first user is always an admin.
+ */
+export type SetupRequestWritable = {
+    username: Username;
+    password: Password;
 };
 
 export type RepositoryWriteWritable = {
@@ -617,6 +658,29 @@ export type SourceWriteWritable = {
      * Required when creating; omitted on update keeps the stored secret.
      */
     password?: string;
+};
+
+/**
+ * Business policy with five server-owned tuning diagnostics. Those five values are read-only on the wire; a business edit preserves historical values instead of silently replacing them.
+ */
+export type PolicyWritable = {
+    id: string;
+    name: string;
+    source_id: string;
+    local_repository_id: string;
+    replica_repository_id: string | null;
+    full_cron: string;
+    incremental_cron: string;
+    timezone: string;
+    enabled: boolean;
+    last_preflight: PreflightRecord | null;
+    created_at: string;
+    updated_at: string;
+};
+
+export type PolicyPageWritable = {
+    items: Array<PolicyWritable>;
+    next_before: string | null;
 };
 
 export type RestoreExecuteRequestWritable = {
@@ -669,11 +733,11 @@ export type HealthData = {
 
 export type HealthErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     413: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -704,15 +768,15 @@ export type ReadinessData = {
 
 export type ReadinessErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     413: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -737,15 +801,15 @@ export type LoginData = {
 
 export type LoginErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
@@ -757,7 +821,7 @@ export type LoginErrors = {
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -773,6 +837,100 @@ export type LoginResponses = {
 
 export type LoginResponse = LoginResponses[keyof LoginResponses];
 
+export type GetSetupData = {
+    body?: never;
+    headers?: {
+        /**
+         * A nonempty value of at most 64 ASCII letters, digits, dots, underscores, or hyphens is echoed. Other values are replaced with a generated UUIDv7.
+         */
+        'X-Request-ID'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/setup';
+};
+
+export type GetSetupErrors = {
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    413: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    default: ErrorResponse;
+};
+
+export type GetSetupError = GetSetupErrors[keyof GetSetupErrors];
+
+export type GetSetupResponses = {
+    /**
+     * One-time setup state
+     */
+    200: SetupStatusResponse;
+};
+
+export type GetSetupResponse = GetSetupResponses[keyof GetSetupResponses];
+
+export type CreateSetupData = {
+    body: SetupRequestWritable;
+    headers?: {
+        /**
+         * A nonempty value of at most 64 ASCII letters, digits, dots, underscores, or hyphens is echoed. Other values are replaced with a generated UUIDv7.
+         */
+        'X-Request-ID'?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/setup';
+};
+
+export type CreateSetupErrors = {
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    400: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    403: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    409: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    413: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    415: ErrorResponse;
+    /**
+     * rate_limited (429) or unavailable (503). Retry-After is whole seconds.
+     */
+    429: ErrorResponse;
+    /**
+     * rate_limited (429) or unavailable (503). Retry-After is whole seconds.
+     */
+    503: ErrorResponse;
+    /**
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     */
+    default: ErrorResponse;
+};
+
+export type CreateSetupError = CreateSetupErrors[keyof CreateSetupErrors];
+
+export type CreateSetupResponses = {
+    /**
+     * First administrator created; a fresh server-side session is issued
+     */
+    201: UserResponse;
+};
+
+export type CreateSetupResponse = CreateSetupResponses[keyof CreateSetupResponses];
+
 export type LogoutData = {
     body?: never;
     path?: never;
@@ -782,15 +940,15 @@ export type LogoutData = {
 
 export type LogoutErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -815,11 +973,11 @@ export type CurrentSessionData = {
 
 export type CurrentSessionErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -847,15 +1005,15 @@ export type ChangeOwnPasswordData = {
 
 export type ChangeOwnPasswordErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
@@ -867,7 +1025,7 @@ export type ChangeOwnPasswordErrors = {
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -892,15 +1050,15 @@ export type ListUsersData = {
 
 export type ListUsersErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -931,19 +1089,19 @@ export type CreateUserData = {
 
 export type CreateUserErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
@@ -951,7 +1109,7 @@ export type CreateUserErrors = {
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -978,19 +1136,19 @@ export type GetUserData = {
 
 export type GetUserErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1021,23 +1179,23 @@ export type UpdateUserData = {
 
 export type UpdateUserErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
@@ -1045,7 +1203,7 @@ export type UpdateUserErrors = {
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1072,19 +1230,19 @@ export type RevokeUserSessionsData = {
 
 export type RevokeUserSessionsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1112,19 +1270,19 @@ export type ListAuditLogsData = {
 
 export type ListAuditLogsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1158,19 +1316,19 @@ export type ListRepositoriesData = {
 
 export type ListRepositoriesErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1195,31 +1353,31 @@ export type CreateRepositoryData = {
 
 export type CreateRepositoryErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     422: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1246,23 +1404,23 @@ export type DeleteRepositoryData = {
 
 export type DeleteRepositoryErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1289,19 +1447,19 @@ export type GetRepositoryData = {
 
 export type GetRepositoryErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1328,35 +1486,35 @@ export type UpdateRepositoryData = {
 
 export type UpdateRepositoryErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     422: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1383,23 +1541,23 @@ export type ProbeRepositoryData = {
 
 export type ProbeRepositoryErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1430,19 +1588,19 @@ export type ListSourcesData = {
 
 export type ListSourcesErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1467,27 +1625,27 @@ export type CreateSourceData = {
 
 export type CreateSourceErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1514,23 +1672,23 @@ export type DeleteSourceData = {
 
 export type DeleteSourceErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1557,19 +1715,19 @@ export type GetSourceData = {
 
 export type GetSourceErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1596,31 +1754,31 @@ export type UpdateSourceData = {
 
 export type UpdateSourceErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1649,27 +1807,27 @@ export type PreflightSourceData = {
 
 export type PreflightSourceErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1700,19 +1858,19 @@ export type ListPoliciesData = {
 
 export type ListPoliciesErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1737,19 +1895,19 @@ export type CreatePolicyData = {
 
 export type CreatePolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
@@ -1757,11 +1915,11 @@ export type CreatePolicyErrors = {
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1788,19 +1946,19 @@ export type DeletePolicyData = {
 
 export type DeletePolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1827,19 +1985,19 @@ export type GetPolicyData = {
 
 export type GetPolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1866,19 +2024,19 @@ export type UpdatePolicyData = {
 
 export type UpdatePolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
@@ -1886,11 +2044,11 @@ export type UpdatePolicyErrors = {
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1917,15 +2075,15 @@ export type EnablePolicyData = {
 
 export type EnablePolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
@@ -1933,11 +2091,11 @@ export type EnablePolicyErrors = {
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -1964,19 +2122,19 @@ export type DisablePolicyData = {
 
 export type DisablePolicyErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2009,35 +2167,35 @@ export type TriggerPolicyRunData = {
 
 export type TriggerPolicyRunErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     415: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2069,23 +2227,23 @@ export type PreviewPolicyScheduleData = {
 
 export type PreviewPolicyScheduleErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2125,19 +2283,19 @@ export type ListRunsData = {
 
 export type ListRunsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2164,19 +2322,19 @@ export type GetRunData = {
 
 export type GetRunErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2206,23 +2364,23 @@ export type ListRunLogsData = {
 
 export type ListRunLogsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2249,23 +2407,23 @@ export type CancelRunData = {
 
 export type CancelRunErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2300,23 +2458,23 @@ export type StreamRunEventsData = {
 
 export type StreamRunEventsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2343,19 +2501,19 @@ export type ListSourceChainsData = {
 
 export type ListSourceChainsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2382,19 +2540,19 @@ export type GetBackupData = {
 
 export type GetBackupErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2421,19 +2579,19 @@ export type GetSourceProtectionData = {
 
 export type GetSourceProtectionErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2463,19 +2621,19 @@ export type ListReplicasData = {
 
 export type ListReplicasErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2503,19 +2661,19 @@ export type RetryReplicaData = {
 
 export type RetryReplicaErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2540,39 +2698,39 @@ export type PlanRestoreData = {
 
 export type PlanRestoreErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     415: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     422: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2608,19 +2766,19 @@ export type ListRestoresData = {
 
 export type ListRestoresErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2651,31 +2809,31 @@ export type ExecuteRestoreData = {
 
 export type ExecuteRestoreErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     415: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     422: ErrorResponse;
     /**
@@ -2683,11 +2841,11 @@ export type ExecuteRestoreErrors = {
      */
     429: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     503: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2714,19 +2872,19 @@ export type GetRestoreData = {
 
 export type GetRestoreErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2756,23 +2914,23 @@ export type ListRestoreLogsData = {
 
 export type ListRestoreLogsErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     400: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };
@@ -2799,23 +2957,23 @@ export type CancelRestoreData = {
 
 export type CancelRestoreErrors = {
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     401: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     403: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     404: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     409: ErrorResponse;
     /**
-     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
+     * Unified error; covers invalid_json (400), validation_failed (400), unauthorized (401), forbidden and cross_origin_rejected (403), not_found (404), method_not_allowed (405), conflict and setup_completed (409), payload_too_large (413), unsupported_media_type (415), rate_limited (429), internal (500), and unavailable (503), as applicable. Wrong current password is 400, not 401.
      */
     default: ErrorResponse;
 };

@@ -75,8 +75,8 @@ func publishRealMembers(t *testing.T, fixture *planFixture, backup fixtureBackup
 	writeArtifact(t, members, toolRaw, toolRaw, memberMetadata, memberMetaEnvelope, fixture.keyFile)
 	metaBody, err := os.ReadFile(filepath.Join(members, memberMetadata))
 	mustNoError(t, err)
-	fixture.exec(`UPDATE backups SET payload_size = ?, payload_sha256 = ?, metadata_size = ?, metadata_sha256 = ?,
-		checkpoints = ?, xtrabackup_info = ? WHERE id = ?`,
+	fixture.exec(`UPDATE backups SET payload_size = $1, payload_sha256 = $2, metadata_size = $3, metadata_sha256 = $4,
+		checkpoints = $5, xtrabackup_info = $6 WHERE id = $7`,
 		payloadSize, payloadSum, int64(len(metaBody)), digestHex(metaBody), checkpoints, info, backup.ID)
 }
 
@@ -128,7 +128,7 @@ func TestAuthenticateRefusesForeignKind(t *testing.T) {
 	fixture := newPlanFixture(t)
 	seed := fixture.backup(0)
 	publishRealMembers(t, fixture, seed, bytes.Repeat([]byte("payload"), 2000))
-	fixture.exec(`UPDATE backups SET kind = 'physical-incremental', from_lsn = '100', to_lsn = '200' WHERE id = ?`, seed.ID)
+	fixture.exec(`UPDATE backups SET kind = 'physical-incremental', from_lsn = '100', to_lsn = '200' WHERE id = $1`, seed.ID)
 	backup := storedBackup(t, fixture, seed.ID)
 	execution, link, dir := realExecution(t, fixture, backup, 1<<30)
 	err := execution.authenticate(t.Context(), link, dir)

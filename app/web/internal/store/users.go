@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
 )
@@ -47,8 +47,8 @@ func userError(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) && sqliteErr.Code() == 2067 {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrConflict
 	}
 	return err
@@ -66,8 +66,9 @@ func createUser(ctx context.Context, queries *storesql.Queries, username, hash, 
 	return userFromRow(row), userError(err)
 }
 
-// CreateUser commits the new user and its success audit together. An empty
-// action or an audit insert failure rolls the user back.
+// CreateUser commits the new user, its success audit, and the permanent setup
+// closure together. Any existing user closes anonymous setup; deleting every
+// user later cannot reopen it.
 func (s *Store) CreateUser(ctx context.Context, username, hash, role string, entry AuditLog) (User, error) {
 	var user User
 	err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
@@ -76,7 +77,10 @@ func (s *Store) CreateUser(ctx context.Context, username, hash, role string, ent
 			return err
 		}
 		user = created
-		return insertSuccessAudit(ctx, q, entry, "user", user.ID)
+		if err := insertSuccessAudit(ctx, q, entry, "user", user.ID); err != nil {
+			return err
+		}
+		return q.CompleteSetup(ctx)
 	})
 	if err != nil {
 		return User{}, err
@@ -107,10 +111,7 @@ func (s *Store) Users(ctx context.Context) ([]User, error) {
 }
 
 // UpdateUser commits the user change and its success audit together. The
-// last-admin guard stays in the same UPDATE, so concurrent requests cannot
-// remove the last enabled administrator, including create-admin's connection.
-// SQLite reserves the write lock at the start of that UPDATE, before the
-// last-admin subquery, so busy_timeout applies without a deferred lock upgrade.
+// last-admin guard stays in the same UPDATE on the single owned connection.
 // An audit failure rolls the change back.
 func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges, entry AuditLog) (User, error) {
 	var user User
@@ -129,7 +130,7 @@ func (s *Store) UpdateUser(ctx context.Context, id string, changes UserChanges, 
 }
 
 func updateUser(ctx context.Context, queries *storesql.Queries, id string, changes UserChanges) (User, error) {
-	params := storesql.UpdateUserParams{ID: id, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	params := storesql.UpdateUserParams{UserID: id, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	if changes.Role != nil {
 		params.Role = sql.NullString{String: *changes.Role, Valid: true}
 	}

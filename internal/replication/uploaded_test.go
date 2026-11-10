@@ -86,7 +86,7 @@ func (f *engineFixture) snapshot(backupID string) (replicaSnapshot, error) {
 	var out replicaSnapshot
 	err := f.db.QueryRowContext(f.t.Context(), `
 SELECT status, local_repository_id, uploaded_at, verified_at FROM replicas
-WHERE backup_id = ? AND repository_id = ?`, backupID, engineRepoID,
+WHERE backup_id = $1 AND repository_id = $2`, backupID, engineRepoID,
 	).Scan(&out.status, &out.localRepositoryID, &out.uploaded, &out.verified)
 	return out, err
 }
@@ -217,7 +217,7 @@ func TestUploadedTransitionReportsAMissingRow(t *testing.T) {
 	for _, member := range memberOrder {
 		members[member] = memberRecord{status: memberUploaded}
 	}
-	if _, err := f.db.ExecContext(t.Context(), `DELETE FROM replicas WHERE backup_id = ?`, record.id); err != nil {
+	if _, err := f.db.ExecContext(t.Context(), `DELETE FROM replicas WHERE backup_id = $1`, record.id); err != nil {
 		t.Fatal(err)
 	}
 	err := f.r.markUploaded(t.Context(), record.id, members)

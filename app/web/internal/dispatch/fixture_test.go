@@ -13,6 +13,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 // testSocketPath returns an absolute socket path nothing listens on. The real
@@ -31,17 +32,21 @@ type fixture struct {
 	t        *testing.T
 	database *store.Store
 	dir      string
+	dsn      string
 	keyFile  string
 	sealer   *credential.Sealer
 	runtime  resources.Settings
 	logs     *bytes.Buffer
 }
 
-// newFixture opens a real SQLite control plane under an exclusive lock and
-// prepares a KEK outside the metadata directory.
+// newFixture owns a real PostgreSQL control plane and prepares an independent
+// metadata directory and KEK for the runtime's filesystem boundaries.
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{t: t, dir: filepath.Join(t.TempDir(), "metadata"), logs: &bytes.Buffer{}}
+	f := &fixture{t: t, dir: filepath.Join(t.TempDir(), "metadata"), dsn: pgtest.New(t), logs: &bytes.Buffer{}}
+	if err := os.Mkdir(f.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	f.database = f.openStore()
 	// One cleanup closes whichever connection is current. It is registered
 	// before any dispatcher, so cleanups (LIFO) stop workers first and only
@@ -67,15 +72,15 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) openStore() *store.Store {
 	f.t.Helper()
-	database, err := store.Open(f.t.Context(), f.dir)
+	database, err := store.Open(f.t.Context(), f.dsn)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	return database
 }
 
-// closeStore releases the SQLite lock so the same directory can be reopened,
-// which is the restart the recovery and idempotency tests exercise.
+// closeStore releases the database session owner lock so restart tests can
+// reopen the same database without changing its identity or persisted rows.
 func (f *fixture) closeStore() {
 	f.t.Helper()
 	if err := f.database.Close(); err != nil {
@@ -143,7 +148,6 @@ func (f *fixture) policy(name string, sourceID, repositoryID string, enabled boo
 	created, err := f.database.CreatePolicy(f.t.Context(), store.PolicyInput{
 		Name: name, SourceID: sourceID, LocalRepositoryID: repositoryID,
 		FullCron: "0 * * * *", IncrementalCron: "30 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		f.t.Fatal(err)
@@ -181,7 +185,6 @@ func (f *fixture) replicaPolicy(name, sourceID, localID, replicaID string) store
 	created, err := f.database.CreatePolicy(f.t.Context(), store.PolicyInput{
 		Name: name, SourceID: sourceID, LocalRepositoryID: localID, ReplicaRepositoryID: &replicaID,
 		FullCron: "0 * * * *", IncrementalCron: "30 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		f.t.Fatal(err)
@@ -254,7 +257,7 @@ func (f *fixture) eventNames(runID string) []string {
 func (f *fixture) systemAuditCount(action string) int {
 	f.t.Helper()
 	var count int
-	query := `SELECT COUNT(*) FROM audit_logs WHERE actor_type = 'system' AND action = ? AND result = 'success'`
+	query := `SELECT COUNT(*) FROM audit_logs WHERE actor_type = 'system' AND action = $1 AND result = 'success'`
 	if err := f.database.DB().QueryRowContext(f.t.Context(), query, action).Scan(&count); err != nil {
 		f.t.Fatal(err)
 	}

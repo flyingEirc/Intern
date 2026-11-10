@@ -63,7 +63,16 @@ func (h runHandlers) runEvents(c *gin.Context) {
 
 	events := make(chan store.RunLog, sseBufferCapacity)
 	dropped := make(chan struct{}, 1)
-	go h.streamRun(c.Request.Context(), run, after, events, dropped)
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.streamRun(ctx, run, after, events, dropped)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
 
 	h.pumpEvents(c, w, flusher, runID, events, dropped)
 }
@@ -167,31 +176,38 @@ func (h runHandlers) pumpEvents(c *gin.Context, w gin.ResponseWriter, flusher ht
 			// Slow consumer: stop the stream without touching the run.
 			return
 		case <-recheck.C:
-			if !h.sessionAlive(c) {
-				// Session revocation (logout, epoch change, user disabled):
-				// send the revoked event and close.
-				sseWrite(controller, w, flusher, func() string { return "event: revoked\n\n" })
+			if !h.writeHeartbeat(c, controller, w, flusher) {
 				return
 			}
-			sseWrite(controller, w, flusher, func() string { return ": ping\n\n" })
 		case row, open := <-events:
 			if !open {
-				// The tail goroutine finished: it saw the terminal run or a
-				// read failure. Confirm the terminal status once and send the
-				// single final end event.
-				terminal, err := h.terminal(c.Request.Context(), runID)
-				if err != nil || terminal == nil {
-					return
-				}
-				sseWrite(controller, w, flusher, func() string { return endFrame(terminal.Status) })
+				h.writeStreamEnd(c, controller, w, flusher, runID)
 				return
 			}
-			sseWrite(controller, w, flusher, func() string {
-				return "event: message\nid: " + strconv.FormatInt(row.Seq, 10) +
-					"\ndata: " + sseEventJSON(row) + "\n\n"
-			})
+			if !h.writeRunLog(c, controller, w, flusher, row) {
+				return
+			}
 		}
 	}
+}
+
+func (h runHandlers) writeHeartbeat(c *gin.Context, controller *http.ResponseController, w gin.ResponseWriter, flusher http.Flusher) bool {
+	if !h.sessionAlive(c) {
+		// Session revocation is the final frame; no heartbeat follows it.
+		sseWrite(controller, w, flusher, func() string { return "event: revoked\n\n" })
+		return false
+	}
+	return sseWrite(controller, w, flusher, func() string { return ": ping\n\n" })
+}
+
+func (h runHandlers) writeStreamEnd(c *gin.Context, controller *http.ResponseController, w gin.ResponseWriter, flusher http.Flusher, runID string) {
+	// A producer can close after a read failure. Only a confirmed terminal
+	// run receives an end frame, and this helper is called once before return.
+	terminal, err := h.terminal(c.Request.Context(), runID)
+	if err != nil || terminal == nil {
+		return
+	}
+	sseWrite(controller, w, flusher, func() string { return endFrame(terminal.Status) })
 }
 
 // endFrame is the single final event of every stream: the run's terminal
@@ -200,9 +216,39 @@ func endFrame(status string) string {
 	return "event: end\ndata: " + status + "\n\n"
 }
 
+// writeRunLog writes one message frame. JSON encoding failure is logged and
+// ends the stream with no frame, so the client never sees a substitute payload.
+func (h runHandlers) writeRunLog(c *gin.Context, controller *http.ResponseController, w gin.ResponseWriter, flusher http.Flusher, row store.RunLog) bool {
+	frame, err := sseMessageFrame(row)
+	if err != nil {
+		h.logger.ErrorContext(c.Request.Context(), "cannot encode sse event",
+			"run_id", row.RunID, "seq", row.Seq, "error", err)
+		return false
+	}
+	return sseWrite(controller, w, flusher, func() string { return frame })
+}
+
+// sseMessageFrame is one SSE message frame. Its data object is the fixed wire
+// shape: seq, ts, level, event, message and data.
+func sseMessageFrame(row store.RunLog) (string, error) {
+	payload := struct {
+		Seq     int64  `json:"seq"`
+		TS      string `json:"ts"`
+		Level   string `json:"level"`
+		Event   string `json:"event"`
+		Message string `json:"message"`
+		Data    any    `json:"data"`
+	}{Seq: row.Seq, TS: row.TS, Level: row.Level, Event: row.Event, Message: row.Message, Data: row.Data}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return "event: message\nid: " + strconv.FormatInt(row.Seq, 10) +
+		"\ndata: " + string(encoded) + "\n\n", nil
+}
+
 // sseWrite renders the frame, extends the write deadline for this write and
-// flushes. Write failures close the stream by returning false; the caller's
-// next select observes the request context or channel and exits. Errors after
+// flushes. A false result ends the pump and drains its producer. Errors after
 // the first byte never produce a JSON body.
 func sseWrite(controller *http.ResponseController, w gin.ResponseWriter, flusher http.Flusher, frame func() string) bool {
 	// A connection type that does not support deadlines reports an error here;
@@ -245,24 +291,6 @@ func (h runHandlers) sessionAlive(c *gin.Context) bool {
 		return false
 	}
 	return auth.HasPermission(user.Role, auth.RunsRead)
-}
-
-// sseEventJSON is the fixed wire shape of one event: seq, ts, level, event,
-// message and data.
-func sseEventJSON(row store.RunLog) string {
-	payload := struct {
-		Seq     int64  `json:"seq"`
-		TS      string `json:"ts"`
-		Level   string `json:"level"`
-		Event   string `json:"event"`
-		Message string `json:"message"`
-		Data    any    `json:"data"`
-	}{Seq: row.Seq, TS: row.TS, Level: row.Level, Event: row.Event, Message: row.Message, Data: row.Data}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "{}"
-	}
-	return string(encoded)
 }
 
 // sourceChains serves one source's chains with their members.

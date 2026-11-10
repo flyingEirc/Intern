@@ -76,18 +76,18 @@ export const linkSourceLabel: Record<RestorePlanLink["source"], string> = {
 };
 
 /**
- * Advisory plan risk codes the engine emits. An unknown code still renders,
- * with its raw value, so a newer engine does not disappear from the plan.
+ * Advisory plan risk codes the engine emits, written as what the operator
+ * should know. An unknown code still renders, with its raw value, so a newer
+ * engine does not disappear from the plan.
  */
 export const riskExplanation: Record<string, string> = {
   no_auto_replace_production:
-    "恢复只会把已 prepare 的数据目录发布到导出路径，从不自动替换生产实例的 datadir。",
+    "恢复结果导出到独立目录，不会改动正在运行的数据库。",
   server_uuid_duplicate:
-    "导出保留源实例的 server-uuid（auto.cnf）。替换生产实例前必须先停源库，并核对该 uuid：相同的 server_uuid 不能与源实例同时接入复制拓扑。",
-  pitr_unavailable:
-    "这是检查点恢复，不是任意时间点恢复。binlog 归档与完整物理 PITR 属于路线图 N1，尚未实现。",
+    "导出的数据保留原数据库的实例标识；如要替换原库，请先停止原库，避免两个实例同时加入同一复制环境。",
+  pitr_unavailable: "只能恢复到所选备份完成时的数据，之后的变更不包含在内。",
   rehearsal_unavailable:
-    "当前部署没有配置 mysqld，无法在隔离的演练实例上执行校验。恢复本身仍可执行。",
+    "当前部署没有配置演练用的数据库程序，无法在隔离实例上检查数据。恢复本身仍可执行。",
 };
 
 /**
@@ -124,8 +124,31 @@ export function sideEffectStatements(
   ];
 }
 
+/** Business wording for one risk code; an unknown code names itself. */
 export function riskText(code: string): string {
-  return riskExplanation[code] ?? "未知风险码，请按其原始码核对。";
+  return (
+    riskExplanation[code] ??
+    `这次计划带有一项未知风险提示（${code}）。详情见恢复诊断。`
+  );
+}
+
+/**
+ * The directory a planned export will be created under. The engine reports the
+ * planned path with a literal `{restore_id}` placeholder until execution
+ * publishes the final directory, so the plan shows the parent directory and
+ * says a new directory will be created there.
+ */
+export function exportLocation(path: string): {
+  root: string;
+  pending: boolean;
+} {
+  const placeholder = "{restore_id}";
+  const index = path.indexOf(placeholder);
+  if (index === -1) {
+    return { root: path, pending: false };
+  }
+  const root = path.slice(0, index).replace(/[\\/]+$/, "");
+  return { root: root === "" ? path : root, pending: true };
 }
 
 export function refusalText(code: string | undefined): string {
@@ -293,7 +316,7 @@ export function describeRestoreError(error: unknown): string {
       error.retryAfter === undefined
         ? "请稍后再试"
         : `请 ${error.retryAfter} 秒后再试`;
-    return `密码确认尝试过于频繁，${wait}。改密与恢复确认共用同一限速，每个用户每分钟共 5 次。`;
+    return `密码确认尝试过于频繁，${wait}。多次错误会被暂时限制。`;
   }
   return describeError(error);
 }

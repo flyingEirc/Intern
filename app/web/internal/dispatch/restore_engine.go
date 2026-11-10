@@ -332,7 +332,7 @@ func (l *restoreLocator) openLocal(id, root string) (*local.Repository, error) {
 func (l *restoreLocator) Replicas(ctx context.Context, backupID string) (refs []restore.ReplicaRef, retErr error) {
 	rows, err := l.database.DB().QueryContext(ctx,
 		`SELECT r.repository_id FROM replicas r JOIN repositories repo ON repo.id = r.repository_id
-WHERE r.backup_id = ? AND repo.kind = 'ftp'
+WHERE r.backup_id = $1 AND repo.kind = 'ftp'
 ORDER BY CASE r.status WHEN 'verified' THEN 0 ELSE 1 END, r.repository_id`, backupID)
 	if err != nil {
 		return nil, err

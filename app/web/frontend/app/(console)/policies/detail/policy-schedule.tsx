@@ -27,7 +27,7 @@ import {
 } from "@/components/ui/table";
 import { ApiError } from "@/lib/api/errors";
 import { triggerPolicyRunMutation } from "@/lib/api/generated/@tanstack/react-query.gen";
-import { formatZonedDateTime } from "@/lib/resources/format";
+import { formatInTimeZone } from "@/lib/resources/format";
 import { usePolicySchedule } from "@/lib/resources/queries";
 import { runKindLabel } from "@/lib/resources/runs";
 import { type TriggerAttempt, triggerAttempt } from "@/lib/runs/idempotency";
@@ -95,10 +95,7 @@ export function PolicySchedule({
             <Badge variant="outline">未启用</Badge>
           ) : null}
         </CardTitle>
-        <CardDescription>
-          下一次触发时间由服务端用调度器同一份 cron
-          实现、按策略时区计算，页面不做推算。
-        </CardDescription>
+        <CardDescription>查看策略时区内接下来的备份时间。</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {canTrigger ? (
@@ -177,7 +174,14 @@ export function PolicySchedule({
                     <TableRow key={`${fire.kind}:${fire.at}`}>
                       <TableCell>{runKindLabel[fire.kind]}</TableCell>
                       <TableCell>
-                        {formatZonedDateTime(fire.at, schedule.data.timezone)}
+                        <span className="flex flex-col gap-0.5 whitespace-normal">
+                          <span>
+                            {formatInTimeZone(fire.at, schedule.data.timezone)}
+                          </span>
+                          <span className="text-muted-foreground">
+                            {formatInTimeZone(fire.at, "UTC")}
+                          </span>
+                        </span>
                       </TableCell>
                       <TableCell>
                         {fire.missed ? (

@@ -3,8 +3,8 @@
 import { type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { cancelRestore, cancelRun, changeOwnPassword, createPolicy, createRepository, createSource, createUser, currentSession, deletePolicy, deleteRepository, deleteSource, disablePolicy, enablePolicy, executeRestore, getBackup, getPolicy, getRepository, getRestore, getRun, getSource, getSourceProtection, getUser, health, listAuditLogs, listPolicies, listReplicas, listRepositories, listRestoreLogs, listRestores, listRunLogs, listRuns, listSourceChains, listSources, listUsers, login, logout, type Options, planRestore, preflightSource, previewPolicySchedule, probeRepository, readiness, retryReplica, revokeUserSessions, triggerPolicyRun, updatePolicy, updateRepository, updateSource, updateUser } from '../sdk.gen';
-import type { CancelRestoreData, CancelRestoreError, CancelRestoreResponse, CancelRunData, CancelRunError, CancelRunResponse, ChangeOwnPasswordData, ChangeOwnPasswordError, ChangeOwnPasswordResponse, CreatePolicyData, CreatePolicyError, CreatePolicyResponse, CreateRepositoryData, CreateRepositoryError, CreateRepositoryResponse, CreateSourceData, CreateSourceError, CreateSourceResponse, CreateUserData, CreateUserError, CreateUserResponse, CurrentSessionData, CurrentSessionError, CurrentSessionResponse, DeletePolicyData, DeletePolicyError, DeletePolicyResponse, DeleteRepositoryData, DeleteRepositoryError, DeleteRepositoryResponse, DeleteSourceData, DeleteSourceError, DeleteSourceResponse, DisablePolicyData, DisablePolicyError, DisablePolicyResponse, EnablePolicyData, EnablePolicyError, EnablePolicyResponse, ExecuteRestoreData, ExecuteRestoreError, ExecuteRestoreResponse, GetBackupData, GetBackupError, GetBackupResponse, GetPolicyData, GetPolicyError, GetPolicyResponse, GetRepositoryData, GetRepositoryError, GetRepositoryResponse, GetRestoreData, GetRestoreError, GetRestoreResponse, GetRunData, GetRunError, GetRunResponse, GetSourceData, GetSourceError, GetSourceProtectionData, GetSourceProtectionError, GetSourceProtectionResponse, GetSourceResponse, GetUserData, GetUserError, GetUserResponse, HealthData, HealthError, HealthResponse2, ListAuditLogsData, ListAuditLogsError, ListAuditLogsResponse, ListPoliciesData, ListPoliciesError, ListPoliciesResponse, ListReplicasData, ListReplicasError, ListReplicasResponse, ListRepositoriesData, ListRepositoriesError, ListRepositoriesResponse, ListRestoreLogsData, ListRestoreLogsError, ListRestoreLogsResponse, ListRestoresData, ListRestoresError, ListRestoresResponse, ListRunLogsData, ListRunLogsError, ListRunLogsResponse, ListRunsData, ListRunsError, ListRunsResponse, ListSourceChainsData, ListSourceChainsError, ListSourceChainsResponse, ListSourcesData, ListSourcesError, ListSourcesResponse, ListUsersData, ListUsersError, ListUsersResponse, LoginData, LoginError, LoginResponse, LogoutData, LogoutError, LogoutResponse, PlanRestoreData, PlanRestoreError, PlanRestoreResponse, PreflightSourceData, PreflightSourceError, PreflightSourceResponse, PreviewPolicyScheduleData, PreviewPolicyScheduleError, PreviewPolicyScheduleResponse, ProbeRepositoryData, ProbeRepositoryError, ProbeRepositoryResponse, ReadinessData, ReadinessError, ReadinessResponse, RetryReplicaData, RetryReplicaError, RetryReplicaResponse, RevokeUserSessionsData, RevokeUserSessionsError, RevokeUserSessionsResponse, TriggerPolicyRunData, TriggerPolicyRunError, TriggerPolicyRunResponse, UpdatePolicyData, UpdatePolicyError, UpdatePolicyResponse, UpdateRepositoryData, UpdateRepositoryError, UpdateRepositoryResponse, UpdateSourceData, UpdateSourceError, UpdateSourceResponse, UpdateUserData, UpdateUserError, UpdateUserResponse } from '../types.gen';
+import { cancelRestore, cancelRun, changeOwnPassword, createPolicy, createRepository, createSetup, createSource, createUser, currentSession, deletePolicy, deleteRepository, deleteSource, disablePolicy, enablePolicy, executeRestore, getBackup, getPolicy, getRepository, getRestore, getRun, getSetup, getSource, getSourceProtection, getUser, health, listAuditLogs, listPolicies, listReplicas, listRepositories, listRestoreLogs, listRestores, listRunLogs, listRuns, listSourceChains, listSources, listUsers, login, logout, type Options, planRestore, preflightSource, previewPolicySchedule, probeRepository, readiness, retryReplica, revokeUserSessions, triggerPolicyRun, updatePolicy, updateRepository, updateSource, updateUser } from '../sdk.gen';
+import type { CancelRestoreData, CancelRestoreError, CancelRestoreResponse, CancelRunData, CancelRunError, CancelRunResponse, ChangeOwnPasswordData, ChangeOwnPasswordError, ChangeOwnPasswordResponse, CreatePolicyData, CreatePolicyError, CreatePolicyResponse, CreateRepositoryData, CreateRepositoryError, CreateRepositoryResponse, CreateSetupData, CreateSetupError, CreateSetupResponse, CreateSourceData, CreateSourceError, CreateSourceResponse, CreateUserData, CreateUserError, CreateUserResponse, CurrentSessionData, CurrentSessionError, CurrentSessionResponse, DeletePolicyData, DeletePolicyError, DeletePolicyResponse, DeleteRepositoryData, DeleteRepositoryError, DeleteRepositoryResponse, DeleteSourceData, DeleteSourceError, DeleteSourceResponse, DisablePolicyData, DisablePolicyError, DisablePolicyResponse, EnablePolicyData, EnablePolicyError, EnablePolicyResponse, ExecuteRestoreData, ExecuteRestoreError, ExecuteRestoreResponse, GetBackupData, GetBackupError, GetBackupResponse, GetPolicyData, GetPolicyError, GetPolicyResponse, GetRepositoryData, GetRepositoryError, GetRepositoryResponse, GetRestoreData, GetRestoreError, GetRestoreResponse, GetRunData, GetRunError, GetRunResponse, GetSetupData, GetSetupError, GetSetupResponse, GetSourceData, GetSourceError, GetSourceProtectionData, GetSourceProtectionError, GetSourceProtectionResponse, GetSourceResponse, GetUserData, GetUserError, GetUserResponse, HealthData, HealthError, HealthResponse2, ListAuditLogsData, ListAuditLogsError, ListAuditLogsResponse, ListPoliciesData, ListPoliciesError, ListPoliciesResponse, ListReplicasData, ListReplicasError, ListReplicasResponse, ListRepositoriesData, ListRepositoriesError, ListRepositoriesResponse, ListRestoreLogsData, ListRestoreLogsError, ListRestoreLogsResponse, ListRestoresData, ListRestoresError, ListRestoresResponse, ListRunLogsData, ListRunLogsError, ListRunLogsResponse, ListRunsData, ListRunsError, ListRunsResponse, ListSourceChainsData, ListSourceChainsError, ListSourceChainsResponse, ListSourcesData, ListSourcesError, ListSourcesResponse, ListUsersData, ListUsersError, ListUsersResponse, LoginData, LoginError, LoginResponse, LogoutData, LogoutError, LogoutResponse, PlanRestoreData, PlanRestoreError, PlanRestoreResponse, PreflightSourceData, PreflightSourceError, PreflightSourceResponse, PreviewPolicyScheduleData, PreviewPolicyScheduleError, PreviewPolicyScheduleResponse, ProbeRepositoryData, ProbeRepositoryError, ProbeRepositoryResponse, ReadinessData, ReadinessError, ReadinessResponse, RetryReplicaData, RetryReplicaError, RetryReplicaResponse, RevokeUserSessionsData, RevokeUserSessionsError, RevokeUserSessionsResponse, TriggerPolicyRunData, TriggerPolicyRunError, TriggerPolicyRunResponse, UpdatePolicyData, UpdatePolicyError, UpdatePolicyResponse, UpdateRepositoryData, UpdateRepositoryError, UpdateRepositoryResponse, UpdateSourceData, UpdateSourceError, UpdateSourceResponse, UpdateUserData, UpdateUserError, UpdateUserResponse } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -82,6 +82,45 @@ export const loginMutation = (options?: Partial<Options<LoginData>>): UseMutatio
     const mutationOptions: UseMutationOptions<LoginResponse, LoginError, Options<LoginData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await login({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const getSetupQueryKey = (options?: Options<GetSetupData>) => createQueryKey('getSetup', options);
+
+/**
+ * Read whether one-time administrator setup is required
+ *
+ * Anonymous and read-only. The response contains only a boolean; it never reveals a username, credential, user count, or completion audit.
+ */
+export const getSetupOptions = (options?: Options<GetSetupData>) => queryOptions<GetSetupResponse, GetSetupError, GetSetupResponse, ReturnType<typeof getSetupQueryKey>>({
+    queryFn: async ({ queryKey, signal }) => {
+        const { data } = await getSetup({
+            ...options,
+            ...queryKey[0],
+            signal,
+            throwOnError: true
+        });
+        return data;
+    },
+    queryKey: getSetupQueryKey(options)
+});
+
+/**
+ * Create the first administrator and establish a normal session
+ *
+ * Only an uninitialized, user-free control plane accepts this request. The administrator, success audit, and persistent completion marker commit together. Existing login and password-hash limits, cross-origin protection, and the Secure server-side session remain authoritative.
+ */
+export const createSetupMutation = (options?: Partial<Options<CreateSetupData>>): UseMutationOptions<CreateSetupResponse, CreateSetupError, Options<CreateSetupData>> => {
+    const mutationOptions: UseMutationOptions<CreateSetupResponse, CreateSetupError, Options<CreateSetupData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await createSetup({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

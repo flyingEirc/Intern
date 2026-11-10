@@ -1,9 +1,10 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CopyIcon, RotateCwIcon } from "lucide-react";
+import { useMutation, useQueries, useQueryClient } from "@tanstack/react-query";
+import { ChevronDownIcon, CopyIcon, RotateCwIcon } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
+import { DataPanel } from "@/components/resources/data-panel";
 import { ReplicaStatusBadge } from "@/components/resources/replica-status";
 import {
   ListSkeleton,
@@ -11,6 +12,11 @@ import {
   ResourceError,
 } from "@/components/resources/states";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   Empty,
   EmptyDescription,
@@ -38,8 +44,11 @@ import {
 } from "@/components/ui/table";
 import { toast } from "@/components/ui/toast";
 import { useSession } from "@/hooks/use-session";
-import { retryReplicaMutation } from "@/lib/api/generated/@tanstack/react-query.gen";
-import type { ReplicaStatus } from "@/lib/api/generated/types.gen";
+import {
+  getBackupOptions,
+  retryReplicaMutation,
+} from "@/lib/api/generated/@tanstack/react-query.gen";
+import type { Replica, ReplicaStatus } from "@/lib/api/generated/types.gen";
 import { formatDateTime } from "@/lib/resources/format";
 import { hasPermission } from "@/lib/resources/permissions";
 import {
@@ -48,7 +57,11 @@ import {
   useReplicaQueue,
   useRepositoryChoices,
 } from "@/lib/resources/queries";
-import { replicaStatuses, replicaStatusLabel } from "@/lib/resources/runs";
+import {
+  backupKindText,
+  replicaStatuses,
+  replicaStatusLabel,
+} from "@/lib/resources/runs";
 
 const anyStatus = "any";
 const anyRepository = "any";
@@ -58,11 +71,25 @@ const statusLabels: Record<string, string> = {
   ...replicaStatusLabel,
 };
 
+/**
+ * The retry endpoint resets any row to pending with a fresh attempt budget,
+ * but only a failed copy needs one: queued, copying, uploaded and verified
+ * rows are already on their way to protection.
+ */
+function canRetryReplica(status: ReplicaStatus): boolean {
+  return status === "failed" || status === "exhausted";
+}
+
+function replicaKey(replica: Replica): string {
+  return `${replica.backup_id}:${replica.repository_id}`;
+}
+
 export function ReplicasView() {
   const session = useSession();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState(anyStatus);
   const [repositoryId, setRepositoryId] = useState(anyRepository);
+  const [query, setQuery] = useState("");
   const repositories = useRepositoryChoices();
   const queue = useReplicaQueue({
     status: status === anyStatus ? undefined : (status as ReplicaStatus),
@@ -81,17 +108,41 @@ export function ReplicasView() {
     [anyRepository]: "全部仓库",
     ...Object.fromEntries(repositoryNames),
   };
+  const backupIds = [...new Set(replicas.map((replica) => replica.backup_id))];
+  const backups = useQueries({
+    queries: backupIds.map((id) => getBackupOptions({ path: { id } })),
+  });
+  const backupById = new Map(
+    backupIds.map((id, index) => [id, backups[index]?.data]),
+  );
   const retrying = retry.isPending ? retry.variables : undefined;
+  const visible = replicas.filter((replica) => {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return true;
+    const backup = backupById.get(replica.backup_id);
+    return [
+      backup === undefined ? "" : backupKindText(backup.kind),
+      backup?.completed_at === undefined
+        ? ""
+        : formatDateTime(backup.completed_at),
+      repositoryNames.get(replica.repository_id) ?? "",
+      replicaStatusLabel[replica.status],
+      formatDateTime(replica.verified_at),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(needle);
+  });
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <PageHeader
-        title="副本复制"
-        description="各仓库复制队列的前 200 条，按仓库内的排队顺序。失败与耗尽的副本可以由具备重试权限的账号立即重试。"
+        title="异地副本"
+        description="查看异地备份的复制与校验结果，及时处理失败任务。"
       />
 
       <div className="flex flex-wrap items-end gap-3">
-        <Field className="w-44">
+        <Field className="w-full sm:w-44">
           <FieldLabel htmlFor="replicas-status">状态</FieldLabel>
           <Select
             items={statusLabels}
@@ -115,7 +166,7 @@ export function ReplicasView() {
             </SelectContent>
           </Select>
         </Field>
-        <Field className="w-64">
+        <Field className="w-full sm:w-64">
           <FieldLabel htmlFor="replicas-repository">仓库</FieldLabel>
           <Select
             items={repositoryLabels}
@@ -161,36 +212,54 @@ export function ReplicasView() {
       ) : null}
 
       {replicas.length > 0 ? (
-        <div className="flex flex-col gap-3">
+        <DataPanel
+          title="复制队列"
+          description="查看复制进度与需要处理的任务。"
+          count={visible.length}
+          search={query}
+          onSearch={setQuery}
+        >
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>备份</TableHead>
+                <TableHead>备份点</TableHead>
                 <TableHead>仓库</TableHead>
                 <TableHead>状态</TableHead>
-                <TableHead>尝试</TableHead>
-                <TableHead>下次尝试</TableHead>
-                <TableHead>告警起点</TableHead>
-                <TableHead>错误码</TableHead>
-                <TableHead>FTP 应答</TableHead>
+                <TableHead>校验时间</TableHead>
+                <TableHead>失败详情</TableHead>
                 {canRetry ? <TableHead>操作</TableHead> : null}
               </TableRow>
             </TableHeader>
             <TableBody>
-              {replicas.map((replica) => {
+              {visible.length === 0 ? (
+                <TableRow>
+                  <TableCell
+                    colSpan={canRetry ? 6 : 5}
+                    className="h-20 text-center"
+                  >
+                    没有匹配的记录
+                  </TableCell>
+                </TableRow>
+              ) : null}
+              {visible.map((replica) => {
+                const backup = backupById.get(replica.backup_id);
                 const pending =
                   retrying?.path.id === replica.backup_id &&
                   retrying.path.repository_id === replica.repository_id;
+                const failed =
+                  replica.status === "failed" || replica.status === "exhausted";
+                const point =
+                  backup === undefined
+                    ? null
+                    : `${backupKindText(backup.kind)} · ${formatDateTime(backup.completed_at)}`;
                 return (
-                  <TableRow
-                    key={`${replica.backup_id}:${replica.repository_id}`}
-                  >
+                  <TableRow key={replicaKey(replica)}>
                     <TableCell>
                       <Link
-                        className="font-mono text-xs underline-offset-4 hover:underline"
+                        className="font-medium text-primary underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-ring"
                         href={`/backups/detail?id=${replica.backup_id}`}
                       >
-                        {replica.backup_id}
+                        {point ?? "查看备份点"}
                       </Link>
                     </TableCell>
                     <TableCell>
@@ -200,60 +269,94 @@ export function ReplicasView() {
                     <TableCell>
                       <ReplicaStatusBadge status={replica.status} />
                     </TableCell>
-                    <TableCell>{replica.attempts}</TableCell>
+                    <TableCell>{formatDateTime(replica.verified_at)}</TableCell>
                     <TableCell>
-                      {formatDateTime(replica.next_attempt_at)}
-                    </TableCell>
-                    <TableCell>{formatDateTime(replica.alert_since)}</TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {replica.last_error_code === ""
-                        ? "—"
-                        : replica.last_error_code}
-                    </TableCell>
-                    <TableCell>
-                      {replica.last_reply_code === 0
-                        ? "—"
-                        : replica.last_reply_code}
+                      {failed ? (
+                        <Collapsible>
+                          <CollapsibleTrigger
+                            render={<Button variant="ghost" size="sm" />}
+                          >
+                            查看失败详情
+                            <ChevronDownIcon data-icon="inline-end" />
+                          </CollapsibleTrigger>
+                          <CollapsibleContent>
+                            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                              <dt className="text-muted-foreground">
+                                尝试次数
+                              </dt>
+                              <dd>{replica.attempts}</dd>
+                              <dt className="text-muted-foreground">
+                                下次尝试
+                              </dt>
+                              <dd>{formatDateTime(replica.next_attempt_at)}</dd>
+                              <dt className="text-muted-foreground">
+                                告警起点
+                              </dt>
+                              <dd>{formatDateTime(replica.alert_since)}</dd>
+                              <dt className="text-muted-foreground">错误码</dt>
+                              <dd className="font-mono">
+                                {replica.last_error_code === ""
+                                  ? "—"
+                                  : replica.last_error_code}
+                              </dd>
+                              <dt className="text-muted-foreground">
+                                FTP 应答
+                              </dt>
+                              <dd>
+                                {replica.last_reply_code === 0
+                                  ? "—"
+                                  : replica.last_reply_code}
+                              </dd>
+                            </dl>
+                          </CollapsibleContent>
+                        </Collapsible>
+                      ) : (
+                        "—"
+                      )}
                     </TableCell>
                     {canRetry ? (
                       <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={retry.isPending}
-                          onClick={() =>
-                            retry.mutate(
-                              {
-                                path: {
-                                  id: replica.backup_id,
-                                  repository_id: replica.repository_id,
+                        {canRetryReplica(replica.status) ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={retry.isPending}
+                            onClick={() =>
+                              retry.mutate(
+                                {
+                                  path: {
+                                    id: replica.backup_id,
+                                    repository_id: replica.repository_id,
+                                  },
                                 },
-                              },
-                              {
-                                onSuccess: () => {
-                                  invalidateReplicas(queryClient);
-                                  invalidateBackup(
-                                    queryClient,
-                                    replica.backup_id,
-                                  );
-                                  toast.add({
-                                    type: "success",
-                                    title: "已安排重试",
-                                    description:
-                                      "副本已回到等待复制，尝试次数已清零。",
-                                  });
+                                {
+                                  onSuccess: () => {
+                                    invalidateReplicas(queryClient);
+                                    invalidateBackup(
+                                      queryClient,
+                                      replica.backup_id,
+                                    );
+                                    toast.add({
+                                      type: "success",
+                                      title: "已安排重试",
+                                      description:
+                                        "副本已回到等待复制，尝试次数已清零。",
+                                    });
+                                  },
                                 },
-                              },
-                            )
-                          }
-                        >
-                          {pending ? (
-                            <Spinner data-icon="inline-start" />
-                          ) : (
-                            <RotateCwIcon data-icon="inline-start" />
-                          )}
-                          重试
-                        </Button>
+                              )
+                            }
+                          >
+                            {pending ? (
+                              <Spinner data-icon="inline-start" />
+                            ) : (
+                              <RotateCwIcon data-icon="inline-start" />
+                            )}
+                            重试
+                          </Button>
+                        ) : (
+                          "—"
+                        )}
                       </TableCell>
                     ) : null}
                   </TableRow>
@@ -262,12 +365,11 @@ export function ReplicasView() {
             </TableBody>
           </Table>
           {retry.isError ? (
-            <ResourceError title="重试失败" error={retry.error} />
+            <div className="p-4">
+              <ResourceError title="重试失败" error={retry.error} />
+            </div>
           ) : null}
-          <p className="text-sm text-muted-foreground">
-            队列接口只返回有限的一页，没有继续向后翻页的游标。
-          </p>
-        </div>
+        </DataPanel>
       ) : null}
     </div>
   );

@@ -17,7 +17,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,9 +25,9 @@ import (
 	"time"
 
 	client "github.com/jlaffaye/ftp"
-	_ "modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
 	"github.com/flyingEirc/Intern/internal/storage/ftp"
@@ -63,10 +62,15 @@ func newLayout(t *testing.T) layout {
 	if !filepath.IsAbs(root) {
 		t.Fatal("the worker requires an absolute private fixture root")
 	}
+	dsn := os.Getenv("INTERN_R1_DATABASE_URL")
+	if dsn == "" {
+		dsn = pgtest.New(t)
+		t.Setenv("INTERN_R1_DATABASE_URL", dsn)
+	}
 	return layout{
 		root: root, key: filepath.Join(root, "keys", "intern.key"),
 		wrongKey: filepath.Join(root, "keys", "wrong.key"), work: filepath.Join(root, "work"),
-		repo: filepath.Join(root, "repo"), db: filepath.Join(root, "intern.db"),
+		repo: filepath.Join(root, "repo"), db: dsn,
 		manifest: filepath.Join(root, "produced.json"),
 	}
 }
@@ -129,6 +133,7 @@ func withhold(message string) string {
 
 func requireNative(t *testing.T) {
 	t.Helper()
+	pgtest.RequireDSN(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("native Linux amd64 worker required")
 	}
@@ -137,19 +142,10 @@ func requireNative(t *testing.T) {
 	}
 }
 
-// openDB opens the shared control-plane database with the web store pragmas.
-func openDB(t *testing.T, name string, migrate bool) *sql.DB {
+// openDB shares one real PostgreSQL database across fixture subprocesses.
+func openDB(t *testing.T, dsn string, migrate bool) *sql.DB {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: name}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	must(t, err)
-	db.SetMaxOpenConns(1)
+	db := pgtest.OpenDSN(t, dsn)
 	if migrate {
 		must(t, physicalstore.Migrate(t.Context(), db))
 		must(t, replication.Migrate(t.Context(), db))
@@ -319,14 +315,14 @@ func (w *worker) count(t *testing.T, query string, args ...any) int {
 }
 
 func (w *worker) partRows(t *testing.T, repositoryID string) int {
-	return w.count(t, "SELECT COUNT(*) FROM replica_parts WHERE repository_id = ?", repositoryID)
+	return w.count(t, "SELECT COUNT(*) FROM replica_parts WHERE repository_id = $1", repositoryID)
 }
 
 // memberStatuses returns the per-member state of one replica.
 func (w *worker) memberStatuses(t *testing.T, backupID, repositoryID string) map[string]string {
 	t.Helper()
 	rows, err := w.db.QueryContext(t.Context(),
-		"SELECT member, status FROM replica_members WHERE backup_id = ? AND repository_id = ?", backupID, repositoryID)
+		"SELECT member, status FROM replica_members WHERE backup_id = $1 AND repository_id = $2", backupID, repositoryID)
 	must(t, err)
 	defer func() { must(t, rows.Close()) }()
 	result := make(map[string]string, len(members))
@@ -344,7 +340,7 @@ func (w *worker) alertSince(t *testing.T, repositoryID, backupID string) *time.T
 	t.Helper()
 	var value sql.NullString
 	err := w.db.QueryRowContext(t.Context(),
-		"SELECT alert_since FROM replicas WHERE backup_id = ? AND repository_id = ?", backupID, repositoryID).Scan(&value)
+		"SELECT alert_since FROM replicas WHERE backup_id = $1 AND repository_id = $2", backupID, repositoryID).Scan(&value)
 	must(t, err)
 	if !value.Valid {
 		return nil

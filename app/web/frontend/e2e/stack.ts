@@ -12,7 +12,7 @@
 //     Pure-FTPd 1.0.54 tarball and the same configure flags (e2e/fixtures),
 //     serving an explicit-TLS listener and the IMPLICIT_TLS build.
 //
-// Nothing is simulated: the API, the metadata SQLite file, MySQL 8.4.11,
+// Nothing is simulated: the API, the PostgreSQL control plane, MySQL 8.4.11,
 // Percona XtraBackup 8.4.0-7 and the FTP servers are the real binaries named by
 // internal/physical/compat.json.
 //
@@ -107,9 +107,9 @@
 // startStack() builds the image (or reuses one), starts the stack, waits for the
 // healthchecks, creates the 'intern_bkp'@'localhost' backup account with the
 // grants from the control-plane roadmap section 3.2, creates the first admin
-// through `intern-web user create-admin --password-stdin`, and also starts a
-// second intern container without a KEK (own metadata volume, same image) for
-// the 503 "not configured" acceptance cases. stop() removes every container,
+// through browser setup or POST /auth/setup, and also starts a second intern
+// container without a KEK (independent PostgreSQL database) for the 503
+// "not configured" acceptance cases. stop() removes every container,
 // volume, network and temporary file the call created; images stay in the local
 // cache because they are reused across runs.
 //
@@ -148,6 +148,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { makeApi } from "./harness";
 
 /** A running real-component stack. All paths are as seen inside the intern container. */
 export type Stack = {
@@ -243,6 +244,8 @@ export type ExportedMysql = {
 export type StackOptions = {
   /** A linux/amd64 image already built from app/web/deploy/Dockerfile. Skips the build. */
   reuseImage?: string;
+  /** Leave the main database uninitialized for the UI-only first-run journey. */
+  setupInBrowser?: boolean;
 };
 
 const repo = path.resolve(import.meta.dir, "../../../..");
@@ -485,9 +488,9 @@ function prepareSecretsVolume(
   createVolume("create secrets volume", volume, project);
   const script = [
     "set -eu",
-    "cp /in/intern_kek /in/intern_tls_cert /in/intern_tls_key /in/ca.pem /out/",
-    "chown 999:999 /out/intern_kek /out/intern_tls_cert /out/intern_tls_key /out/ca.pem",
-    "chmod 0600 /out/intern_kek /out/intern_tls_key",
+    "cp /in/intern_kek /in/intern_tls_cert /in/intern_tls_key /in/ca.pem /in/intern_database_url /in/intern_nokek_database_url /out/",
+    "chown 999:999 /out/*",
+    "chmod 0600 /out/intern_kek /out/intern_tls_key /out/intern_database_url /out/intern_nokek_database_url",
     "chmod 0644 /out/intern_tls_cert /out/ca.pem",
   ].join("\n");
   docker("populate secrets volume", [
@@ -746,6 +749,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   ];
 
   const mysqlRootPassword = randomSecret();
+  const postgresPassword = randomSecret();
   const backupPassword = randomSecret();
   const admin = { username: "e2e-admin", password: randomSecret() };
   const ftpPassword = randomSecret();
@@ -855,6 +859,21 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     must("generate KEK", [cli, "keygen", "--key-file", kekPath], { cwd: repo });
     chmodSync(kekPath, 0o600);
     generateTls(secretsDir, compat.mysql_image);
+    writeFileSync(
+      path.join(secretsDir, "intern_postgres_password"),
+      `${postgresPassword}\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      path.join(secretsDir, "intern_database_url"),
+      `postgres://intern:${encodeURIComponent(postgresPassword)}@postgres:5432/intern?sslmode=disable\n`,
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      path.join(secretsDir, "intern_nokek_database_url"),
+      `postgres://intern:${encodeURIComponent(postgresPassword)}@postgres:5432/intern_nokek?sslmode=disable\n`,
+      { mode: 0o600 },
+    );
 
     writeFileSync(plainPasswordFile, `${ftpPassword}\n${ftpPassword}\n`, {
       mode: 0o600,
@@ -953,6 +972,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       "    # test-only host adaptation, not a deployment change.",
       "    blkio_config: !reset null",
       "    environment:",
+      "      INTERN_DATABASE_URL_FILE: /run/intern-secrets/intern_database_url",
       "      INTERN_KEK_FILE: /run/intern-secrets/intern_kek",
       "      INTERN_TLS_CERT_FILE: /run/intern-secrets/intern_tls_cert",
       "      INTERN_TLS_KEY_FILE: /run/intern-secrets/intern_tls_key",
@@ -1008,6 +1028,8 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       `INTERN_PXB_IMAGE=${compat.pxb_image}`,
       `INTERN_VERSION=${tagComponent}`,
       `INTERN_SOURCE_SHA=${sourceSha}`,
+      `INTERN_POSTGRES_PASSWORD_FILE=${path.join(secretsDir, "intern_postgres_password")}`,
+      `INTERN_DATABASE_URL_FILE=${path.join(secretsDir, "intern_database_url")}`,
       "INTERN_HOST_PORT=0",
       `INTERN_KEK_FILE_HOST=${path.join(secretsDir, "intern_kek")}`,
       `INTERN_TLS_CERT_HOST=${path.join(secretsDir, "intern_tls_cert")}`,
@@ -1068,6 +1090,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     };
     await Promise.all([
       serviceHealth("mysql", 300_000),
+      serviceHealth("postgres", 120_000),
       serviceHealth("ftp", 120_000),
       serviceHealth("ftps", 120_000),
       serviceHealth("intern", 300_000),
@@ -1108,21 +1131,26 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
     );
 
     // ------------------------------------------------------------- first admin ---
-    composeMust(
-      "create first admin",
-      [
-        "exec",
-        "-T",
-        "intern",
-        "intern-web",
-        "user",
-        "create-admin",
-        "--username",
-        admin.username,
-        "--password-stdin",
-      ],
-      { input: `${admin.password}\n` },
-    );
+    if (!options.setupInBrowser) {
+      const initialized = await makeApi(origin)(
+        "POST",
+        "/api/v1/auth/setup",
+        undefined,
+        admin,
+      );
+      if (initialized.status !== 201) {
+        throw new Error(`main setup returned ${initialized.status}`);
+      }
+    }
+    composeMust("create isolated no-KEK database", [
+      "exec",
+      "-T",
+      "postgres",
+      "createdb",
+      "-U",
+      "intern",
+      "intern_nokek",
+    ]);
 
     // ------------------------------------------------------- KEK-less instance ---
     createVolume("create no-KEK metadata volume", noKekVolume, project);
@@ -1137,12 +1165,16 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       "999:999",
       "--label",
       `${projectLabel}=${project}`,
+      "--network",
+      `${project}_default`,
       "--publish",
       "127.0.0.1::8443",
       "--env",
       "INTERN_LISTEN=0.0.0.0:8443",
       "--env",
       "INTERN_METADATA_DIR=/var/lib/intern/metadata",
+      "--env",
+      "INTERN_DATABASE_URL_FILE=/run/intern-secrets/intern_nokek_database_url",
       "--env",
       "INTERN_TLS_CERT_FILE=/run/intern-secrets/intern_tls_cert",
       "--env",
@@ -1162,22 +1194,16 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
           .code === 0,
       180_000,
     );
-    docker(
-      "create no-KEK admin",
-      [
-        "exec",
-        "-i",
-        noKekName,
-        "intern-web",
-        "user",
-        "create-admin",
-        "--username",
-        noKekAdmin.username,
-        "--password-stdin",
-      ],
-      { input: `${noKekAdmin.password}\n` },
-    );
     const noKekOrigin = `https://127.0.0.1:${portOfContainer(noKekName, "8443")}`;
+    const initializedNoKek = await makeApi(noKekOrigin)(
+      "POST",
+      "/api/v1/auth/setup",
+      undefined,
+      noKekAdmin,
+    );
+    if (initializedNoKek.status !== 201) {
+      throw new Error(`no-KEK setup returned ${initializedNoKek.status}`);
+    }
 
     const caBundlePem = readFileSync(path.join(secretsDir, "ca.pem"), "utf8");
 

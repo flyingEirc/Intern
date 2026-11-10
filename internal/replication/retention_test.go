@@ -5,15 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
@@ -44,7 +42,7 @@ func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	dir := t.TempDir()
 	f := &fixture{t: t, root: filepath.Join(dir, "objects"), now: time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)}
-	f.db = openDatabase(t, filepath.Join(dir, "intern.db"))
+	f.db = pgtest.Open(t)
 	if err := store.Migrate(t.Context(), f.db); err != nil {
 		t.Fatal(err)
 	}
@@ -55,24 +53,6 @@ func newFixture(t *testing.T) *fixture {
 	f.repo = openRepository(t, f.root)
 	f.r = f.replicator(f.repo)
 	return f
-}
-
-func openDatabase(t *testing.T, name string) *sql.DB {
-	t.Helper()
-	u := url.URL{Scheme: "file", Path: name}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	return db
 }
 
 func openRepository(t *testing.T, root string) *local.Repository {
@@ -207,7 +187,7 @@ func (f *fixture) verify(backups ...string) {
 		stamp := f.now.Format("2006-01-02T15:04:05.000000000Z")
 		_, err := f.db.ExecContext(f.t.Context(), `INSERT INTO replicas
 (backup_id, repository_id, local_repository_id, idem_key, status, attempts, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, 'verified', 1, ?, ?, ?, ?, ?)
+VALUES ($1, $2, $3, $4, 'verified', 1, $5, $6, $7, $8, $9)
 ON CONFLICT(backup_id, repository_id) DO UPDATE SET status = 'verified', verified_at = excluded.verified_at`,
 			backupID, testRepositoryID, testLocalRepository, "replicate:"+backupID+":"+testRepositoryID,
 			stamp, stamp, stamp, stamp, stamp)
@@ -575,7 +555,7 @@ func assertRetainedReservation(t *testing.T, f *fixture, chain testChain) {
 	var code sql.NullString
 	for _, row := range reserved {
 		err = f.db.QueryRowContext(t.Context(),
-			"SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = ?", row.ID).Scan(&attempts, &code)
+			"SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = $1", row.ID).Scan(&attempts, &code)
 		if err != nil || attempts != 1 || code.String != "cleanup_failed" {
 			t.Fatalf("reservation retry state = %d %q %v", attempts, code.String, err)
 		}
@@ -656,8 +636,8 @@ func TestDeleteLocalChainReportsAStatusReadFailure(t *testing.T) {
 func rebindReplicas(t *testing.T, f *fixture, chain testChain, localRepositoryID string) {
 	t.Helper()
 	for _, backupID := range chain.backups {
-		if _, err := f.db.ExecContext(t.Context(), `UPDATE replicas SET local_repository_id = ?
-WHERE backup_id = ? AND repository_id = ?`, localRepositoryID, backupID, testRepositoryID); err != nil {
+		if _, err := f.db.ExecContext(t.Context(), `UPDATE replicas SET local_repository_id = $1
+WHERE backup_id = $2 AND repository_id = $3`, localRepositoryID, backupID, testRepositoryID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -670,7 +650,7 @@ func assertReplicaBinding(t *testing.T, f *fixture, chain testChain, localReposi
 	for _, backupID := range chain.backups {
 		var bound string
 		if err := f.db.QueryRowContext(t.Context(), `SELECT local_repository_id FROM replicas
-WHERE backup_id = ? AND repository_id = ?`, backupID, testRepositoryID).Scan(&bound); err != nil {
+WHERE backup_id = $1 AND repository_id = $2`, backupID, testRepositoryID).Scan(&bound); err != nil {
 			t.Fatal(err)
 		}
 		if bound != localRepositoryID {

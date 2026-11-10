@@ -8,26 +8,18 @@
 // Screenshots go to DIR (default <repo>/.cache/e2e/<commit>) with a
 // manifest.json listing each step. Test passwords are random per run and are
 // never written to the evidence.
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { once } from "node:events";
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
   zCreateUserResponse,
   zErrorResponse,
 } from "../lib/api/generated/zod.gen";
+import { startNative, stopOnSignal } from "./harness";
 
 const repo = path.resolve(import.meta.dir, "../../../..");
-const binary = path.join(repo, "bin/intern-web");
 const args = process.argv.slice(2);
 const headed = args.includes("--headed");
 const commit =
@@ -67,25 +59,9 @@ function expect(condition: boolean, message: string): void {
 
 // ---------------------------------------------------------------- server ---
 
-const work = mkdtempSync(path.join(tmpdir(), "intern-f1-e2e-"));
-const metadata = path.join(work, "metadata");
-mkdirSync(metadata, { mode: 0o700 });
-chmodSync(metadata, 0o700);
-const port = 20_000 + Math.floor(Math.random() * 20_000);
-const origin = `http://127.0.0.1:${port}`;
-
-function run(command: string[], input?: string): string {
-  const result = spawnSync(command[0], command.slice(1), {
-    input,
-    encoding: "utf8",
-  });
-  if (result.status !== 0) {
-    fail(
-      `${command.slice(0, 3).join(" ")} exited ${result.status}: ${result.stderr.trim()}`,
-    );
-  }
-  return result.stdout;
-}
+const native = await startNative({ setupInBrowser: true });
+const origin = native.origin;
+stopOnSignal(native.stop);
 
 const password = () => `e2e-${randomBytes(12).toString("base64url")}`;
 const adminPassword = password();
@@ -94,47 +70,6 @@ const operator = {
   password: password(),
   newPassword: password(),
 };
-
-run([binary, "migrate", "up", "--metadata-dir", metadata]);
-run(
-  [
-    binary,
-    "user",
-    "create-admin",
-    "--username",
-    "e2e-admin",
-    "--metadata-dir",
-    metadata,
-    "--password-stdin",
-  ],
-  `${adminPassword}\n`,
-);
-const server = spawn(
-  binary,
-  ["serve", "--metadata-dir", metadata, "--listen", `127.0.0.1:${port}`],
-  {
-    stdio: ["ignore", "ignore", "pipe"],
-  },
-);
-let serverLog = "";
-server.stderr.on("data", (chunk: Buffer) => {
-  serverLog += chunk.toString();
-});
-
-async function waitReady(): Promise<void> {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`${origin}/readyz`)).status === 200) {
-        return;
-      }
-    } catch {
-      // Not listening yet.
-    }
-    await Bun.sleep(100);
-  }
-  fail(`intern-web did not become ready:\n${serverLog}`);
-}
 
 // ------------------------------------------------------------------- API ---
 
@@ -270,8 +205,26 @@ async function staticChecks(): Promise<void> {
 
 async function main(): Promise<void> {
   mkdirSync(evidence, { recursive: true });
-  await waitReady();
   await staticChecks();
+  ab("set", "viewport", "1440", "900");
+  ab("open", `${origin}/login`);
+  ab("wait", "--text", "创建首位管理员");
+  ab("find", "label", "管理员用户名", "fill", "e2e-admin");
+  ab("find", "label", "设置密码", "fill", adminPassword);
+  ab("find", "label", "确认密码", "fill", adminPassword);
+  ab("find", "role", "button", "click", "--name", "创建管理员并进入控制台");
+  ab("wait", "--text", "数据保护概览");
+  record({
+    id: "00-browser-setup",
+    acceptance: "S1/U3",
+    description:
+      "first administrator created only through the browser on a real PG-backed Web server",
+    screenshot: shot("00-browser-setup"),
+  });
+  ab("find", "role", "button", "click", "--name", "账户菜单");
+  ab("wait", "--text", "退出登录");
+  ab("find", "role", "menuitem", "click", "--name", "退出登录");
+  ab("wait", "--text", "使用 Intern 账号登录控制台");
 
   const admin = await apiLogin("e2e-admin", adminPassword);
   expect(admin.status === 200 && admin.cookie !== undefined, "admin API login");
@@ -324,22 +277,26 @@ async function main(): Promise<void> {
   });
 
   ab("find", "role", "link", "click", "--name", "概览");
-  ab("wait", "--text", "有效权限");
+  ab("wait", "--text", "数据保护概览");
   ab("wait", "--text", "就绪");
   const overview = ab("get", "text", "body");
   expect(
     overview.includes(operator.username) && overview.includes("操作员"),
     "overview shows the operator",
   );
+  ab("find", "role", "link", "click", "--name", "账户与密码");
+  ab("wait", "--text", "有效权限");
+  ab("find", "role", "button", "click", "--name", "有效权限");
+  const account = ab("get", "text", "body");
   expect(
-    overview.includes("runs:trigger") && !overview.includes("users:manage"),
+    account.includes("runs:trigger") && !account.includes("users:manage"),
     "operator permissions only",
   );
   record({
     id: "04-overview",
     acceptance: "F1-A5",
     description:
-      "overview renders the session user, role, effective permissions and /readyz",
+      "overview shows readiness and the account page shows the session user, role and effective permissions",
     screenshot: shot("04-overview"),
   });
 
@@ -397,7 +354,7 @@ async function main(): Promise<void> {
   const newLogin = await apiLogin(operator.username, operator.newPassword);
   expect(newLogin.status === 200, `new password answers ${newLogin.status}`);
   ab("find", "role", "link", "click", "--name", "概览");
-  ab("wait", "--text", "有效权限");
+  ab("wait", "--text", "数据保护概览");
   expect(
     url() === `${origin}/`,
     "the rotated session still reaches the console",
@@ -408,7 +365,7 @@ async function main(): Promise<void> {
   ab("open", `${origin}/account`);
   ab("wait", "--text", "确认新密码");
   ab("open", `${origin}/`);
-  ab("wait", "--text", "有效权限");
+  ab("wait", "--text", "数据保护概览");
   const cookies = z
     .object({
       data: z.object({
@@ -483,9 +440,5 @@ try {
   spawnSync("agent-browser", ["--session", session, "close"], {
     encoding: "utf8",
   });
-  server.kill("SIGTERM");
-  if (server.exitCode === null) {
-    await once(server, "exit");
-  }
-  rmSync(work, { recursive: true, force: true });
+  await native.stop();
 }

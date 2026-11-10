@@ -42,7 +42,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
     "D1-A1 built tag=", "D1-A1 repeatable=true", "D1-A1 bases_pinned=true",
     "D1-A1 runtime_downloads=0", "D1-A1 non_root=true", "D1-A1 versions ",
     "D1-A1 gpl files=", "D1-A1 compose_pins=true",
-    "D1-A2 identity daemon=linux/", "D1-A2 stack=healthy", "D1-A2 create_admin=created",
+    "D1-A2 identity daemon=linux/", "D1-A2 stack=healthy", "D1-A2 setup=created",
     "D1-A2 https=verified plaintext=refused untrusted_ca=refused",
     "D1-A2 datadir_ro=refused metadata_dir=0700 owner=999:999",
     "D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true",
@@ -83,14 +83,14 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999")) and
   ($output | test("D1-A1 versions mysqld=8\\.4\\.11 xtrabackup=8\\.4\\.0-7 xbstream=8\\.4\\.0-7 matrix_server=8\\.4\\.11 matrix_tool=8\\.4\\.0-7 match=true")) and
   ($output | test("D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=[1-9][0-9]* pxb_gpl=[1-9][0-9]* source_sha_bound=true procps_lgpl=[1-9][0-9]* procps_named=[1-9][0-9]* go_modules=([1-9][0-9]*) go_license_texts=\\1 copied_objects=[1-9][0-9]* matrix=8\\.4\\.11,8\\.4\\.0-7")) and
-  ($output | test("D1-A1 compose_pins=true compose=app/web/deploy/compose\\.yaml env_example=app/web/deploy/\\.env\\.example dockerfile=app/web/deploy/Dockerfile matrix_images=2")) and
+  ($output | test("D1-A1 compose_pins=true compose=app/web/deploy/compose\\.yaml env_example=app/web/deploy/\\.env\\.example dockerfile=app/web/deploy/Dockerfile matrix_images=2 postgres_pin=true")) and
   # The stack: the repository Compose file, native amd64, the deployment health
   # entry point, the administrator bootstrap, verified TLS, the read-only datadir
   # and the file-secret KEK that is really read.
   ($output | test("D1-A2 identity daemon=linux/(x86_64|amd64) platform=linux/amd64 compose=[0-9]+\\.[0-9]+\\.[0-9]+ project=d1[0-9a-f]+")) and
-  ($output | test("D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=d1[0-9a-f]+ mysql=[0-9a-f]{12,64} intern=[0-9a-f]{12,64} api=https://127\\.0\\.0\\.1:[1-9][0-9]* mysql_port=[1-9][0-9]* healthcheck=intern-web")) and
-  ($output | test("D1-A2 create_admin=created user=d1-admin login=200 negotiated=1\\.[23] stdin=true")) and
-  ($output | test("D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true container_user=999:999")) and
+  ($output | test("D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=d1[0-9a-f]+ mysql=[0-9a-f]{12,64} intern=[0-9a-f]{12,64} api=https://127\\.0\\.0\\.1:[1-9][0-9]* mysql_port=[1-9][0-9]* healthcheck=intern-web postgres=[0-9a-f]{12,64}")) and
+  ($output | test("D1-A2 setup=created user=d1-admin status=201 session=200 negotiated=1\\.[23] once=true")) and
+  ($output | test("D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true database_url_secret=0600 database_url_digest_bound=true container_user=999:999")) and
   ($output | test("D1-A2 socket=preflight_passed checks=[1-9][0-9]* source=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} repository=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} sealed=true")) and
   ($output | test("D1-A2 identity [^\\n]*project=(d1[0-9a-f]+)[\\s\\S]*D1-A2 stack=healthy compose_file=app/web/deploy/compose\\.yaml project=\\1")) and
   # The KEK line and the stack line name the same MySQL container; the harness
@@ -117,11 +117,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("D1-A4 recreate instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] chain_members=[2-9][0-9]* a3_pair_readable=true restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
   ($output | test("D1-A4 upgrade instance_id=[0-9a-zA-Z_-]{8,} login=1\\.[23] chain_members=[2-9][0-9]* a3_pair_readable=true restores=1 incremental=[0-9a-f]{32} migration=ready kek_digest_bound=true volumes=[1-9][0-9]*")) and
   ($output | test("D1-A4 upgrade from=intern:[0-9a-f]{12}(?:-dirty)?-mysql8\\.4 to=intern:[0-9a-f]{12}(?:-dirty)?-upgrade-mysql8\\.4 source_label=([0-9a-f]{40})-upgrade previous_label=\\1 labels_differ=true")) and
-  ($output | test("D1-A4 kek=preserved volumes=metadata,backups,work instance_id=[0-9a-zA-Z_-]{8,}")) and
-  # Guardrails: one owner per metadata volume, a KEK that must exist and be
+  ($output | test("D1-A4 kek=preserved volumes=postgres,metadata,backups,work instance_id=[0-9a-zA-Z_-]{8,}")) and
+  # Guardrails: one owner per PostgreSQL database, a KEK that must exist and be
   # private, and a SIGTERM that lands strictly inside the declared grace period
   # without ever producing a completed run.
-  ($output | test("D1-A5 second_container=refused flock_text=true exit=[1-9][0-9]* primary_healthy=true primary_api=200")) and
+  ($output | test("D1-A5 second_container=refused pg_owner_lock=true different_metadata_dir=true exit=[1-9][0-9]* primary_healthy=true primary_api=200")) and
   ($output | test("D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true")) and
   ($output | test("D1-A5 sigterm run=[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12} observed_running=true grace_seconds=1[0-9][0-9] stop_seconds=([0-9]|[1-8][0-9]) exit_code=0 oom_killed=false")) and
   ($output | test("D1-A5 no_false_completed=true run_status=failed error_class=backup_failed backup_id=none completed_runs_before=([0-9]+) completed_runs_after=\\1")) and
@@ -137,5 +137,6 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("exit_code=137") | not) and
   ($output | test("run_status=completed") | not) and
   ($output | test("migration=(pending|failed)") | not) and
-  ($output | test("image_user=0|container_uid=0|daemon=linux/arm64|api=http://|mode=0[0-7][1-9][0-9]|digest_bound=false|sealed=false|rehearsal=false|flock_text=false|primary_healthy=false|layers_equal=false|network_none=false|runtime_downloads=[1-9]") | not)
+  ($output | test("postgres_pin=false|database_url_digest_bound=false|database_url_secret=0[0-7][1-9][0-9]") | not) and
+  ($output | test("image_user=0|container_uid=0|daemon=linux/arm64|api=http://|mode=0[0-7][1-9][0-9]|digest_bound=false|sealed=false|rehearsal=false|pg_owner_lock=false different_metadata_dir=true|primary_healthy=false|layers_equal=false|network_none=false|runtime_downloads=[1-9]") | not)
 ' "$1"

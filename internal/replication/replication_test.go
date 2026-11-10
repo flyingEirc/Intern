@@ -3,6 +3,7 @@ package replication
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,7 +42,7 @@ func TestEnqueueIsIdempotent(t *testing.T) {
 func TestEnqueueRefusesUncompletedOrAbsentPayload(t *testing.T) {
 	f := newEngine(t)
 	record := f.newBackup(engineSourceID, 0)
-	if _, err := f.db.ExecContext(t.Context(), "UPDATE backups SET local_present = 0 WHERE id = ?", record.id); err != nil {
+	if _, err := f.db.ExecContext(t.Context(), "UPDATE backups SET local_present = 0 WHERE id = $1", record.id); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.r.Enqueue(t.Context(), record.id); err == nil {
@@ -381,7 +382,7 @@ func assertPartsRecordedBeforeWrite(t *testing.T, f *engineFixture) {
 	t.Helper()
 	f.remote.onWrite = func(part string) {
 		var rows int
-		if err := f.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replica_parts WHERE part = ?", part).Scan(&rows); err != nil {
+		if err := f.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM replica_parts WHERE part = $1", part).Scan(&rows); err != nil {
 			t.Errorf("part lookup: %v", err)
 		}
 		if rows != 1 {
@@ -400,7 +401,7 @@ func assertInterruptedUploadRecovers(t *testing.T, f *engineFixture) {
 	if err := f.r.Enqueue(t.Context(), interrupted.id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.ExecContext(t.Context(), "UPDATE replicas SET status = 'uploading' WHERE backup_id = ?", interrupted.id); err != nil {
+	if _, err := f.db.ExecContext(t.Context(), "UPDATE replicas SET status = 'uploading' WHERE backup_id = $1", interrupted.id); err != nil {
 		t.Fatal(err)
 	}
 	part := ".intern-upload-000000000000000000000000000000ff.part"
@@ -408,7 +409,7 @@ func assertInterruptedUploadRecovers(t *testing.T, f *engineFixture) {
 	f.remote.parts[part] = []byte("partial")
 	f.remote.mu.Unlock()
 	if _, err := f.db.ExecContext(t.Context(), `INSERT INTO replica_parts (backup_id, repository_id, member, part, created_at)
-VALUES (?, ?, 'payload.bin', ?, '2026-10-26T09:00:00.000000000Z')`, interrupted.id, engineRepoID, part); err != nil {
+VALUES ($1, $2, 'payload.bin', $3, '2026-10-26T09:00:00.000000000Z')`, interrupted.id, engineRepoID, part); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.r.Recover(t.Context()); err != nil {
@@ -553,7 +554,7 @@ func TestPointsFollowTheirOwnPrefixes(t *testing.T) {
 // verified prefix even when a later item is verified.
 func assertGapStopsRemotePoint(t *testing.T, f *engineFixture, predecessor backupRecord) {
 	t.Helper()
-	if _, err := f.db.ExecContext(t.Context(), "UPDATE replicas SET status = 'failed' WHERE backup_id = ?", predecessor.id); err != nil {
+	if _, err := f.db.ExecContext(t.Context(), "UPDATE replicas SET status = 'failed' WHERE backup_id = $1", predecessor.id); err != nil {
 		t.Fatal(err)
 	}
 	point, err := f.r.RemotePoint(t.Context(), engineSourceID)
@@ -577,7 +578,7 @@ func TestLocalPointStopsAtAnIncompleteMember(t *testing.T) {
 	f := newEngine(t)
 	first := f.newBackup(engineSourceID, 0)
 	second := f.newBackup(engineSourceID, 1)
-	if _, err := f.db.ExecContext(t.Context(), "UPDATE backups SET status = 'running', completed_at = NULL WHERE id = ?", second.id); err != nil {
+	if _, err := f.db.ExecContext(t.Context(), "UPDATE backups SET status = 'running', completed_at = NULL WHERE id = $1", second.id); err != nil {
 		t.Fatal(err)
 	}
 	point, err := LocalPoint(t.Context(), f.store, engineSourceID)
@@ -743,14 +744,14 @@ func TestRemotePointRequiresTheChainFromItsFirstMember(t *testing.T) {
 	// An intermediate member missing from the repository stops the prefix at
 	// the member before it.
 	if _, err := f.db.ExecContext(t.Context(),
-		`DELETE FROM replicas WHERE backup_id = ? AND repository_id = ?`, middle.id, engineRepoID); err != nil {
+		`DELETE FROM replicas WHERE backup_id = $1 AND repository_id = $2`, middle.id, engineRepoID); err != nil {
 		t.Fatal(err)
 	}
 	assertRemotePoint(t, f, base)
 
 	// Without the base too, the chain is absent from seq 1: nothing is claimed.
 	if _, err := f.db.ExecContext(t.Context(),
-		`DELETE FROM replicas WHERE backup_id = ? AND repository_id = ?`, base.id, engineRepoID); err != nil {
+		`DELETE FROM replicas WHERE backup_id = $1 AND repository_id = $2`, base.id, engineRepoID); err != nil {
 		t.Fatal(err)
 	}
 	point, err := f.r.RemotePoint(t.Context(), engineSourceID)
@@ -925,13 +926,17 @@ func enqueueRecords(t *testing.T, f *engineFixture, records ...backupRecord) {
 // because the queue row is the only thing the prefix scan reads.
 func deleteReplicaRows(t *testing.T, f *engineFixture, backupIDs ...string) {
 	t.Helper()
-	args := make([]any, 0, len(backupIDs)+1)
-	args = append(args, engineRepoID)
-	for _, id := range backupIDs {
-		args = append(args, id)
+	if len(backupIDs) == 0 {
+		return
 	}
-	query := `DELETE FROM replicas WHERE repository_id = ? AND backup_id IN (` +
-		strings.TrimSuffix(strings.Repeat("?,", len(backupIDs)), ",") + `)`
+	args := make([]any, 1, len(backupIDs)+1)
+	args[0] = engineRepoID
+	placeholders := make([]string, len(backupIDs))
+	for i, id := range backupIDs {
+		args = append(args, id)
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+	}
+	query := `DELETE FROM replicas WHERE repository_id = $1 AND backup_id IN (` + strings.Join(placeholders, ",") + `)`
 	if _, err := f.db.ExecContext(t.Context(), query, args...); err != nil {
 		t.Fatal(err)
 	}

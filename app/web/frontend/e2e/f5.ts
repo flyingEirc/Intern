@@ -1,6 +1,6 @@
 // F5 (#59) acceptance of user management and the audit log, driven by
 // agent-browser against a real bin/intern-web built with the webui tag
-// (`mise run build`). The suite needs only that binary and SQLite.
+// (`mise run build`). The suite needs that binary and real PostgreSQL.
 //
 //   bun e2e/f5.ts [--evidence DIR] [--headed]
 //
@@ -159,6 +159,10 @@ function expectPermissions(
   permissions: readonly string[],
   absent: readonly string[],
 ): void {
+  browser.click("账户与密码", "link");
+  browser.waitText("有效权限");
+  browser.ab("find", "role", "button", "click", "--name", "有效权限");
+  browser.waitText(permissions[0]);
   const text = browser.text();
   for (const permission of permissions) {
     expect(text.includes(permission), `overview missing ${permission}`);
@@ -311,7 +315,7 @@ async function refuseOtherRoles(origin: string, api: ApiClient): Promise<void> {
   subjectBrowser.fill("用户名", operator.username);
   subjectBrowser.fill("密码", operator.password);
   subjectBrowser.click("登录");
-  subjectBrowser.waitText("有效权限");
+  subjectBrowser.waitText("数据保护概览");
   expectPermissions(subjectBrowser, operatorPermissions, ["users:manage"]);
   subjectBrowser.record({
     id: "04-operator-signed-in",
@@ -389,7 +393,10 @@ async function changeAndRevoke(
   subjectBrowser.click("登录");
   subjectBrowser.ab("wait", "--url", "**/repositories**");
   subjectBrowser.open(`${origin}/`);
+  subjectBrowser.waitText("数据保护概览");
+  subjectBrowser.click("账户与密码", "link");
   subjectBrowser.waitText("有效权限");
+  subjectBrowser.ab("find", "role", "button", "click", "--name", "有效权限");
   expect(
     !subjectBrowser.text().includes("runs:trigger"),
     "the demoted user still shows runs:trigger",
@@ -465,7 +472,7 @@ async function changeAndRevoke(
   });
   adminBrowser.click("确认吊销");
   adminBrowser.waitText("会话已吊销");
-  expireOpenSession(subjectBrowser, "MySQL 数据源");
+  expireOpenSession(subjectBrowser, "数据源");
   subjectBrowser.record({
     id: "11-revoked-explicitly",
     acceptance: "F5-A2",
@@ -622,7 +629,7 @@ async function checkAudit(
     screenshot: adminBrowser.shot("15-audit-first-page"),
   });
   adminBrowser.click("加载更多");
-  adminBrowser.waitText("创建管理员");
+  adminBrowser.waitText("首次管理员初始化");
   const rendered = z
     .array(z.string())
     .parse(

@@ -3,16 +3,19 @@
 // `bin/intern-web` for the suites that need no external component, and the
 // run manifest. Nothing here asserts product behavior; the scripts do.
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { startPostgres } from "./postgres";
 
 export const repo = path.resolve(import.meta.dir, "../../../..");
 
@@ -21,6 +24,7 @@ export type Step = {
   acceptance: string;
   description: string;
   screenshot?: string;
+  screenshots?: string[];
 };
 
 export function expect(condition: boolean, message: string): void {
@@ -152,7 +156,42 @@ export class Browser {
     this.fill("用户名", username);
     this.fill("密码", password);
     this.click("登录");
-    this.waitText("有效权限");
+    this.waitText("数据保护概览");
+  }
+
+  /** UI-only one-time bootstrap: never seeds the administrator through an API helper. */
+  setup(origin: string, username: string, password: string): void {
+    this.open(`${origin}/login`);
+    this.waitText("创建首位管理员");
+    this.fill("管理员用户名", username);
+    this.fill("设置密码", password);
+    this.fill("确认密码", password);
+    this.click("创建管理员并进入控制台");
+    this.waitText("数据保护概览");
+  }
+
+  /** Captures every locked viewport and rejects page-level horizontal overflow. */
+  responsive(name: string): string[] {
+    const files: string[] = [];
+    for (const width of [375, 768, 1440]) {
+      this.ab("set", "viewport", String(width), "900");
+      this.ab(
+        "wait",
+        "--fn",
+        "document.getAnimations().every((a) => a.playState !== 'running')",
+      );
+      this.ab(
+        "wait",
+        "--fn",
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1",
+      );
+      this.ab("scroll", "up", "100000");
+      const file = `${name}-${width}.png`;
+      this.ab("screenshot", path.join(this.evidence, file));
+      files.push(file);
+    }
+    this.ab("set", "viewport", "1440", "900");
+    return files;
   }
 
   /** The login page sends a signed-in visitor on, so switch users through logout. */
@@ -187,9 +226,26 @@ export class Browser {
     const steps = [this, ...others]
       .flatMap((browser) => browser.steps)
       .sort((a, b) => a.id.localeCompare(b.id));
+    const screenshots = steps
+      .flatMap((step) => [
+        ...(step.screenshot ? [step.screenshot] : []),
+        ...(step.screenshots ?? []),
+      ])
+      .map((file) => ({
+        file,
+        sha256: createHash("sha256")
+          .update(readFileSync(path.join(this.evidence, file)))
+          .digest("hex"),
+        viewport: /-(375|768|1440)\.png$/.test(file)
+          ? {
+              width: Number(file.match(/-(375|768|1440)\.png$/)?.[1]),
+              height: 900,
+            }
+          : undefined,
+      }));
     writeFileSync(
       path.join(this.evidence, "manifest.json"),
-      `${JSON.stringify({ commit, dirty, steps }, null, 2)}\n`,
+      `${JSON.stringify({ commit, dirty, host: { platform: process.platform, arch: process.arch }, steps, screenshots }, null, 2)}\n`,
     );
   }
 }
@@ -299,14 +355,13 @@ export function stopOnSignal(stop: () => Promise<void>): void {
   }
 }
 
-/**
- * One native `bin/intern-web` on loopback HTTP: migrated metadata, one
- * administrator created through `--password-stdin`, and the process itself.
- * `stop()` kills the process and removes the metadata directory.
- */
-export async function startNative(options: {
-  admin: { username: string; password: string };
-}): Promise<{
+/** One native Web process on loopback HTTP with an isolated real PostgreSQL database. */
+export async function startNative(
+  options: {
+    admin?: { username: string; password: string };
+    setupInBrowser?: boolean;
+  } = {},
+): Promise<{
   origin: string;
   work: string;
   stop: () => Promise<void>;
@@ -316,35 +371,20 @@ export async function startNative(options: {
   const metadata = path.join(work, "metadata");
   mkdirSync(metadata, { mode: 0o700 });
   chmodSync(metadata, 0o700);
+  const postgres = await startPostgres(work);
   const port = 20_000 + Math.floor(Math.random() * 20_000);
   const origin = `http://127.0.0.1:${port}`;
-
-  const command = (args: string[], input?: string) => {
-    const result = spawnSync(binary, args, { input, encoding: "utf8" });
-    if (result.status !== 0) {
-      rmSync(work, { recursive: true, force: true });
-      throw new Error(
-        `e2e: intern-web ${args.slice(0, 2).join(" ")} exited ${result.status}: ${result.stderr.trim()}`,
-      );
-    }
-  };
-  command(["migrate", "up", "--metadata-dir", metadata]);
-  command(
-    [
-      "user",
-      "create-admin",
-      "--username",
-      options.admin.username,
-      "--metadata-dir",
-      metadata,
-      "--password-stdin",
-    ],
-    `${options.admin.password}\n`,
-  );
-
   const server: ChildProcess = spawn(
     binary,
-    ["serve", "--metadata-dir", metadata, "--listen", `127.0.0.1:${port}`],
+    [
+      "serve",
+      "--database-url-file",
+      postgres.databaseUrlFile,
+      "--metadata-dir",
+      metadata,
+      "--listen",
+      `127.0.0.1:${port}`,
+    ],
     { stdio: ["ignore", "ignore", "pipe"] },
   );
   let serverLog = "";
@@ -364,21 +404,29 @@ export async function startNative(options: {
     }
     await Bun.sleep(100);
   }
-  if (!ready) {
+  const stop = async () => {
     server.kill("SIGTERM");
+    if (server.exitCode === null) {
+      await once(server, "exit");
+    }
+    postgres.stop();
     rmSync(work, { recursive: true, force: true });
+  };
+  if (!ready) {
+    await stop();
     throw new Error(`e2e: intern-web did not become ready:\n${serverLog}`);
   }
-
-  return {
-    origin,
-    work,
-    stop: async () => {
-      server.kill("SIGTERM");
-      if (server.exitCode === null) {
-        await once(server, "exit");
-      }
-      rmSync(work, { recursive: true, force: true });
-    },
-  };
+  if (options.admin && !options.setupInBrowser) {
+    const result = await makeApi(origin)(
+      "POST",
+      "/api/v1/auth/setup",
+      undefined,
+      options.admin,
+    );
+    if (result.status !== 201) {
+      await stop();
+      throw new Error(`e2e: administrator setup = ${result.status}`);
+    }
+  }
+  return { origin, work, stop };
 }

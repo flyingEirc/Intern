@@ -43,7 +43,7 @@ payload() {
 		"W5-A2 plan target=inc2 links=ftp:3 digest=${digest} lsn=9000 required_export=209715200 available_export=900000000 export_path=/export/{restore_id} rehearsal=true risks=no_auto_replace_production,server_uuid_duplicate,pitr_unavailable" \
 		"W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=0123456789abcdef ftp_writes=0 local_payloads=removed" \
 		"W5-A2 refused backup_not_found=404 unconfigured=503" \
-		"W5-A6 e2e chain=seq:1,2,3 inc1=${backup_inc1} inc2=${backup_inc2} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=14 phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing" \
+		"W5-A6 e2e chain=seq:1,2,3 inc1=${backup_inc1} inc2=${backup_inc2} replicas_verified=3 local_payloads=removed logs_agree=postgres log_rows=14 phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing" \
 		"W5-A6 export=${export_inc1} bytes=268435512 data_digest=0011223344556677 phase=rehearsing links=ftp:2 mode=0750" \
 		"W5-A6 export=${export_inc2} bytes=268435612 data_digest=1122334455667788 phase=exporting links=ftp:3 mode=0750" \
 		"W5-A6 restore=inc1 source=ftp export=${export_inc1} expected_snapshot=${snap1} verify_status=passed" \
@@ -51,8 +51,8 @@ payload() {
 		"W5-A3 execute admin_only=true cross_origin=cross_origin_rejected confirm=403,confirmation_failed no_row=true audit_denied=7 limiter=429 retry_after=11 digest_changed=409,plan_changed replay_same_id=true conflict=409 audit_atomic=true" \
 		"W5-A6 export=${export_full} bytes=268435400 data_digest=2233445566778899 phase=exporting links=ftp:1 mode=0750" \
 		"W5-A3 restore=full source=ftp export=${export_full} expected_snapshot=${snapf} verify_status=not_requested" \
-		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 sqlite_intervals=disjoint" \
-		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite" \
+		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 postgres_intervals=disjoint" \
+		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=postgres" \
 		"W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true" \
 		"W5-A6 restored=inc1 container_snapshot=${snap1} expected_snapshot=${snap1} match=true" \
 		"W5-A6 restored=inc2 container_snapshot=${snap2} expected_snapshot=${snap2} match=true" \
@@ -150,7 +150,7 @@ reject not_admin_only 'if has("Output") then .Output |= sub("admin_only=true"; "
 reject no_blocker 'if has("Output") then .Output |= sub("run_blocked_by_restore=true"; "run_blocked_by_restore=false") else . end'
 reject no_blockee 'if has("Output") then .Output |= sub("restore_blocked_by_run=true"; "restore_blocked_by_run=false") else . end'
 reject two_slots 'if has("Output") then .Output |= sub("running_max=1"; "running_max=2") else . end'
-reject overlap 'if has("Output") then .Output |= sub("sqlite_intervals=disjoint"; "sqlite_intervals=overlap") else . end'
+reject overlap 'if has("Output") then .Output |= sub("postgres_intervals=disjoint"; "postgres_intervals=overlap") else . end'
 reject no_cancel_queued 'if has("Output") then .Output |= sub("canceled_queued=true"; "canceled_queued=false") else . end'
 reject no_cancel_running 'if has("Output") then .Output |= sub("canceled_running=true"; "canceled_running=false") else . end'
 reject implicit_effects 'if has("Output") then .Output |= gsub("side_effects=explicit"; "side_effects=none") else . end'
@@ -160,7 +160,7 @@ reject no_refusal 'if has("Output") then .Output |= sub("refused=source_unavaila
 reject recovery_twice 'if has("Output") then .Output |= sub("recovery_repeated=true"; "recovery_repeated=false") else . end'
 reject diagnostics_dump 'if has("Output") then .Output |= ("W4 diagnostics: begin (bounded to 400 lines)\n" + .) else . end'
 reject a4_running_max_dropped 'if has("Output") then .Output |= sub("restore_blocked_by_run=true running_max=1 queued_samples=48"; "restore_blocked_by_run=true queued_samples=48") else . end'
-reject a4_facts_reordered 'if has("Output") then .Output |= sub("running_max=1 queued_samples=48 sqlite_intervals=disjoint"; "queued_samples=48 running_max=1 sqlite_intervals=disjoint") else . end'
+reject a4_facts_reordered 'if has("Output") then .Output |= sub("running_max=1 queued_samples=48 postgres_intervals=disjoint"; "queued_samples=48 running_max=1 postgres_intervals=disjoint") else . end'
 reject a4_zero_slots 'if has("Output") then .Output |= sub("running_max=1"; "running_max=0") else . end'
 reject a5_state_facts_reordered 'if has("Output") then .Output |= sub("side_effects=explicit canceled_queued=true"; "canceled_queued=true side_effects=explicit") else . end'
 reject a5_sigkill_facts_moved 'if has("Output") then .Output |= sub("W5-A5 sigkill=failed/interrupted side_effects=explicit"; "W5-A5 sigkill=failed/interrupted\nW5-A5 recovery side_effects=explicit") else . end'

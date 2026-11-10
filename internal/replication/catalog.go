@@ -72,7 +72,7 @@ func (c *Catalog) validate(backupID, repositoryID string) error {
 func (c *Catalog) replicaHeader(ctx context.Context, backupID, repositoryID string) (ReplicaRecord, error) {
 	record := ReplicaRecord{BackupID: backupID, RepositoryID: repositoryID}
 	err := c.DB.QueryRowContext(ctx,
-		`SELECT status, local_repository_id FROM replicas WHERE backup_id = ? AND repository_id = ?`,
+		`SELECT status, local_repository_id FROM replicas WHERE backup_id = $1 AND repository_id = $2`,
 		backupID, repositoryID).Scan(&record.Status, &record.LocalRepositoryID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReplicaRecord{}, sql.ErrNoRows
@@ -85,7 +85,7 @@ func (c *Catalog) replicaHeader(ctx context.Context, backupID, repositoryID stri
 
 func (c *Catalog) members(ctx context.Context, backupID, repositoryID string) (members []ReplicaMember, retErr error) {
 	rows, err := c.DB.QueryContext(ctx,
-		`SELECT member, digest, size, status FROM replica_members WHERE backup_id = ? AND repository_id = ? ORDER BY member`,
+		`SELECT member, digest, size, status FROM replica_members WHERE backup_id = $1 AND repository_id = $2 ORDER BY member`,
 		backupID, repositoryID)
 	if err != nil {
 		return nil, fmt.Errorf("replication: cannot read replica members: %w", err)

@@ -15,6 +15,7 @@ import (
 
 	client "github.com/jlaffaye/ftp"
 
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
 	"github.com/flyingEirc/Intern/internal/restore"
@@ -128,17 +129,12 @@ func restoreFTPPlain(t *testing.T, w *worker, opts restore.Options, plan restore
 		request.RestoreID, file.SnapshotSHA256, file.RecordsRows, file.MaxRecordID)
 }
 
-// cloneControl copies the checkpointed database so a rejection mutation cannot
-// leak into the next case.
+// cloneControl copies a consistent snapshot into a distinct real PostgreSQL
+// database, preserving the real schema constraints for rejection mutations.
 func (w *worker) cloneControl(t *testing.T) (*sql.DB, *physicalstore.Store, *replication.Catalog, workerLocator) {
 	t.Helper()
-	_, err := w.db.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)")
-	must(t, err)
-	target := filepath.Join(t.TempDir(), "clone.db")
-	source, err := os.ReadFile(w.paths.db)
-	must(t, err)
-	must(t, os.WriteFile(target, source, 0o600))
-	db := openControlDB(t, target)
+	db := openControlDB(t, pgtest.New(t))
+	pgtest.CopyContents(t, w.db, db, []string{"chains", "backups", "cleanup_ledger", "replicas", "replica_members", "replica_parts"})
 	return db, physicalstore.New(db), replication.NewCatalog(db), workerLocator{w: w, db: db}
 }
 
@@ -211,28 +207,28 @@ func rejectionCases() []rejectCase {
 		{
 			name: "backup_not_completed", code: restore.CodeBackupNotCompleted, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE backups SET status = 'failed' WHERE id = ?", w.manifest.backup(t, 1).BackupID))
+				must(t, execSQL(r.db, "UPDATE backups SET status = 'failed' WHERE id = $1", w.manifest.backup(t, 1).BackupID))
 				return w.rejectOptions(), w.manifest.backup(t, 1).BackupID, nil
 			},
 		},
 		{
 			name: "chain_broken_missing_middle", code: restore.CodeChainBroken, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE backups SET seq = 9 WHERE id = ?", w.manifest.backup(t, 1).BackupID))
+				must(t, execSQL(r.db, "UPDATE backups SET seq = 9 WHERE id = $1", w.manifest.backup(t, 1).BackupID))
 				return w.rejectOptions(), w.manifest.backup(t, 2).BackupID, nil
 			},
 		},
 		{
 			name: "chain_broken_wrong_parent", code: restore.CodeChainBroken, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE backups SET parent_id = ? WHERE id = ?", w.manifest.backup(t, 0).BackupID, w.manifest.backup(t, 2).BackupID))
+				must(t, execSQL(r.db, "UPDATE backups SET parent_id = $1 WHERE id = $2", w.manifest.backup(t, 0).BackupID, w.manifest.backup(t, 2).BackupID))
 				return w.rejectOptions(), w.manifest.backup(t, 2).BackupID, nil
 			},
 		},
 		{
 			name: "lsn_discontinuous", code: restore.CodeLSNDiscontinuous, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE backups SET from_lsn = '999' WHERE id = ?", w.manifest.backup(t, 1).BackupID))
+				must(t, execSQL(r.db, "UPDATE backups SET from_lsn = '999' WHERE id = $1", w.manifest.backup(t, 1).BackupID))
 				return w.rejectOptions(), w.manifest.backup(t, 2).BackupID, nil
 			},
 		},
@@ -247,14 +243,14 @@ func rejectionCases() []rejectCase {
 		{
 			name: "tool_version_mismatch", code: restore.CodeToolVersionMismatch, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE chains SET tool_version = '8.4.0-8' WHERE id = ?", w.manifest.backup(t, 1).ChainID))
+				must(t, execSQL(r.db, "UPDATE chains SET tool_version = '8.4.0-8' WHERE id = $1", w.manifest.backup(t, 1).ChainID))
 				return w.rejectOptions(), w.manifest.backup(t, 1).BackupID, nil
 			},
 		},
 		{
 			name: "matrix_unsupported", code: restore.CodeMatrixUnsupported, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE chains SET server_version = '8.4.12' WHERE id = ?", w.manifest.backup(t, 1).ChainID))
+				must(t, execSQL(r.db, "UPDATE chains SET server_version = '8.4.12' WHERE id = $1", w.manifest.backup(t, 1).ChainID))
 				return w.rejectOptions(), w.manifest.backup(t, 1).BackupID, nil
 			},
 		},
@@ -277,7 +273,7 @@ func rejectionCases() []rejectCase {
 		{
 			name: "source_unavailable_replica_unverified", code: restore.CodeSourceUnavailable, stage: "plan",
 			mutate: func(t *testing.T, w *worker, r *rejection) (restore.Options, string, *restore.Request) {
-				must(t, execSQL(r.db, "UPDATE replicas SET status = 'uploaded' WHERE backup_id = ? AND repository_id = ?", w.manifest.backup(t, 1).BackupID, ftpRepoID))
+				must(t, execSQL(r.db, "UPDATE replicas SET status = 'uploaded' WHERE backup_id = $1 AND repository_id = $2", w.manifest.backup(t, 1).BackupID, ftpRepoID))
 				return w.rejectOptions(), w.manifest.backup(t, 1).BackupID, nil
 			},
 		},

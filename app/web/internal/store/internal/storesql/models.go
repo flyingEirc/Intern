@@ -129,7 +129,7 @@ type RunLog struct {
 	Level   string
 	Event   string
 	Message string
-	Data    interface{}
+	Data    sql.NullString
 }
 
 type Session struct {
@@ -141,6 +141,11 @@ type Session struct {
 type SessionTombstone struct {
 	Token  string
 	Expiry float64
+}
+
+type SetupState struct {
+	Singleton int64
+	Completed bool
 }
 
 type Source struct {

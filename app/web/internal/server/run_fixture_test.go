@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,7 +27,7 @@ import (
 
 // runHarness is the real serve shape for the run API and SSE battery: the whole
 // engine, with the real dispatcher attached, behind a real TLS listener built by
-// server.New/Run. Nothing is mocked: SQLite is the control plane, the stream goes
+// server.New/Run. Nothing is mocked: PostgreSQL is the control plane, the stream goes
 // over the wire and the sessions live in the same database.
 type runHarness struct {
 	t          *testing.T
@@ -114,11 +115,14 @@ func (h *runHarness) listen(t *testing.T) {
 	config := Config{Listen: h.address, CertFile: h.certFile, KeyFile: h.keyFile, ShutdownTimeout: 5 * time.Second}
 	srv := New(config, Handler(h.engine))
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = Run(ctx, srv, config) }()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, srv, config) }()
 	waitListening(t, h.address, true)
 	t.Cleanup(func() {
-		cancel()
-		_ = srv.Close()
+		finish := waitRun(cancel, done, config.ShutdownTimeout+postCancelDrainWait()+3*time.Second)
+		if err := finish(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("stop run harness: %v", err)
+		}
 	})
 }
 
@@ -263,7 +267,6 @@ func (h *runHarness) seedPolicy(t *testing.T, name string, sourceID, repositoryI
 	created, err := h.fixture.database.CreatePolicy(t.Context(), store.PolicyInput{
 		Name: name, SourceID: sourceID, LocalRepositoryID: repositoryID,
 		FullCron: "0 * * * *", IncrementalCron: "30 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +446,7 @@ func (h *runHarness) runsOf(t *testing.T, policyID string) []store.Run {
 func (h *runHarness) systemAudit(t *testing.T, action string) int {
 	t.Helper()
 	var count int
-	query := `SELECT COUNT(*) FROM audit_logs WHERE actor_type = 'system' AND action = ? AND result = 'success'`
+	query := `SELECT COUNT(*) FROM audit_logs WHERE actor_type = 'system' AND action = $1 AND result = 'success'`
 	if err := h.fixture.database.DB().QueryRowContext(t.Context(), query, action).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

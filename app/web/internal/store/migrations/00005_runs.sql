@@ -34,10 +34,10 @@ CREATE TABLE runs (
     finished_at TEXT,
     backup_id TEXT,
     chain_id TEXT,
-    payload_size INTEGER,
+    payload_size BIGINT,
     error_class TEXT,
     error_code TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
+    cancel_requested BIGINT NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0, 1)),
     actor_id TEXT
 );
 -- No status/cancel_requested cross-column CHECK: a running run that receives a
@@ -56,7 +56,7 @@ CREATE INDEX runs_backup ON runs (backup_id);
 -- the configured ones.
 CREATE TABLE run_logs (
     run_id TEXT NOT NULL REFERENCES runs(id),
-    seq INTEGER NOT NULL CHECK (seq >= 1),
+    seq BIGINT NOT NULL CHECK (seq >= 1),
     ts TEXT NOT NULL,
     level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
     event TEXT NOT NULL,

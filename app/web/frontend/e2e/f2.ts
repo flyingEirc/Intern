@@ -70,7 +70,7 @@ async function main(): Promise<void> {
     b.fill("用户名", stack.admin.username);
     b.fill("密码", stack.admin.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
 
     b.open(`${stack.origin}/repositories/new`);
     b.ab("wait", "--text", "新建仓库");
@@ -157,8 +157,8 @@ async function main(): Promise<void> {
     b.open(`${stack.origin}/sources/new`);
     b.ab("wait", "--text", "新建数据源");
     b.fill("名称", "f2-source");
-    b.fill("Socket", stack.mysql.socket);
-    b.fill("Datadir", stack.mysql.datadir);
+    b.fill("连接路径（Unix socket）", stack.mysql.socket);
+    b.fill("数据目录", stack.mysql.datadir);
     b.fill("用户名", stack.mysql.username);
     b.fill("密码", stack.mysql.password);
     b.click("创建数据源");
@@ -318,11 +318,6 @@ async function main(): Promise<void> {
       full_cron: "0 2 * * *",
       incremental_cron: "0 * * * *",
       timezone: "Asia/Shanghai",
-      max_chain_length: 7,
-      parallel: 1,
-      throttle: 0,
-      zstd_level: 3,
-      page_tracking: false,
       enabled: false,
     };
     const badPolicy = await api(
@@ -377,7 +372,8 @@ async function main(): Promise<void> {
     b.ab("find", "role", "combobox", "click", "--name", "数据源");
     b.ab("wait", "--text", "f2-bad-source");
     b.ab("find", "role", "option", "click", "--name", "f2-bad-source");
-    b.fill("全量 cron", "5 3 * * *");
+    b.click("自定义全量");
+    b.fill("全量安排", "5 3 * * *");
     b.click("保存修改");
     b.ab("wait", "--text", "保存被预检拒绝");
     const afterFailedUpdate = await api(
@@ -409,7 +405,7 @@ async function main(): Promise<void> {
     b.fill("用户名", viewer.username);
     b.fill("密码", viewer.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.origin}/repositories`);
     b.ab("wait", "--text", "备份仓库");
     expect(
@@ -445,7 +441,7 @@ async function main(): Promise<void> {
     b.fill("用户名", operator.username);
     b.fill("密码", operator.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.origin}/repositories/new`);
     b.ab("wait", "--text", "没有权限");
     b.open(`${stack.origin}/sources/new`);
@@ -490,12 +486,12 @@ async function main(): Promise<void> {
     b.fill("用户名", stack.noKek.admin.username);
     b.fill("密码", stack.noKek.admin.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.noKek.origin}/sources/new`);
     b.ab("wait", "--text", "新建数据源");
     b.fill("名称", "no-kek-source");
-    b.fill("Socket", stack.mysql.socket);
-    b.fill("Datadir", stack.mysql.datadir);
+    b.fill("连接路径（Unix socket）", stack.mysql.socket);
+    b.fill("数据目录", stack.mysql.datadir);
     b.fill("用户名", stack.mysql.username);
     b.fill("密码", stack.mysql.password);
     b.click("创建数据源");

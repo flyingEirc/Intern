@@ -12,12 +12,16 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func newService(t *testing.T) (*Service, *credential.Sealer, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "metadata")
-	database, err := store.Open(t.Context(), dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +94,7 @@ func TestUnconfiguredServiceRefusesDependentOperations(t *testing.T) {
 // TestProbeLocalDoesNotRequireSealer proves a local repository probe writes and
 // removes a staged object without a KEK, because it carries no secret.
 func TestProbeLocalDoesNotRequireSealer(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
-	database, err := store.Open(t.Context(), dir)
+	database, err := store.Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}

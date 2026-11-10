@@ -2,6 +2,12 @@
 
 import { DatabaseIcon, PlusIcon } from "lucide-react";
 import Link from "next/link";
+import { useMemo, useState } from "react";
+import {
+  DataPanel,
+  LoadMoreButton,
+  RowActions,
+} from "@/components/resources/data-panel";
 import {
   ListSkeleton,
   PageHeader,
@@ -17,7 +23,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Spinner } from "@/components/ui/spinner";
 import {
   Table,
   TableBody,
@@ -45,18 +50,26 @@ function PreflightBadge({ preflight }: { preflight: { ok: boolean } | null }) {
 export function SourcesView() {
   const session = useSession();
   const list = useSourcePages();
+  const [query, setQuery] = useState("");
   const canManage = hasPermission(
     session.data?.permissions,
     managePermission.sources,
   );
   const sources = list.data?.pages.flatMap((page) => page.items) ?? [];
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return sources;
+    return sources.filter((source) =>
+      [source.name, source.socket, source.server_version ?? ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [query, sources]);
 
   return (
-    <div className="flex flex-col gap-4">
-      <PageHeader
-        title="MySQL 数据源"
-        description="通过 socket 与 datadir 读取的 MySQL 实例；密码只写不读，预检会记录服务器身份。"
-      >
+    <div className="flex flex-col gap-5">
+      <PageHeader title="数据源" description="管理需要保护的 MySQL 数据库。">
         {canManage ? (
           <Button nativeButton={false} render={<Link href="/sources/new" />}>
             <PlusIcon data-icon="inline-start" />
@@ -96,20 +109,40 @@ export function SourcesView() {
       ) : null}
 
       {sources.length > 0 ? (
-        <div className="flex flex-col gap-3">
+        <DataPanel
+          title="数据源列表"
+          count={visible.length}
+          search={query}
+          onSearch={setQuery}
+          footer={
+            <LoadMoreButton
+              hasNextPage={list.hasNextPage}
+              isFetching={list.isFetchingNextPage}
+              onLoadMore={() => list.fetchNextPage()}
+            />
+          }
+        >
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>名称</TableHead>
-                <TableHead>Socket</TableHead>
+                <TableHead>连接路径</TableHead>
                 <TableHead>服务器版本</TableHead>
                 <TableHead>密码</TableHead>
                 <TableHead>最近预检</TableHead>
                 <TableHead>更新时间</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {sources.map((source) => (
+              {visible.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="h-20 text-center">
+                    没有匹配的记录
+                  </TableCell>
+                </TableRow>
+              ) : null}
+              {visible.map((source) => (
                 <TableRow key={source.id}>
                   <TableCell>
                     <Link
@@ -132,25 +165,30 @@ export function SourcesView() {
                     <PreflightBadge preflight={source.last_preflight} />
                   </TableCell>
                   <TableCell>{formatDateTime(source.updated_at)}</TableCell>
+                  <TableCell>
+                    <RowActions
+                      label={source.name}
+                      actions={[
+                        {
+                          label: "查看",
+                          href: `/sources/detail?id=${source.id}`,
+                        },
+                        ...(canManage
+                          ? [
+                              {
+                                label: "编辑",
+                                href: `/sources/new?id=${source.id}`,
+                              },
+                            ]
+                          : []),
+                      ]}
+                    />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          {list.hasNextPage ? (
-            <div>
-              <Button
-                variant="outline"
-                disabled={list.isFetchingNextPage}
-                onClick={() => list.fetchNextPage()}
-              >
-                {list.isFetchingNextPage ? (
-                  <Spinner data-icon="inline-start" />
-                ) : null}
-                加载更多
-              </Button>
-            </div>
-          ) : null}
-        </div>
+        </DataPanel>
       ) : null}
     </div>
   );

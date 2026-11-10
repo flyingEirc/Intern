@@ -5,7 +5,7 @@
 # empty or unset GITHUB_SHA is a rejection, not a wildcard.
 #
 # Every marker is emitted only after the worker's own assertions passed, and
-# each value in it is read back from state: the API, SQLite, the local
+# each value in it is read back from state: the API, PostgreSQL, the local
 # repository or raw FTP. The gate therefore checks the fixed text around the
 # values plus the shape of the observed values themselves.
 #
@@ -24,17 +24,19 @@ fi
 jq -e -s --arg source "${GITHUB_SHA:-}" '
   ([.[] | .Output // ""] | join("")) as $output |
   [
-    "a1-a2-e2e", "a2-priority", "a3-cancel", "a4-sse", "a3-sigterm", "a3-sigkill"
+    "a1-a2-e2e", "a2-default-chain-rotation", "a2-priority", "a3-cancel", "a4-sse", "a3-sigterm", "a3-sigkill", "a3-postgres-owner-loss"
   ] as $cases |
   [
     "W4-A1 e2e", "W4-A2 priority", "W4-A3 cancel", "W4-A3 sigterm", "W4-A3 sigkill", "W4-A4 sse",
     "chain=seq:1,2,3", "lsn_continuous=true", "conflict=409", "replicas_verified=3",
+    "PG-G2 default_max=7 completed_chain=7 admission_fulls=1 next_incremental_seq=2 replicas_verified=9",
+    "PG-P3 owner_terminated=true second_owner=refused serve_exit=nonzero tool_canceled=true completed=0 recovered=interrupted injected_during=backup",
     "protection_requires_verified=true uploaded_window=observed",
-    "logs_agree=sqlite", "lists_agree=sqlite,local,ftp",
-    "running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint",
+    "logs_agree=postgres", "lists_agree=postgres,local,ftp",
+    "running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first postgres_intervals=disjoint",
     "canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true",
     "sigterm_exit_bounded=true no_false_completed=true recovered=true",
-    "sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true sqlite_interrupted=true",
+    "sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true postgres_interrupted=true",
     "sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed"
   ] as $markers |
   length > 0 and

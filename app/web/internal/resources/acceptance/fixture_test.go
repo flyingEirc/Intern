@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,8 +25,6 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
@@ -35,6 +32,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 // The fixture paths are the ones the harness mounts; the worker never guesses
@@ -79,6 +77,7 @@ type fixture struct {
 	layout layout
 	secret secrets
 
+	dsn      string
 	database *store.Store
 	analysis *sql.DB
 	sealer   *credential.Sealer
@@ -138,6 +137,7 @@ func must(t *testing.T, err error) {
 // environment. Emulation and root runs are not acceptance.
 func requireNative(t *testing.T) {
 	t.Helper()
+	pgtest.RequireDSN(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("native Linux amd64 worker required")
 	}
@@ -218,10 +218,11 @@ func newFixture(t *testing.T) *fixture {
 	f := &fixture{
 		layout: prepareLayout(t), secret: loadSecrets(t),
 		logs: &lockedBuffer{}, received: &lockedBuffer{},
+		dsn: pgtest.New(t),
 	}
-	f.database = openStore(t, f.layout.metadata)
+	f.database = openStore(t, f.dsn)
 	f.sealer = openSealer(t, f.layout)
-	f.analysis = openAnalysis(t, f.layout.metadata)
+	f.analysis = openAnalysis(t, f.dsn)
 	f.auth = newAuthentication(t, f.database)
 	// Admin and operator each get a real TLS listener probing the pinned
 	// XtraBackup executable. The matrix miss uses a second real MySQL server,
@@ -242,9 +243,9 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func openStore(t *testing.T, metadata string) *store.Store {
+func openStore(t *testing.T, dsn string) *store.Store {
 	t.Helper()
-	database, err := store.Open(t.Context(), metadata)
+	database, err := store.Open(t.Context(), dsn)
 	must(t, err)
 	t.Cleanup(func() { must(t, database.Close()) })
 	return database
@@ -257,23 +258,11 @@ func openSealer(t *testing.T, paths layout) *credential.Sealer {
 	return sealer
 }
 
-// analysisDSN opens an independent handle with the store's own pragmas, so the
-// inspection connection waits on a lock exactly like a second writer would.
-func analysisDSN(path string) string {
-	u := url.URL{Scheme: "file", Path: path}
-	q := u.Query()
-	for _, pragma := range []string{"busy_timeout(5000)", "foreign_keys(1)", "synchronous(FULL)"} {
-		q.Add("_pragma", pragma)
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 // openAnalysis opens an independent handle for state assertions that must not go
 // through the API under test.
-func openAnalysis(t *testing.T, metadata string) *sql.DB {
+func openAnalysis(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", analysisDSN(filepath.Join(metadata, "intern.db")))
+	db, err := sql.Open("pgx", dsn)
 	must(t, err)
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { must(t, db.Close()) })
@@ -387,10 +376,8 @@ func (c *client) requestWithID(t *testing.T, method, path, body, requestID strin
 
 func (f *fixture) seedUsers(t *testing.T) {
 	t.Helper()
-	adminHash, err := f.auth.Passwords.Hash(f.secret.admin)
-	must(t, err)
-	_, err = f.database.CreateAdmin(t.Context(), "w3-admin", adminHash)
-	must(t, err)
+	body := marshal(t, map[string]string{"username": "w3-admin", "password": f.secret.admin})
+	f.admin.request(t, http.MethodPost, "/api/v1/auth/setup", body, http.StatusCreated)
 	operatorHash, err := f.auth.Passwords.Hash(f.secret.operator)
 	must(t, err)
 	_, err = f.database.CreateUser(t.Context(), "w3-operator", operatorHash, "operator",

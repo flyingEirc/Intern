@@ -8,18 +8,19 @@ package replsql
 import (
 	"context"
 	"database/sql"
-	"strings"
+
+	"github.com/lib/pq"
 )
 
 const completedBackupsBySource = `-- name: CompletedBackupsBySource :many
 SELECT b.id, b.chain_id, b.seq, b.parent_id, b.kind, b.status, b.instance_id, b.run_id, b.from_lsn, b.to_lsn, b.last_lsn, b.checkpoints, b.xtrabackup_info, b.object_path, b.payload_size, b.payload_sha256, b.metadata_size, b.metadata_sha256, b.key_id, b.local_present, b.failure_code, b.created_at, b.completed_at FROM backups b
 JOIN chains c ON c.id = b.chain_id
-WHERE c.source_id = ? AND b.status = 'completed' AND b.local_present = 1
+WHERE c.source_id = $1 AND b.status = 'completed' AND b.local_present = 1
 ORDER BY b.created_at, b.seq
 `
 
-func (q *Queries) CompletedBackupsBySource(ctx context.Context, sourceID string) ([]Backup, error) {
-	rows, err := q.db.QueryContext(ctx, completedBackupsBySource, sourceID)
+func (q *Queries) CompletedBackupsBySource(ctx context.Context, sourceid string) ([]Backup, error) {
+	rows, err := q.db.QueryContext(ctx, completedBackupsBySource, sourceid)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +67,7 @@ func (q *Queries) CompletedBackupsBySource(ctx context.Context, sourceID string)
 }
 
 const deletePart = `-- name: DeletePart :exec
-DELETE FROM replica_parts WHERE id = ?
+DELETE FROM replica_parts WHERE id = $1
 `
 
 func (q *Queries) DeletePart(ctx context.Context, id int64) error {
@@ -75,7 +76,7 @@ func (q *Queries) DeletePart(ctx context.Context, id int64) error {
 }
 
 const getReplica = `-- name: GetReplica :one
-SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at, local_repository_id FROM replicas WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at, local_repository_id FROM replicas WHERE backup_id = $1 AND repository_id = $2 AND local_repository_id = $3
 `
 
 type GetReplicaParams struct {
@@ -110,7 +111,7 @@ func (q *Queries) GetReplica(ctx context.Context, arg GetReplicaParams) (Replica
 
 const insertPart = `-- name: InsertPart :exec
 INSERT INTO replica_parts (backup_id, repository_id, member, part, created_at)
-VALUES (?, ?, ?, ?, ?)
+VALUES ($1, $2, $3, $4, $5)
 `
 
 type InsertPartParams struct {
@@ -135,7 +136,7 @@ func (q *Queries) InsertPart(ctx context.Context, arg InsertPartParams) error {
 const insertReplica = `-- name: InsertReplica :exec
 
 INSERT INTO replicas (backup_id, repository_id, local_repository_id, idem_key, status, next_attempt_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
 ON CONFLICT(backup_id, repository_id) DO UPDATE SET
     local_repository_id = excluded.local_repository_id
 WHERE replicas.local_repository_id = ''
@@ -170,7 +171,7 @@ func (q *Queries) InsertReplica(ctx context.Context, arg InsertReplicaParams) er
 }
 
 const members = `-- name: Members :many
-SELECT backup_id, repository_id, member, status, digest, size, updated_at FROM replica_members WHERE backup_id = ? AND repository_id = ?
+SELECT backup_id, repository_id, member, status, digest, size, updated_at FROM replica_members WHERE backup_id = $1 AND repository_id = $2
 `
 
 type MembersParams struct {
@@ -210,7 +211,7 @@ func (q *Queries) Members(ctx context.Context, arg MembersParams) ([]ReplicaMemb
 }
 
 const partByPart = `-- name: PartByPart :one
-SELECT id, backup_id, repository_id, member, part, attempts, last_error_code, created_at FROM replica_parts WHERE part = ?
+SELECT id, backup_id, repository_id, member, part, attempts, last_error_code, created_at FROM replica_parts WHERE part = $1
 `
 
 func (q *Queries) PartByPart(ctx context.Context, part string) (ReplicaPart, error) {
@@ -230,7 +231,7 @@ func (q *Queries) PartByPart(ctx context.Context, part string) (ReplicaPart, err
 }
 
 const partFailed = `-- name: PartFailed :exec
-UPDATE replica_parts SET attempts = attempts + 1, last_error_code = ? WHERE id = ?
+UPDATE replica_parts SET attempts = attempts + 1, last_error_code = $1 WHERE id = $2
 `
 
 type PartFailedParams struct {
@@ -246,7 +247,7 @@ func (q *Queries) PartFailed(ctx context.Context, arg PartFailedParams) error {
 const parts = `-- name: Parts :many
 SELECT p.id, p.backup_id, p.repository_id, p.member, p.part, p.attempts, p.last_error_code, p.created_at FROM replica_parts p
 JOIN replicas r ON r.backup_id = p.backup_id AND r.repository_id = p.repository_id
-WHERE p.repository_id = ? AND r.local_repository_id = ?
+WHERE p.repository_id = $1 AND r.local_repository_id = $2
 ORDER BY p.id
 `
 
@@ -292,8 +293,8 @@ func (q *Queries) Parts(ctx context.Context, arg PartsParams) ([]ReplicaPart, er
 const pendingLocalDeletesForPair = `-- name: PendingLocalDeletesForPair :many
 SELECT l.id, l.backup_id, l.target FROM cleanup_ledger l
 JOIN backups b ON b.id = l.backup_id
-JOIN replicas r ON r.backup_id = l.backup_id AND r.repository_id = ?
-WHERE r.local_repository_id = ? AND l.instance_id = ? AND l.kind = 'object' AND b.status = 'completed'
+JOIN replicas r ON r.backup_id = l.backup_id AND r.repository_id = $1
+WHERE r.local_repository_id = $2 AND l.instance_id = $3 AND l.kind = 'object' AND b.status = 'completed'
 ORDER BY l.id
 `
 
@@ -339,7 +340,9 @@ func (q *Queries) PendingLocalDeletesForPair(ctx context.Context, arg PendingLoc
 
 const replicasByBackupIDs = `-- name: ReplicasByBackupIDs :many
 SELECT backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, failed_since, alert_since, last_error_code, last_reply_code, created_at, updated_at, local_repository_id FROM replicas
-WHERE repository_id = ? AND local_repository_id = ? AND backup_id IN (/*SLICE:backup_ids*/?)
+WHERE repository_id = $1
+  AND local_repository_id = $2
+  AND backup_id = ANY($3::text[])
 `
 
 type ReplicasByBackupIDsParams struct {
@@ -349,19 +352,7 @@ type ReplicasByBackupIDsParams struct {
 }
 
 func (q *Queries) ReplicasByBackupIDs(ctx context.Context, arg ReplicasByBackupIDsParams) ([]Replica, error) {
-	query := replicasByBackupIDs
-	var queryParams []interface{}
-	queryParams = append(queryParams, arg.RepositoryID)
-	queryParams = append(queryParams, arg.LocalRepositoryID)
-	if len(arg.BackupIds) > 0 {
-		for _, v := range arg.BackupIds {
-			queryParams = append(queryParams, v)
-		}
-		query = strings.Replace(query, "/*SLICE:backup_ids*/?", strings.Repeat(",?", len(arg.BackupIds))[1:], 1)
-	} else {
-		query = strings.Replace(query, "/*SLICE:backup_ids*/?", "NULL", 1)
-	}
-	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	rows, err := q.db.QueryContext(ctx, replicasByBackupIDs, arg.RepositoryID, arg.LocalRepositoryID, pq.Array(arg.BackupIds))
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +396,7 @@ SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permane
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ? AND c.source_id = ?
+WHERE r.repository_id = $1 AND c.source_id = $2
 ORDER BY c.started_at, c.id, b.seq
 `
 
@@ -491,7 +482,7 @@ SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permane
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ? AND r.local_repository_id = ? AND c.source_id = ?
+WHERE r.repository_id = $1 AND r.local_repository_id = $2 AND c.source_id = $3
 ORDER BY b.created_at, b.seq
 `
 
@@ -573,7 +564,7 @@ SELECT r.backup_id, r.repository_id, r.idem_key, r.status, r.attempts, r.permane
 FROM replicas r
 JOIN backups b ON b.id = r.backup_id
 JOIN chains c ON c.id = b.chain_id
-WHERE r.repository_id = ? AND r.local_repository_id = ?
+WHERE r.repository_id = $1 AND r.local_repository_id = $2
 ORDER BY c.source_id, b.created_at, b.seq
 `
 
@@ -651,8 +642,8 @@ func (q *Queries) ReplicasForRepository(ctx context.Context, arg ReplicasForRepo
 
 const resetReplicaAttempt = `-- name: ResetReplicaAttempt :execrows
 UPDATE replicas
-SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+SET status = 'pending', attempts = 0, permanent = 0, next_attempt_at = $1, updated_at = $2
+WHERE backup_id = $3 AND repository_id = $4 AND local_repository_id = $5
 `
 
 type ResetReplicaAttemptParams struct {
@@ -681,8 +672,8 @@ func (q *Queries) ResetReplicaAttempt(ctx context.Context, arg ResetReplicaAttem
 }
 
 const resetUploadingReplicas = `-- name: ResetUploadingReplicas :exec
-UPDATE replicas SET status = 'pending', next_attempt_at = ?, updated_at = ?
-WHERE repository_id = ? AND local_repository_id = ? AND status = 'uploading'
+UPDATE replicas SET status = 'pending', next_attempt_at = $1, updated_at = $2
+WHERE repository_id = $3 AND local_repository_id = $4 AND status = 'uploading'
 `
 
 type ResetUploadingReplicasParams struct {
@@ -703,8 +694,8 @@ func (q *Queries) ResetUploadingReplicas(ctx context.Context, arg ResetUploading
 }
 
 const setMemberCommitted = `-- name: SetMemberCommitted :exec
-UPDATE replica_members SET status = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND member = ? AND digest = ? AND size = ?
+UPDATE replica_members SET status = $1, updated_at = $2
+WHERE backup_id = $3 AND repository_id = $4 AND member = $5 AND digest = $6 AND size = $7
 `
 
 type SetMemberCommittedParams struct {
@@ -731,8 +722,8 @@ func (q *Queries) SetMemberCommitted(ctx context.Context, arg SetMemberCommitted
 }
 
 const setMemberStatus = `-- name: SetMemberStatus :exec
-UPDATE replica_members SET status = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND member = ?
+UPDATE replica_members SET status = $1, updated_at = $2
+WHERE backup_id = $3 AND repository_id = $4 AND member = $5
 `
 
 type SetMemberStatusParams struct {
@@ -755,8 +746,8 @@ func (q *Queries) SetMemberStatus(ctx context.Context, arg SetMemberStatusParams
 }
 
 const setReplicaAlert = `-- name: SetReplicaAlert :exec
-UPDATE replicas SET alert_since = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ? AND alert_since IS NULL
+UPDATE replicas SET alert_since = $1
+WHERE backup_id = $2 AND repository_id = $3 AND local_repository_id = $4 AND alert_since IS NULL
 `
 
 type SetReplicaAlertParams struct {
@@ -778,10 +769,10 @@ func (q *Queries) SetReplicaAlert(ctx context.Context, arg SetReplicaAlertParams
 
 const setReplicaFailed = `-- name: SetReplicaFailed :execrows
 UPDATE replicas
-SET status = ?, attempts = ?, permanent = ?, next_attempt_at = ?,
-    failed_since = COALESCE(failed_since, ?), last_error_code = ?, last_reply_code = ?,
-    updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+SET status = $1, attempts = $2, permanent = $3, next_attempt_at = $4,
+    failed_since = COALESCE(failed_since, $5), last_error_code = $6, last_reply_code = $7,
+    updated_at = $8
+WHERE backup_id = $9 AND repository_id = $10 AND local_repository_id = $11
 `
 
 type SetReplicaFailedParams struct {
@@ -820,9 +811,9 @@ func (q *Queries) SetReplicaFailed(ctx context.Context, arg SetReplicaFailedPara
 
 const setReplicaUploaded = `-- name: SetReplicaUploaded :execrows
 UPDATE replicas
-SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, ?), next_attempt_at = ?, last_error_code = NULL,
-    last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+SET status = 'uploaded', uploaded_at = COALESCE(uploaded_at, $1), next_attempt_at = $2, last_error_code = NULL,
+    last_reply_code = NULL, updated_at = $3
+WHERE backup_id = $4 AND repository_id = $5 AND local_repository_id = $6
 `
 
 type SetReplicaUploadedParams struct {
@@ -854,8 +845,8 @@ func (q *Queries) SetReplicaUploaded(ctx context.Context, arg SetReplicaUploaded
 }
 
 const setReplicaUploading = `-- name: SetReplicaUploading :execrows
-UPDATE replicas SET status = 'uploading', updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+UPDATE replicas SET status = 'uploading', updated_at = $1
+WHERE backup_id = $2 AND repository_id = $3 AND local_repository_id = $4
   AND status IN ('pending', 'failed', 'uploading')
 `
 
@@ -881,10 +872,10 @@ func (q *Queries) SetReplicaUploading(ctx context.Context, arg SetReplicaUploadi
 
 const setReplicaVerified = `-- name: SetReplicaVerified :execrows
 UPDATE replicas
-SET status = 'verified', verified_at = ?, uploaded_at = COALESCE(uploaded_at, ?),
+SET status = 'verified', verified_at = $1, uploaded_at = COALESCE(uploaded_at, $2),
     permanent = 0, failed_since = NULL, alert_since = NULL, last_error_code = NULL,
-    last_reply_code = NULL, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?
+    last_reply_code = NULL, updated_at = $3
+WHERE backup_id = $4 AND repository_id = $5 AND local_repository_id = $6
 `
 
 type SetReplicaVerifiedParams struct {
@@ -912,11 +903,11 @@ func (q *Queries) SetReplicaVerified(ctx context.Context, arg SetReplicaVerified
 }
 
 const sourceChains = `-- name: SourceChains :many
-SELECT id, source_id, server_uuid, server_version, tool_version, started_at, sealed_at, pinned FROM chains WHERE source_id = ? ORDER BY started_at, rowid
+SELECT id, source_id, server_uuid, server_version, tool_version, started_at, sealed_at, pinned FROM chains WHERE source_id = $1 ORDER BY started_at, id
 `
 
-func (q *Queries) SourceChains(ctx context.Context, sourceID string) ([]Chain, error) {
-	rows, err := q.db.QueryContext(ctx, sourceChains, sourceID)
+func (q *Queries) SourceChains(ctx context.Context, sourceid string) ([]Chain, error) {
+	rows, err := q.db.QueryContext(ctx, sourceChains, sourceid)
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +940,7 @@ func (q *Queries) SourceChains(ctx context.Context, sourceID string) ([]Chain, e
 
 const upsertMember = `-- name: UpsertMember :exec
 INSERT INTO replica_members (backup_id, repository_id, member, status, digest, size, updated_at)
-VALUES (?, ?, ?, 'pending', ?, ?, ?)
+VALUES ($1, $2, $3, 'pending', $4, $5, $6)
 ON CONFLICT(backup_id, repository_id, member) DO UPDATE SET
     digest = excluded.digest, size = excluded.size, updated_at = excluded.updated_at
 `

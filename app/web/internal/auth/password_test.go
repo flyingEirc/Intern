@@ -67,6 +67,8 @@ func TestAnonymousVerificationCannotTakeEveryHashSlot(t *testing.T) {
 		t.Fatalf("second anonymous verify waited %s", time.Since(start))
 	}
 	requireUnavailable(t, err)
+	_, err = passwords.HashAnonymous("test-credential-123")
+	requireUnavailable(t, err)
 	done := make(chan error, 1)
 	go func() {
 		_, hashErr := passwords.Hash("test-credential-123")

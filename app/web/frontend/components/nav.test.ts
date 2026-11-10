@@ -1,17 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { navItemsFor, navTitle } from "./nav";
+import { navGroupsFor, navItemsFor, navTitle } from "./nav";
 
 describe("console navigation", () => {
   it("titles the resource pages and their query-parameter routes", () => {
+    expect(navTitle("/")).toBe("概览");
     expect(navTitle("/repositories")).toBe("备份仓库");
     expect(navTitle("/repositories/new")).toBe("新建仓库");
     expect(navTitle("/repositories/detail")).toBe("仓库详情");
-    expect(navTitle("/sources")).toBe("MySQL 数据源");
-    expect(navTitle("/policies/detail")).toBe("策略详情");
+    expect(navTitle("/sources")).toBe("数据源");
+    expect(navTitle("/policies")).toBe("保护策略");
+    expect(navTitle("/policies/new")).toBe("新建保护策略");
+    expect(navTitle("/policies/detail")).toBe("保护策略详情");
     expect(navTitle("/runs")).toBe("运行记录");
     expect(navTitle("/runs/detail")).toBe("运行详情");
     expect(navTitle("/backups/detail")).toBe("备份详情");
-    expect(navTitle("/replicas")).toBe("副本复制");
+    expect(navTitle("/replicas")).toBe("异地副本");
     expect(navTitle("/restores")).toBe("恢复");
     expect(navTitle("/restores/new")).toBe("新建恢复");
     expect(navTitle("/restores/detail")).toBe("恢复详情");
@@ -20,6 +23,15 @@ describe("console navigation", () => {
     expect(navTitle("/users/detail")).toBe("用户详情");
     expect(navTitle("/audit")).toBe("审计日志");
     expect(navTitle("/unknown")).toBe("Intern");
+  });
+
+  it("groups navigation by business task and hides empty groups", () => {
+    const labels = navGroupsFor([
+      "session:self",
+      "resources:read",
+      "runs:read",
+    ]).map((group) => group.label);
+    expect(labels).toEqual(["监控", "保护", "存储", "管理"]);
   });
 
   it("shows the resource entries only to sessions with resources:read", () => {

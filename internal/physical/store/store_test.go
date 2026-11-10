@@ -6,30 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
-	"path/filepath"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func testStore(t *testing.T) *Store {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: filepath.Join(t.TempDir(), "intern.db")}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	if err = Migrate(t.Context(), db); err != nil {
+	db := pgtest.Open(t)
+	if err := Migrate(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
 	return New(db)
@@ -187,7 +173,7 @@ func TestBeginRollsBackPartialLedger(t *testing.T) {
 		t.Fatalf("partial running row survived rollback: %v", err)
 	}
 	var chains int
-	if err = s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM chains WHERE id = ?", newPlan.ChainID).Scan(&chains); err != nil || chains != 0 {
+	if err = s.db.QueryRowContext(t.Context(), "SELECT count(*) FROM chains WHERE id = $1", newPlan.ChainID).Scan(&chains); err != nil || chains != 0 {
 		t.Fatalf("partial chain survived rollback: %d %v", chains, err)
 	}
 	var ledger int

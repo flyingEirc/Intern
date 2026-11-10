@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,9 +16,8 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/pipeline"
 	"github.com/flyingEirc/Intern/internal/replication/internal/replsql"
@@ -75,7 +73,7 @@ func newEngine(t *testing.T) *engineFixture {
 	if err := artifact.GenerateKey(f.key); err != nil {
 		t.Fatal(err)
 	}
-	f.db = newControlDB(t, filepath.Join(dir, "intern.db"))
+	f.db = pgtest.Open(t)
 	if err := physicalstore.Migrate(t.Context(), f.db); err != nil {
 		t.Fatal(err)
 	}
@@ -111,24 +109,6 @@ func (f *engineFixture) replicator(keyFile *string) *Replicator {
 }
 
 func (f *engineFixture) tick() { f.now = f.now.Add(time.Second) }
-
-func newControlDB(t *testing.T, name string) *sql.DB {
-	t.Helper()
-	u := url.URL{Scheme: "file", Path: name}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 // backupRecord is one completed local backup of the fixture.
 type backupRecord struct {
@@ -503,7 +483,7 @@ func (f *engineFixture) failedSince(backupID string) *time.Time {
 	f.t.Helper()
 	var value sql.NullString
 	if err := f.db.QueryRowContext(f.t.Context(),
-		"SELECT failed_since FROM replicas WHERE backup_id = ? AND repository_id = ?", backupID, engineRepoID).Scan(&value); err != nil {
+		"SELECT failed_since FROM replicas WHERE backup_id = $1 AND repository_id = $2", backupID, engineRepoID).Scan(&value); err != nil {
 		f.t.Fatal(err)
 	}
 	if !value.Valid {
@@ -519,7 +499,7 @@ func (f *engineFixture) failedSince(backupID string) *time.Time {
 func (f *engineFixture) partRows() int {
 	f.t.Helper()
 	var count int
-	if err := f.db.QueryRowContext(f.t.Context(), "SELECT COUNT(*) FROM replica_parts WHERE repository_id = ?", engineRepoID).Scan(&count); err != nil {
+	if err := f.db.QueryRowContext(f.t.Context(), "SELECT COUNT(*) FROM replica_parts WHERE repository_id = $1", engineRepoID).Scan(&count); err != nil {
 		f.t.Fatal(err)
 	}
 	return count
@@ -556,7 +536,7 @@ func (f *engineFixture) assertStatus(backupID, want string) Replica {
 	f.t.Helper()
 	var status string
 	if err := f.db.QueryRowContext(f.t.Context(),
-		"SELECT status FROM replicas WHERE backup_id = ? AND repository_id = ?", backupID, engineRepoID).Scan(&status); err != nil {
+		"SELECT status FROM replicas WHERE backup_id = $1 AND repository_id = $2", backupID, engineRepoID).Scan(&status); err != nil {
 		f.t.Fatalf("replica %s: %v", backupID, err)
 	}
 	if status != want {

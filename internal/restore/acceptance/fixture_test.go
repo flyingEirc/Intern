@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,9 +27,9 @@ import (
 	"time"
 
 	driver "github.com/go-sql-driver/mysql"
-	_ "modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/physical/chain"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
@@ -106,9 +105,14 @@ func newLayout(t *testing.T) layout {
 	if !filepath.IsAbs(root) {
 		t.Fatal("the worker requires an absolute private fixture root")
 	}
+	dsn := os.Getenv("INTERN_P4_DATABASE_URL")
+	if dsn == "" {
+		dsn = pgtest.New(t)
+		t.Setenv("INTERN_P4_DATABASE_URL", dsn)
+	}
 	return layout{
 		root: root, key: filepath.Join(root, "keys", "intern.key"), wrongKey: filepath.Join(root, "keys", "wrong.key"),
-		work: filepath.Join(root, "work"), repo: filepath.Join(root, "repo"), db: filepath.Join(root, "intern.db"),
+		work: filepath.Join(root, "work"), repo: filepath.Join(root, "repo"), db: dsn,
 		manifest:    filepath.Join(root, "produced.json"),
 		export:      requiredAbsoluteEnv(t, "INTERN_P4_EXPORT"),
 		smallWork:   requiredAbsoluteEnv(t, "INTERN_P4_SMALL_WORK"),
@@ -148,6 +152,7 @@ func withhold(message string) string {
 
 func requireNative(t *testing.T) {
 	t.Helper()
+	pgtest.RequireDSN(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("native Linux amd64 worker required")
 	}
@@ -188,18 +193,9 @@ func mysqldPath(t *testing.T) string {
 	return ""
 }
 
-func openControlDB(t *testing.T, filename string) *sql.DB {
+func openControlDB(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: filename}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	must(t, err)
-	db.SetMaxOpenConns(1)
+	db := pgtest.OpenDSN(t, dsn)
 	must(t, physicalstore.Migrate(t.Context(), db))
 	must(t, replication.Migrate(t.Context(), db))
 	t.Cleanup(func() { must(t, db.Close()) })
@@ -317,7 +313,7 @@ func (l workerLocator) Local(context.Context, string) (*local.Repository, error)
 }
 
 func (l workerLocator) Replicas(ctx context.Context, backupID string) ([]restore.ReplicaRef, error) {
-	rows, err := l.db.QueryContext(ctx, `SELECT repository_id, status FROM replicas WHERE backup_id = ? ORDER BY repository_id`, backupID)
+	rows, err := l.db.QueryContext(ctx, `SELECT repository_id, status FROM replicas WHERE backup_id = $1 ORDER BY repository_id`, backupID)
 	if err != nil {
 		return nil, err
 	}

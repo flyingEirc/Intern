@@ -3,6 +3,7 @@
 import { ShieldCheckIcon } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
+import { Diagnostics } from "@/components/resources/diagnostics";
 import { ReplicaStatusBadge } from "@/components/resources/replica-status";
 import { ResourceError } from "@/components/resources/states";
 import { Badge } from "@/components/ui/badge";
@@ -24,12 +25,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { Point } from "@/lib/api/generated/types.gen";
-import {
-  formatAge,
-  formatBytes,
-  formatDateTime,
-  formatLsn,
-} from "@/lib/resources/format";
+import { formatAge, formatBytes, formatDateTime } from "@/lib/resources/format";
 import {
   useRepositoryChoices,
   useSourceChains,
@@ -147,23 +143,35 @@ export function SourceProtection({
           {chains.data?.items.map((chain) => (
             <div key={chain.id} className="flex flex-col gap-2">
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-mono text-xs">{chain.id}</span>
                 <Badge variant={chain.pinned ? "secondary" : "outline"}>
                   {chain.pinned ? "已固定" : "未固定"}
                 </Badge>
                 <span className="text-muted-foreground">
-                  服务器 {chain.server_uuid || "—"} · 开始{" "}
-                  {formatDateTime(chain.started_at)} · 封存{" "}
-                  {formatDateTime(chain.sealed_at)}
+                  {chain.members.length} 个备份点 · 开始{" "}
+                  {formatDateTime(chain.started_at)}
                 </span>
               </div>
+              <Diagnostics
+                title="链诊断"
+                description="仅在排查链身份或服务器世代时展开。"
+              >
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+                  <dt className="text-muted-foreground">链标识</dt>
+                  <dd className="font-mono text-xs break-all">{chain.id}</dd>
+                  <dt className="text-muted-foreground">服务器标识</dt>
+                  <dd className="font-mono text-xs break-all">
+                    {chain.server_uuid || "—"}
+                  </dd>
+                  <dt className="text-muted-foreground">封存时间</dt>
+                  <dd>{formatDateTime(chain.sealed_at)}</dd>
+                </dl>
+              </Diagnostics>
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>序号</TableHead>
                     <TableHead>类型</TableHead>
                     <TableHead>状态</TableHead>
-                    <TableHead>LSN</TableHead>
                     <TableHead>大小</TableHead>
                     <TableHead>本地</TableHead>
                     <TableHead>副本</TableHead>
@@ -175,10 +183,6 @@ export function SourceProtection({
                       <TableCell>{member.seq}</TableCell>
                       <TableCell>{backupKindText(member.kind)}</TableCell>
                       <TableCell>{backupStatusText(member.status)}</TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {formatLsn(member.from_lsn)} →{" "}
-                        {formatLsn(member.to_lsn)}
-                      </TableCell>
                       <TableCell>{formatBytes(member.payload_size)}</TableCell>
                       <TableCell>
                         {member.local_present ? "存在" : "已不在"}
@@ -191,10 +195,6 @@ export function SourceProtection({
                           >
                             查看副本状态
                           </Link>
-                          {/* The chains contract does not carry replica rows
-                              (members list kind, seq, status, presence, LSNs
-                              and payload identity); the backup detail reads
-                              them, so an empty list here is not "no replica". */}
                           {member.replicas.map((replica) => (
                             <ReplicaStatusBadge
                               key={replica.repository_id}

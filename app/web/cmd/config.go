@@ -27,8 +27,12 @@ import (
 // preflight settings are optional: without them the server still starts, and only
 // the operations that need them answer 503.
 type configuration struct {
-	Listen               string             `mapstructure:"listen"`
-	MetadataDir          string             `mapstructure:"metadata_dir"`
+	Listen      string `mapstructure:"listen"`
+	MetadataDir string `mapstructure:"metadata_dir"`
+	// DatabaseURL and DatabaseURLFile are mutually exclusive PostgreSQL sources.
+	// A file is preferred because its contents never enter process arguments.
+	DatabaseURL          string             `mapstructure:"database_url"`
+	DatabaseURLFile      string             `mapstructure:"database_url_file"`
 	ShutdownTimeout      time.Duration      `mapstructure:"shutdown_timeout"`
 	TrustedProxies       []string           `mapstructure:"trusted_proxies"`
 	TLSTerminatedByProxy bool               `mapstructure:"tls_terminated_by_proxy"`
@@ -117,11 +121,26 @@ func (l *configLoader) readConfig(path string) (retErr error) {
 }
 
 func (c configuration) validate() error {
+	if err := c.validateIdentity(); err != nil {
+		return err
+	}
+	return c.validateRuntime()
+}
+
+// validateIdentity checks the deployment's address, private metadata location
+// and the single PostgreSQL connection source.
+func (c configuration) validateIdentity() error {
 	if err := validateListen(c.Listen); err != nil {
 		return err
 	}
 	if c.MetadataDir == "" || !filepath.IsAbs(c.MetadataDir) {
 		return errors.New("metadata_dir must be a non-empty absolute path")
+	}
+	if c.DatabaseURL != "" && c.DatabaseURLFile != "" {
+		return errors.New("database_url and database_url_file are mutually exclusive")
+	}
+	if strings.TrimSpace(c.DatabaseURL) == "" && strings.TrimSpace(c.DatabaseURLFile) == "" {
+		return errors.New("database_url or database_url_file is required")
 	}
 	if _, err := c.logLevel(); err != nil {
 		return err
@@ -129,9 +148,10 @@ func (c configuration) validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("shutdown_timeout must be positive")
 	}
-	if err := validateProxies(c.TrustedProxies); err != nil {
-		return err
-	}
+	return validateProxies(c.TrustedProxies)
+}
+
+func (c configuration) validateRuntime() error {
 	if err := c.Session.Validate(); err != nil {
 		return err
 	}

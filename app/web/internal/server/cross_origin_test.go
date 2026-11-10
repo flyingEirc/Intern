@@ -52,7 +52,7 @@ func TestCrossOriginAuditExactlyOnceWithoutSessionLoading(t *testing.T) {
 			ip = "198.51.100.9"
 		}
 		assertCrossOriginAudit(t, entries, body.Error.RequestID, ip)
-		all := rawAudit(t, f.dir) + f.logs.String()
+		all := rawAudit(t, f.dsn) + f.logs.String()
 		for _, secret := range []string{"csrf-query-secret", "csrf-body-secret-credential", "csrf-cookie-secret", "https://evil.example"} {
 			if strings.Contains(all, secret) {
 				t.Fatal("cross-origin audit leaked request data")

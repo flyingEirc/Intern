@@ -104,7 +104,7 @@ func (s *Store) AuditLogs(ctx context.Context, before int64, limit int) ([]Audit
 	if before == 0 {
 		before = math.MaxInt64
 	}
-	rows, err := storesql.New(s.db).ListAuditLogs(ctx, storesql.ListAuditLogsParams{ID: before, Limit: int64(limit)})
+	rows, err := storesql.New(s.db).ListAuditLogs(ctx, storesql.ListAuditLogsParams{ID: before, RowLimit: int64(limit)})
 	if err != nil {
 		return nil, err
 	}
@@ -125,28 +125,4 @@ func (s *Store) AuditLogs(ctx context.Context, before int64, limit int) ([]Audit
 		entries[i] = entry
 	}
 	return entries, nil
-}
-
-// CreateAdmin commits the new administrator and system audit entry atomically.
-// BEGIN IMMEDIATE on the writable pool reserves the write lock before either
-// insert. The transaction runs detached like every store write: a canceled
-// caller can never leave a half-open transaction on the single connection.
-func (s *Store) CreateAdmin(ctx context.Context, username, hash string) (User, error) {
-	var user User
-	err := s.writeTx(ctx, func(ctx context.Context, tx *sql.Tx) error {
-		queries := storesql.New(tx)
-		created, err := createUser(ctx, queries, username, hash, "admin")
-		if err != nil {
-			return err
-		}
-		user = created
-		return insertAudit(ctx, queries, AuditLog{
-			ActorType: "system", Action: "users.create_admin",
-			ResourceType: "user", ResourceID: user.ID, Result: "success", Detail: AuditDetail{Role: "admin"},
-		})
-	})
-	if err != nil {
-		return User{}, err
-	}
-	return user, nil
 }

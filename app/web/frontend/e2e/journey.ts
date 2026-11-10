@@ -1,8 +1,8 @@
 // #65 (stage F, #19 acceptance 3): the whole business flow through the UI
 // only, on the real Compose stack: repositories, source and preflight, policy
-// enabled with an FTP replica, full and incremental backups triggered from the
-// policy page, both FTP replicas verified, then the incremental restored with a
-// rehearsal from the restore wizard and compared with an independent snapshot
+// enabled with an FTP replica, full and two incremental backups triggered from
+// the policy page, all three FTP replicas verified, then the selected second
+// incremental restored with a rehearsal and compared with an independent snapshot
 // on a brand-new mysql:8.4.11. The API only reads back and snapshots; nothing
 // is created or triggered through it.
 //
@@ -39,16 +39,36 @@ const b = new Browser(
   run.headed,
 );
 const longTimeout = 15 * 60_000;
+const keepStack = process.argv.includes("--keep");
+let completed = false;
 
 /** Snapshot of the source table; the same query runs on the export. */
 const snapshotSql =
   "SELECT COUNT(*), COALESCE(SUM(id), 0), COALESCE(MAX(v), '') FROM journey.t";
 
-/** Opens a Base UI select by its label and picks the option with this text. */
+/** Uses keyboard selection; labels are read back from the real option list. */
 function choose(label: string, option: string): void {
-  b.ab("find", "role", "combobox", "click", "--name", label);
+  const id = JSON.parse(
+    b.ab(
+      "eval",
+      `Array.from(document.querySelectorAll('label')).find((element) => element.textContent.trim() === ${JSON.stringify(label)})?.htmlFor`,
+    ),
+  ) as string;
+  expect(Boolean(id), `missing control label ${label}`);
+  b.ab("focus", `#${id}`);
+  b.ab("press", "Space");
   b.waitText(option);
-  b.ab("find", "role", "option", "click", "--name", option);
+  const labels = JSON.parse(
+    b.ab(
+      "eval",
+      "Array.from(document.querySelectorAll('[role=option]'), (element) => element.textContent.trim())",
+    ),
+  ) as string[];
+  const index = labels.indexOf(option);
+  expect(index >= 0, `missing option ${option}`);
+  b.ab("press", "Home");
+  for (let cursor = 0; cursor < index; cursor += 1) b.ab("press", "ArrowDown");
+  b.ab("press", "Enter");
 }
 
 /** The id of the detail page the browser is on. */
@@ -85,16 +105,31 @@ async function triggerFromPolicy(
 }
 
 async function main(): Promise<void> {
-  const stack = await startStack(
-    run.image === undefined ? undefined : { reuseImage: run.image },
-  );
+  const stack = await startStack({
+    ...(run.image === undefined ? {} : { reuseImage: run.image }),
+    setupInBrowser: true,
+  });
   stopOnSignal(stack.stop);
   console.log(`stack up: ${stack.origin} (${Math.round(process.uptime())}s)`);
   const api = makeApi(stack.origin);
-  const admin = await apiLogin(api, stack.admin.username, stack.admin.password);
 
   try {
-    b.signIn(stack.origin, stack.admin.username, stack.admin.password);
+    b.open(`${stack.origin}/login`);
+    b.waitText("创建首位管理员");
+    const setupShots = b.responsive("U2-setup");
+    b.record({
+      id: "U2-setup",
+      acceptance: "U2",
+      description:
+        "the first-run setup page at 375, 768 and 1440 logical pixels, before any administrator exists",
+      screenshots: setupShots,
+    });
+    b.setup(stack.origin, stack.admin.username, stack.admin.password);
+    const admin = await apiLogin(
+      api,
+      stack.admin.username,
+      stack.admin.password,
+    );
 
     // ------------------------------------------------ J-A1: configuration ---
     b.open(`${stack.origin}/repositories/new`);
@@ -154,8 +189,8 @@ async function main(): Promise<void> {
     b.open(`${stack.origin}/sources/new`);
     b.waitText("新建数据源");
     b.fill("名称", "journey-source");
-    b.fill("Socket", stack.mysql.socket);
-    b.fill("Datadir", stack.mysql.datadir);
+    b.fill("连接路径（Unix socket）", stack.mysql.socket);
+    b.fill("数据目录", stack.mysql.datadir);
     b.fill("用户名", stack.mysql.username);
     b.fill("密码", stack.mysql.password);
     b.click("创建数据源");
@@ -193,11 +228,15 @@ async function main(): Promise<void> {
     choose("本地仓库", "journey-local");
     choose("副本仓库（可选）", "journey-ftp");
     // Far-off schedules: only the buttons on the policy page start backups.
-    b.fill("全量 cron", "0 3 1 1 *");
-    b.fill("增量 cron", "30 4 1 1 *");
+    b.click("自定义全量");
+    b.fill("全量安排", "0 3 1 1 *");
+    b.click("自定义增量");
+    b.fill("增量安排", "30 4 1 1 *");
     b.fill("时区", "UTC");
-    b.click("创建后立即启用", "switch");
-    b.click("创建策略");
+    b.ab("focus", '[role="switch"][aria-label="创建后立即启用"]');
+    b.ab("press", "Space");
+    b.ab("focus", 'button[type="submit"]');
+    b.ab("press", "Enter");
     b.ab("wait", "--url", "**/policies/detail?id=*");
     const policyId = detailId();
     b.waitText("已启用");
@@ -248,6 +287,16 @@ async function main(): Promise<void> {
     await stack.mysqlQuery(
       "INSERT INTO journey.t VALUES (4,'inc-a'),(5,'inc-b'); UPDATE journey.t SET v='inc-upd' WHERE id=1; DELETE FROM journey.t WHERE id=2;",
     );
+    const firstIncremental = await triggerFromPolicy(
+      api,
+      admin,
+      stack.origin,
+      policyId,
+      "立即增量",
+    );
+    await stack.mysqlQuery(
+      "INSERT INTO journey.t VALUES (6,'inc-two'); UPDATE journey.t SET v='inc-two-upd' WHERE id=3;",
+    );
     const snapshot = (await stack.mysqlQuery(snapshotSql)).trim();
     const incremental = await triggerFromPolicy(
       api,
@@ -257,17 +306,17 @@ async function main(): Promise<void> {
       "立即增量",
     );
     // A change after the incremental must not reach its restore.
-    await stack.mysqlQuery("INSERT INTO journey.t VALUES (6,'after-inc');");
+    await stack.mysqlQuery("INSERT INTO journey.t VALUES (7,'after-inc');");
     b.record({
       id: "05-incremental-completed",
       acceptance: "J-A2",
       description:
-        "立即增量 on the policy page runs an incremental on the same chain and ends 已完成",
+        "two successive 立即增量 actions complete on the same chain, preserving the snapshot of the selected second point",
       screenshot: b.shot("05-incremental-completed"),
     });
 
     const verified = await until(
-      "both FTP replicas verified",
+      "all three FTP replicas verified",
       longTimeout,
       async () => {
         const items = zListReplicasResponse
@@ -276,29 +325,37 @@ async function main(): Promise<void> {
             (item) =>
               item.repository_id === ftpId && item.status === "verified",
           );
-        return items.length === 2 ? items : undefined;
+        return items.length === 3 ? items : undefined;
       },
     );
     const verifiedBackups = new Set(verified.map((item) => item.backup_id));
     expect(
       verifiedBackups.has(full.backupId) &&
+        verifiedBackups.has(firstIncremental.backupId) &&
         verifiedBackups.has(incremental.backupId),
-      "the verified replicas are not those of the two backups",
+      "the verified replicas are not those of all three backups",
     );
     b.open(`${stack.origin}/replicas`);
     b.waitText("已校验");
-    const replicasPage = b.text();
-    for (const backupId of [full.backupId, incremental.backupId]) {
+    const replicaTargets = b.ab(
+      "eval",
+      "JSON.stringify(Array.from(document.querySelectorAll('a[href*=\"/backups/detail?id=\"]'), (element) => element.getAttribute('href')))",
+    );
+    for (const backupId of [
+      full.backupId,
+      firstIncremental.backupId,
+      incremental.backupId,
+    ]) {
       expect(
-        replicasPage.includes(backupId.slice(0, 8)),
-        `the replicas page does not list ${backupId}`,
+        replicaTargets.includes(backupId),
+        `the replicas page does not link ${backupId}`,
       );
     }
     b.record({
       id: "06-replicas-verified",
       acceptance: "J-A2",
       description:
-        "the replicas page lists both backups' FTP replicas as 已校验, as the API does",
+        "the replicas page lists all three backups' FTP replicas as 已校验, as the API does",
       screenshot: b.shot("06-replicas-verified"),
     });
 
@@ -307,26 +364,38 @@ async function main(): Promise<void> {
       (await api("GET", `/api/v1/sources/${sourceId}/chains`, admin)).json,
     ).items;
     expect(
-      chains.length === 1 && chains[0]?.members.length === 2,
-      "expected one chain with the full and the incremental",
+      chains.length === 1 && chains[0]?.members.length === 3,
+      "expected one chain with the full and two incrementals",
     );
-    const chainId = chains[0]?.id ?? "";
     b.open(`${stack.origin}/restores/new`);
     b.waitText("新建恢复");
     choose("数据源", "journey-source");
-    for (const label of [chainId, "物理增量 2"]) {
-      b.ab(
-        "wait",
-        "--fn",
-        `document.querySelector(${JSON.stringify(`[aria-label="${label}"]`)}) !== null`,
-      );
-      b.ab("find", "role", "radio", "click", "--name", label);
-    }
+    b.waitText("备份组：自");
+    // Chain members are full, then the two incrementals. Point labels are
+    // "物理增量 · <time>" and the two incrementals can share a minute, so
+    // select the third member by its backup id rather than the label.
+    const pointId = chains[0]?.members[2]?.id ?? "";
+    expect(pointId !== "", "the chain has no third backup point");
+    b.ab(
+      "wait",
+      "--fn",
+      `document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)}) !== null`,
+    );
+    const clicked = b.ab(
+      "eval",
+      `(() => { const input = document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)}); const target = input?.previousElementSibling; if (target?.getAttribute("role") !== "radio") return false; target.click(); return true; })()`,
+    );
+    expect(clicked === "true", "missing the third backup point");
+    b.ab(
+      "wait",
+      "--fn",
+      `document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)})?.previousElementSibling?.getAttribute("aria-checked") === "true"`,
+    );
     b.click("生成计划");
-    b.waitText("计划摘要");
+    b.waitText("导出空间");
     b.click("执行演练", "switch");
     b.fill(
-      "校验语句（verify_sql）",
+      "校验语句",
       "SELECT COUNT(*) FROM journey.t\nSELECT MAX(v) FROM journey.t",
     );
     b.fill("管理员密码", stack.admin.password);
@@ -337,7 +406,9 @@ async function main(): Promise<void> {
         "the wizard's read-only plan for the incremental with the rehearsal and two read-only SELECTs, before the confirmed execution",
       screenshot: b.shot("07-restore-confirm"),
     });
-    b.click("执行恢复");
+    b.ab("focus", "#restore-verify-sql");
+    b.ab("press", "Tab");
+    b.ab("press", "Enter");
     b.ab("wait", "--url", "**/restores/detail?id=*");
     const restoreId = detailId();
     b.waitText("已完成", longTimeout);
@@ -376,15 +447,67 @@ async function main(): Promise<void> {
       screenshot: b.shot("08-restore-rehearsed"),
     });
 
+    // ------------------------------------- U2: console layout evidence ---
+    const pages: Array<[string, string, string]> = [
+      ["overview", "/", "数据保护概览"],
+      ["sources", "/sources", "数据源"],
+      ["source-new", "/sources/new", "新建数据源"],
+      ["repositories", "/repositories", "备份仓库"],
+      ["repository-new", "/repositories/new", "新建仓库"],
+      ["policies", "/policies", "保护策略"],
+      ["policy-new", "/policies/new", "新建策略"],
+      ["policy-detail", `/policies/detail?id=${policyId}`, "调度预览"],
+      ["runs", "/runs", "运行记录"],
+      ["run-detail", `/runs/detail?id=${full.runId}`, "日志"],
+      ["replicas", "/replicas", "异地副本"],
+      ["restores", "/restores", "新建恢复"],
+      ["restore-wizard", "/restores/new", "新建恢复"],
+      ["restore-detail", `/restores/detail?id=${restoreId}`, "恢复详情"],
+      ["users", "/users", "用户列表"],
+      ["audit", "/audit", "审计记录"],
+      ["account", "/account", "修改密码"],
+      ["backup-detail", `/backups/detail?id=${full.backupId}`, "备份详情"],
+    ];
+    for (const [name, route, text] of pages) {
+      b.open(`${stack.origin}${route}`);
+      b.waitText(text);
+      const shots = b.responsive(`U2-${name}`);
+      b.record({
+        id: `U2-${name}`,
+        acceptance: "U2",
+        description: `${route} at 375, 768 and 1440 logical pixels; no page-level horizontal overflow`,
+        screenshots: shots,
+      });
+    }
+    b.signOut();
+    const loginShots = b.responsive("U2-login");
+    b.record({
+      id: "U2-login",
+      acceptance: "U2",
+      description:
+        "the initialized sign-in page at 375, 768 and 1440 logical pixels; it never offers setup again",
+      screenshots: loginShots,
+    });
     b.assertCleanConsole();
+    completed = true;
     b.record({
       id: "09-clean-console",
       acceptance: "J-A4",
       description: "no page errors or CSP violations across the whole journey",
     });
   } finally {
+    if (keepStack && completed) {
+      b.signIn(stack.origin, stack.admin.username, stack.admin.password);
+      b.open(`${stack.origin}/`);
+      b.waitText("数据保护概览");
+      const state = `${run.evidence}/authenticated-state.json`;
+      b.ab("state", "save", state);
+      console.log(`REVIEW_READY ${stack.origin} STATE ${state}`);
+      b.writeManifest(run.commit, run.dirty);
+      await new Promise(() => {});
+    }
     b.close();
-    await stack.stop();
+    if (!keepStack) await stack.stop();
   }
 }
 

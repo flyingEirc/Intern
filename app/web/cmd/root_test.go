@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func executeMigration(t *testing.T, dir, subcommand string) store.Status {
@@ -28,6 +29,7 @@ func executeMigration(t *testing.T, dir, subcommand string) store.Status {
 
 func TestMigrateStatusBeforeInitialization(t *testing.T) {
 	cleanConfigEnv(t)
+	t.Setenv("INTERN_DATABASE_URL", pgtest.New(t))
 	dir := filepath.Join(t.TempDir(), "metadata")
 	latest := latestWebVersion(t)
 	before := executeMigration(t, dir, "status")
@@ -42,6 +44,7 @@ func TestMigrateStatusBeforeInitialization(t *testing.T) {
 
 func TestMigrateCommands(t *testing.T) {
 	cleanConfigEnv(t)
+	t.Setenv("INTERN_DATABASE_URL", pgtest.New(t))
 	dir := filepath.Join(t.TempDir(), "metadata")
 	latest := latestWebVersion(t)
 	after := executeMigration(t, dir, "up")
@@ -52,7 +55,7 @@ func TestMigrateCommands(t *testing.T) {
 	if after != repeated {
 		t.Fatalf("repeated migration changed status: %+v != %+v", after, repeated)
 	}
-	database, err := store.Open(t.Context(), dir)
+	database, err := store.Open(t.Context(), os.Getenv("INTERN_DATABASE_URL"))
 	if err != nil {
 		t.Fatal(err)
 	}

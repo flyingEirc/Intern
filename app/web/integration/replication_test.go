@@ -195,6 +195,7 @@ func requirePinnedFTP(t *testing.T, ctx context.Context, server tc.Container, se
 // mounted read-only and its own private fixture tree.
 func startR1Worker(t *testing.T, ctx context.Context, nw *tc.DockerNetwork, image, binary string, mounts []tc.ContainerMount, uid, gid int, env map[string]string) tc.Container {
 	t.Helper()
+	env = workerPostgres(t, ctx, nw, env)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: image, ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name}, Mounts: mounts, Env: env,

@@ -12,6 +12,8 @@ import (
 	"testing/fstest"
 
 	"github.com/pressly/goose/v3"
+
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 // migrationSet returns the embedded migrations whose version is at most through,
@@ -48,7 +50,7 @@ func migrationSet(t *testing.T, through int64) fs.FS {
 
 func applyMigrations(t *testing.T, db *sql.DB, fsys fs.FS) int64 {
 	t.Helper()
-	provider, err := goose.NewProvider(goose.DialectSQLite3, db, fsys, providerOptions()...)
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys, providerOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func applyMigrations(t *testing.T, db *sql.DB, fsys fs.FS) int64 {
 		t.Fatalf("migrate: %v", err)
 	}
 	var current int64
-	if err = db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied = 1`).Scan(&current); err != nil {
+	if err = db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied`).Scan(&current); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("applied %d migrations, now at version %d", len(applied), current)
@@ -83,9 +85,9 @@ func TestFTPSMigrationUpgradesExistingRows(t *testing.T) {
 // half-built copy, still at the FTPS version — so a retry starts from the same
 // state. Without one it must restore the plain-only shape and keep the rows.
 func TestFTPSMigrationDownIsAtomic(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "down.db")
-	db := openMigrationDB(t, path)
-	latest := latestEmbedded(t)
+	dsn := pgtest.New(t)
+	db := openMigrationDB(t, dsn)
+	const latest int64 = 9
 	applyMigrations(t, db, migrationSet(t, latest))
 	for _, statement := range []string{
 		ftpRepositoryInsert("r-plain", "plain-one", "plain"),
@@ -95,7 +97,7 @@ func TestFTPSMigrationDownIsAtomic(t *testing.T) {
 			t.Fatalf("seed %q: %v", statement, err)
 		}
 	}
-	provider, err := goose.NewProvider(goose.DialectSQLite3, db, migrationSet(t, latest), providerOptions()...)
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrationSet(t, latest), providerOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,13 +109,13 @@ func TestFTPSMigrationDownIsAtomic(t *testing.T) {
 	if err = db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db = openMigrationDB(t, path)
+	db = openMigrationDB(t, dsn)
 	requireRepositoryState(t, db, latest, 2)
 
 	if _, err = db.Exec(`DELETE FROM repositories WHERE id='r-ftps'`); err != nil {
 		t.Fatal(err)
 	}
-	provider, err = goose.NewProvider(goose.DialectSQLite3, db, migrationSet(t, latest), providerOptions()...)
+	provider, err = goose.NewProvider(goose.DialectPostgres, db, migrationSet(t, latest), providerOptions()...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,17 +128,14 @@ func TestFTPSMigrationDownIsAtomic(t *testing.T) {
 	}
 }
 
-func openMigrationDB(t *testing.T, path string) *sql.DB {
+func openMigrationDB(t *testing.T, dsn string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatal(err)
-	}
 	return db
 }
 
@@ -145,14 +144,14 @@ func openMigrationDB(t *testing.T, path string) *sql.DB {
 func requireRepositoryState(t *testing.T, db *sql.DB, version int64, rows int) {
 	t.Helper()
 	var current int64
-	if err := db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied = 1`).Scan(&current); err != nil {
+	if err := db.QueryRow(`SELECT MAX(version_id) FROM web_goose_db_version WHERE is_applied AND id IN (SELECT MAX(id) FROM web_goose_db_version GROUP BY version_id)`).Scan(&current); err != nil {
 		t.Fatal(err)
 	}
 	if current != version {
 		t.Fatalf("schema version = %d, want %d", current, version)
 	}
 	var leftovers int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('repositories_ftps','repositories_plain')`).
+	if err := db.QueryRow(`SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('repositories_ftps','repositories_plain')`).
 		Scan(&leftovers); err != nil {
 		t.Fatal(err)
 	}
@@ -172,34 +171,24 @@ func requireRepositoryState(t *testing.T, db *sql.DB, version int64, rows int) {
 // repository, a source and a policy that references the repository.
 func seedPreFTPSDatabase(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	// The product store runs on exactly one connection, which the explicit
-	// BEGIN/COMMIT inside the NO TRANSACTION rebuild relies on.
-	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
-		t.Fatal(err)
-	}
+	db := openMigrationDB(t, pgtest.New(t))
 	if got := applyMigrations(t, db, migrationSet(t, 8)); got != 8 {
 		t.Fatalf("baseline version = %d, want 8", got)
 	}
 	// The plain-only shape must refuse FTPS before the upgrade, which is what
 	// makes this database a real pre-S2 state instead of an empty file.
-	if _, err = db.Exec(ftpRepositoryInsert("r-early", "early", "explicit")); !sqliteRejects(err) {
+	if _, err := db.Exec(ftpRepositoryInsert("r-early", "early", "explicit")); !sqliteRejects(err) {
 		t.Fatalf("the old schema accepted FTPS: %v", err)
 	}
 	for _, statement := range []string{
 		ftpRepositoryInsert("r-plain", "plain-one", "plain"),
 		`INSERT INTO sources (id,name,socket,datadir,username,secret_ciphertext,created_at,updated_at)
-		 VALUES ('s-1','source','/run/mysqld/mysqld.sock','/var/lib/mysql','backup',X'736563726574','now','then')`,
+		 VALUES ('s-1','source','/run/mysqld/mysqld.sock','/var/lib/mysql','backup',decode('736563726574','hex'),'now','then')`,
 		`INSERT INTO policies (id,name,source_id,local_repository_id,replica_repository_id,full_cron,incremental_cron,
 			timezone,max_chain_length,parallel,throttle,zstd_level,page_tracking,enabled,created_at,updated_at)
 		 VALUES ('p-1','policy','s-1','r-plain','r-plain','0 2 * * *','0 * * * *','UTC',3,1,0,3,0,0,'now','then')`,
 	} {
-		if _, err = db.Exec(statement); err != nil {
+		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("seed %q: %v", statement, err)
 		}
 	}
@@ -241,24 +230,9 @@ func requireForeignKeysIntact(t *testing.T, db *sql.DB) {
 		VALUES ('p-bad','bad','s-1','r-missing','0 2 * * *','0 * * * *','UTC',3,1,0,3,0,0,'now','then')`); !sqliteRejects(err) {
 		t.Fatalf("a dangling repository reference was accepted: %v", err)
 	}
-	var violations int
-	rows, err := db.Query(`PRAGMA foreign_key_check`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		violations++
-	}
-	_ = rows.Close()
-	if violations != 0 {
-		t.Fatalf("foreign key violations after upgrade: %d", violations)
-	}
-	var pragma string
-	if err = db.QueryRow(`PRAGMA foreign_keys`).Scan(&pragma); err != nil {
-		t.Fatal(err)
-	}
-	if pragma != "1" {
-		t.Fatalf("foreign_keys left at %q by the migration", pragma)
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM policies p JOIN repositories r ON r.id = p.local_repository_id`).Scan(&policies); err != nil || policies != 1 {
+		t.Fatalf("preserved policy references = %d, %v", policies, err)
 	}
 }
 
@@ -295,7 +269,7 @@ func ftpRepositoryInsert(id, name, mode string) string {
 	return `INSERT INTO repositories (id,name,kind,config_json,secret_ciphertext,tls_mode,created_at,updated_at) VALUES (
 		'` + id + `','` + name + `','ftp',
 		'{"host":"ftp.example","port":21,"base_path":"/backups","username":"u"}',
-		X'736563726574','` + mode + `','now','then')`
+		decode('736563726574','hex'),'` + mode + `','now','then')`
 }
 
 func noSecretFTPRepositoryInsert(id, name, mode string) string {

@@ -33,7 +33,7 @@ func New(out, stderr io.Writer) *cobra.Command {
 	root.SetOut(out)
 	root.SetErr(stderr)
 	app := &application{config: newConfigLoader(root), out: out, stderr: stderr}
-	root.AddCommand(app.serveCommand(), app.migrateCommand(), app.userCommand(), app.healthcheckCommand())
+	root.AddCommand(app.serveCommand(), app.migrateCommand(), app.healthcheckCommand())
 	return root
 }
 
@@ -53,21 +53,21 @@ func (a *application) emit(value any) error {
 }
 
 func (a *application) serveCommand() *cobra.Command {
-	return &cobra.Command{Use: "serve", Short: "Migrate metadata and serve HTTP", Args: cobra.NoArgs, RunE: a.serve}
+	return &cobra.Command{Use: "serve", Short: "Migrate PostgreSQL metadata and serve HTTP", Args: cobra.NoArgs, RunE: a.serve}
 }
 
 func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
-	// Configuration failure returns before metadata creation or a listen socket.
-	c, err := a.config.load()
+	c, logger, err := a.serveSetup()
 	if err != nil {
 		return err
 	}
-	level, err := c.logLevel()
+	databaseURL, err := c.databaseURL()
 	if err != nil {
 		return err
 	}
-	logger := slog.New(slog.NewJSONHandler(a.stderr, &slog.HandlerOptions{Level: level}))
-	database, err := store.Open(command.Context(), c.MetadataDir)
+	serveCtx, cancelServe := context.WithCancel(command.Context())
+	defer cancelServe()
+	database, err := store.Open(serveCtx, databaseURL)
 	if err != nil {
 		return err
 	}
@@ -77,32 +77,41 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 			logger.Info("shutdown complete")
 		}
 	}()
+	return runServer(serveCtx, cancelServe, database, c, logger)
+}
+
+// serveSetup returns before metadata creation or a listen socket on any
+// configuration failure.
+func (a *application) serveSetup() (configuration, *slog.Logger, error) {
+	c, err := a.config.load()
+	if err != nil {
+		return c, nil, err
+	}
+	level, err := c.logLevel()
+	if err != nil {
+		return c, nil, err
+	}
+	return c, slog.New(slog.NewJSONHandler(a.stderr, &slog.HandlerOptions{Level: level})), nil
+}
+
+func runServer(ctx context.Context, cancelServe context.CancelFunc, database *store.Store,
+	c configuration, logger *slog.Logger,
+) (retErr error) {
 	authentication, err := auth.New(database, c.Session, auth.DefaultPasswordParams())
 	if err != nil {
 		return err
 	}
-	stopCleanup := authentication.StartCleanup(command.Context(), time.Minute, logger)
+	stopCleanup := authentication.StartCleanup(ctx, time.Minute, logger)
 	defer stopCleanup()
 	settings, err := c.resourceSettings()
 	if err != nil {
 		return err
 	}
-	// The dispatcher owns its own context so Stop can drain it even when the
-	// command context is already canceled: recovery runs before the workers
-	// start, and the bounded wait must exceed chain.Complete's 15s commit
-	// window so a finishing run commits before the database closes.
-	dispatcher, err := startDispatcher(command.Context(), database, settings, logger)
+	dispatcher, err := startDispatcher(ctx, database, settings, logger)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if stopErr := dispatcher.Stop(); stopErr != nil {
-			// Workers outlived the bounded window: their state is reclaimed by
-			// the next start's recovery. This error never describes a
-			// completed backup, so it must not be swallowed.
-			retErr = errors.Join(retErr, stopErr)
-		}
-	}()
+	defer func() { retErr = errors.Join(retErr, dispatcher.Stop()) }()
 	engine, err := server.NewEngineWithResources(database, logger, c.TrustedProxies, authentication,
 		&resources.Service{Store: database, Settings: settings}, dispatcher, server.WithRestores(dispatcher))
 	if err != nil {
@@ -117,7 +126,20 @@ func (a *application) serve(command *cobra.Command, _ []string) (retErr error) {
 	// the same origin; other builds serve the API alone, unchanged.
 	srv := server.New(config, webui.Mount(server.Handler(engine), webui.Assets()))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
-	return server.Run(command.Context(), srv, config)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		database.Watch(ctx)
+		select {
+		case <-ctx.Done():
+		case <-database.Lost():
+			cancelServe()
+			logger.Error("PostgreSQL owner connection lost; stopping scheduler and server")
+		}
+	}()
+	defer func() { cancelServe(); <-watchDone }()
+	runErr := server.Run(ctx, srv, config)
+	return errors.Join(runErr, database.Err())
 }
 
 // logStart reports the listener shape, including the plaintext-proxy warning
@@ -156,7 +178,9 @@ func (a *application) migrateCommand() *cobra.Command {
 	command.AddCommand(
 		&cobra.Command{Use: "up", Short: "Apply pending migrations under exclusive ownership", Args: cobra.NoArgs, RunE: a.migrateUp},
 		&cobra.Command{Use: "status", Short: "Read migration status without locking or changing the database", Args: cobra.NoArgs, RunE: a.migrateStatus},
+		&cobra.Command{Use: "import-sqlite", Short: "Copy one legacy SQLite control plane into an empty PostgreSQL database", Args: cobra.NoArgs, RunE: a.migrateImportSQLite},
 	)
+	command.PersistentFlags().String("sqlite-file", "", "Absolute legacy SQLite control-plane file to import read-only")
 	return command
 }
 
@@ -165,12 +189,16 @@ func (a *application) migrateUp(command *cobra.Command, _ []string) (retErr erro
 	if err != nil {
 		return err
 	}
-	database, err := store.Open(command.Context(), c.MetadataDir)
+	databaseURL, err := c.databaseURL()
+	if err != nil {
+		return err
+	}
+	database, err := store.Open(command.Context(), databaseURL)
 	if err != nil {
 		return err
 	}
 	defer fsutil.Close(&retErr, database)
-	status, err := store.ReadStatus(command.Context(), c.MetadataDir)
+	status, err := store.ReadStatus(command.Context(), databaseURL)
 	if err != nil {
 		return err
 	}
@@ -182,9 +210,33 @@ func (a *application) migrateStatus(command *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	status, err := store.ReadStatus(command.Context(), c.MetadataDir)
+	databaseURL, err := c.databaseURL()
+	if err != nil {
+		return err
+	}
+	status, err := store.ReadStatus(command.Context(), databaseURL)
 	if err != nil {
 		return err
 	}
 	return a.emit(status)
+}
+
+func (a *application) migrateImportSQLite(command *cobra.Command, _ []string) error {
+	c, err := a.config.load()
+	if err != nil {
+		return err
+	}
+	source, err := command.Flags().GetString("sqlite-file")
+	if err != nil {
+		return err
+	}
+	databaseURL, err := c.databaseURL()
+	if err != nil {
+		return err
+	}
+	result, err := store.ImportSQLite(command.Context(), databaseURL, source)
+	if err != nil {
+		return err
+	}
+	return a.emit(result)
 }

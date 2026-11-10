@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/app/web/internal/storetest"
 )
 
 // fakeRestoreEngine is the restore seam a unit test drives. Every function is
@@ -93,10 +94,7 @@ func restorePlan(backupID string) store.RestorePlan {
 // restoreUser creates the user a restore row's requested_by references.
 func (f *fixture) restoreUser() store.User {
 	f.t.Helper()
-	user, err := f.database.CreateAdmin(f.t.Context(), "restore-admin", "hash")
-	if err != nil {
-		f.t.Fatal(err)
-	}
+	user := storetest.SeedAdmin(f.t, f.database, "restore-admin", "hash")
 	return user
 }
 

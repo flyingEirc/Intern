@@ -2,8 +2,11 @@
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { ClockIcon, CopyIcon, ShieldAlertIcon } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRef, useState } from "react";
+import { Diagnostics } from "@/components/resources/diagnostics";
+import { EmptyChoiceField } from "@/components/resources/empty-choice-field";
 import {
   PageHeader,
   ResourceError,
@@ -18,6 +21,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
 import {
   Field,
   FieldDescription,
@@ -60,7 +69,7 @@ import type {
   Replica,
   RestorePlan,
 } from "@/lib/api/generated/types.gen";
-import { formatBytes, formatDateTime, formatLsn } from "@/lib/resources/format";
+import { formatBytes, formatDateTime } from "@/lib/resources/format";
 import { hasPermission } from "@/lib/resources/permissions";
 import {
   useRepositoryChoices,
@@ -69,6 +78,7 @@ import {
 } from "@/lib/resources/queries";
 import {
   describeRestoreError,
+  exportLocation,
   isConfirmationFailed,
   isPlanChanged,
   isRateLimited,
@@ -79,10 +89,7 @@ import {
   riskText,
   shortenDigest,
 } from "@/lib/resources/restore";
-import { backupKindText, replicaStatusLabel } from "@/lib/resources/runs";
-
-const pitrReason =
-  "binlog 归档尚未实现（路线图 N1），目前只能恢复到链上已完成的检查点，不能恢复到任意时间点。";
+import { backupKindText } from "@/lib/resources/runs";
 
 export function RestoreWizard() {
   const presetBackupId = useSearchParams().get("backup_id");
@@ -114,13 +121,20 @@ export function RestoreWizard() {
     (sources.data?.items ?? []).map((source) => [source.id, source.name]),
   );
   const chainItems = chains.data?.items ?? [];
-  const selectedChain = chainItems.find((chain) => chain.id === chainId);
+  const effectiveChainId = chainItems.some((chain) => chain.id === chainId)
+    ? chainId
+    : chainItems.length === 1
+      ? (chainItems[0]?.id ?? "")
+      : "";
+  const selectedChain = chainItems.find(
+    (chain) => chain.id === effectiveChainId,
+  );
   const selectedBackup = selectedChain?.members.find(
     (member) => member.id === backupId,
   );
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex w-full max-w-4xl flex-col gap-5">
       <PageHeader
         title="新建恢复"
         description="选择一个已完成的备份点，查看只读计划，再由管理员确认执行。恢复不会替换生产实例。"
@@ -128,86 +142,116 @@ export function RestoreWizard() {
 
       <Card>
         <CardHeader>
-          <CardTitle>恢复范围</CardTitle>
-          <CardDescription>{pitrReason}</CardDescription>
+          <CardTitle>1 · 选择恢复范围</CardTitle>
+          <CardDescription>
+            选择一次已完成的备份，恢复到隔离的导出目录。
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <RadioGroup aria-label="恢复方式" value="checkpoint">
             <div className="flex items-start gap-2 text-sm">
               <RadioGroupItem
                 value="checkpoint"
-                aria-label="恢复到备份链上的检查点"
+                aria-label="恢复到某次已完成的备份"
               />
-              <span>恢复到备份链上的检查点</span>
+              <span>恢复到某次已完成的备份</span>
             </div>
             <div className="flex items-start gap-2 text-sm">
               <RadioGroupItem
                 value="pitr"
                 disabled
-                aria-label="任意时间点恢复（PITR）暂不可用"
+                aria-label="任意时间点恢复（暂不支持）"
               />
               <div className="flex flex-col gap-1">
                 <span className="text-muted-foreground">
-                  任意时间点恢复（PITR）暂不可用
+                  任意时间点恢复（暂不支持）
                 </span>
-                <span className="text-muted-foreground">{pitrReason}</span>
+                <span className="text-muted-foreground">
+                  当前版本只能恢复到已完成的备份时间点。
+                </span>
               </div>
             </div>
           </RadioGroup>
 
-          <Field>
-            <FieldLabel htmlFor="restore-source">数据源</FieldLabel>
-            <Select
-              items={sourceLabels}
-              value={sourceId === "" ? null : sourceId}
-              onValueChange={(value) => {
-                setSourceId(value as string);
-                setChainId("");
-                setBackupId("");
-              }}
-            >
-              <SelectTrigger id="restore-source" className="w-full">
-                <SelectValue placeholder="请选择数据源" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {(sources.data?.items ?? []).map((source) => (
-                    <SelectItem key={source.id} value={source.id}>
-                      {source.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            {sources.isError ? (
-              <ResourceError
-                title="无法读取数据源"
-                error={sources.error}
-                onRetry={() => sources.refetch()}
-              />
-            ) : null}
-          </Field>
+          {sources.isSuccess && (sources.data?.items.length ?? 0) === 0 ? (
+            <EmptyChoiceField
+              id="restore-source"
+              label="数据源"
+              message="还没有可恢复的备份"
+              placeholder="暂无可选数据源"
+              href="/policies"
+              action="查看保护策略"
+            />
+          ) : (
+            <Field>
+              <FieldLabel htmlFor="restore-source">数据源</FieldLabel>
+              <Select
+                items={sourceLabels}
+                value={sourceId === "" ? null : sourceId}
+                onValueChange={(value) => {
+                  setSourceId(value as string);
+                  setChainId("");
+                  setBackupId("");
+                }}
+              >
+                <SelectTrigger id="restore-source" className="w-full">
+                  <SelectValue placeholder="请选择数据源" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    {(sources.data?.items ?? []).map((source) => (
+                      <SelectItem key={source.id} value={source.id}>
+                        {source.name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              {sources.isError ? (
+                <ResourceError
+                  title="无法读取数据源"
+                  error={sources.error}
+                  onRetry={() => sources.refetch()}
+                />
+              ) : null}
+            </Field>
+          )}
 
           {sourceId !== "" ? (
             <Field>
-              <FieldLabel>备份链</FieldLabel>
+              <FieldLabel>可恢复的备份</FieldLabel>
               {chains.isPending ? <Skeleton className="h-16 w-full" /> : null}
               {chains.isError ? (
                 <ResourceError
-                  title="无法读取备份链"
+                  title="无法读取备份列表"
                   error={chains.error}
                   onRetry={() => chains.refetch()}
                 />
               ) : null}
               {chains.isSuccess && chainItems.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  这个数据源还没有备份链。
-                </p>
+                <Empty className="border">
+                  <EmptyHeader>
+                    <EmptyTitle className="text-sm">
+                      这个数据源还没有可恢复的备份
+                    </EmptyTitle>
+                    <EmptyContent>
+                      <Button
+                        nativeButton={false}
+                        role="link"
+                        variant="outline"
+                        size="sm"
+                        render={<Link href="/policies" />}
+                      >
+                        查看保护策略
+                      </Button>
+                    </EmptyContent>
+                  </EmptyHeader>
+                </Empty>
               ) : null}
-              {chainItems.length > 0 ? (
+              {chainItems.length > 1 ? (
                 <RadioGroup
-                  aria-label="备份链"
-                  value={chainId}
+                  aria-label="可恢复的备份分组"
+                  value={effectiveChainId}
                   onValueChange={(value) => {
                     setChainId(value as string);
                     setBackupId("");
@@ -218,15 +262,21 @@ export function RestoreWizard() {
                       key={chain.id}
                       className="flex items-center gap-2 text-sm"
                     >
-                      <RadioGroupItem value={chain.id} aria-label={chain.id} />
-                      <span className="font-mono text-xs">{chain.id}</span>
-                      <span className="text-muted-foreground">
-                        {chain.members.length} 个备份点 · 开始{" "}
-                        {formatDateTime(chain.started_at)}
+                      <RadioGroupItem
+                        value={chain.id}
+                        aria-label={`备份组：自 ${formatDateTime(chain.started_at)} 全量起`}
+                      />
+                      <span>
+                        备份组：自 {formatDateTime(chain.started_at)} 全量起
                       </span>
                     </div>
                   ))}
                 </RadioGroup>
+              ) : null}
+              {chainItems.length === 1 && selectedChain ? (
+                <p className="text-sm text-muted-foreground">
+                  备份组：自 {formatDateTime(selectedChain.started_at)} 全量起
+                </p>
               ) : null}
             </Field>
           ) : null}
@@ -258,8 +308,6 @@ function BackupPoints({
   onSelect: (id: string) => void;
 }) {
   const repositories = useRepositoryChoices();
-  // The chains contract carries no replica rows, so the verified copies come
-  // from the replica queue of this source (one bounded read).
   const replicas = useQuery(
     listReplicasOptions({
       query: { source_id: chain.source_id, status: "verified", limit: 200 },
@@ -280,10 +328,8 @@ function BackupPoints({
   );
   return (
     <Field>
-      <FieldLabel>备份点</FieldLabel>
-      <FieldDescription>
-        只能选择已完成的备份点。本地是否仍在、以及哪些仓库持有已校验副本，都来自目录。
-      </FieldDescription>
+      <FieldLabel>2 · 选择备份点</FieldLabel>
+      <FieldDescription>只能选择已完成的备份点。</FieldDescription>
       <RadioGroup
         aria-label="备份点"
         value={backupId}
@@ -293,35 +339,31 @@ function BackupPoints({
           <TableHeader>
             <TableRow>
               <TableHead>选择</TableHead>
-              <TableHead>序号</TableHead>
               <TableHead>类型</TableHead>
               <TableHead>完成时间</TableHead>
-              <TableHead>LSN</TableHead>
-              <TableHead>本地</TableHead>
-              <TableHead>已校验副本</TableHead>
+              <TableHead>本地备份</TableHead>
+              <TableHead>异地副本</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {chain.members.map((member) => {
               const completed = member.status === "completed";
               const verified = verifiedBy.get(member.id) ?? [];
+              const when = formatDateTime(member.completed_at);
+              const label = `${backupKindText(member.kind)} · ${when}`;
               return (
                 <TableRow key={member.id}>
                   <TableCell>
                     <RadioGroupItem
                       value={member.id}
                       disabled={!completed}
-                      aria-label={`${backupKindText(member.kind)} ${member.seq}`}
+                      aria-label={label}
                     />
                   </TableCell>
-                  <TableCell>{member.seq}</TableCell>
                   <TableCell>{backupKindText(member.kind)}</TableCell>
-                  <TableCell>{formatDateTime(member.completed_at)}</TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {formatLsn(member.from_lsn)} → {formatLsn(member.to_lsn)}
-                  </TableCell>
+                  <TableCell>{when}</TableCell>
                   <TableCell>
-                    {member.local_present ? "存在" : "已不在"}
+                    {member.local_present ? "可用" : "已清理"}
                   </TableCell>
                   <TableCell>
                     {replicas.isPending
@@ -333,7 +375,8 @@ function BackupPoints({
                           : verified
                               .map(
                                 (replica) =>
-                                  `${names.get(replica.repository_id) ?? replica.repository_id}（${replicaStatusLabel[replica.status]}）`,
+                                  names.get(replica.repository_id) ??
+                                  replica.repository_id,
                               )
                               .join("、")}
                   </TableCell>
@@ -354,33 +397,28 @@ function PlanStep({
   backup: Backup;
   canExecute: boolean;
 }) {
-  const repositories = useRepositoryChoices();
-  const repositoryNames = new Map(
-    (repositories.data?.items ?? []).map((repository) => [
-      repository.id,
-      repository.name,
-    ]),
-  );
   const router = useRouter();
-  const plan = useMutation(planRestoreMutation());
-  const execute = useMutation(executeRestoreMutation());
+  const repositories = useRepositoryChoices();
   const [password, setPassword] = useState("");
+  const [passwordInvalid, setPasswordInvalid] = useState(false);
   const [rehearse, setRehearse] = useState(false);
+  const [rehearseError, setRehearseError] = useState<string | null>(null);
   const [verifySql, setVerifySql] = useState("");
   const [verifyError, setVerifyError] = useState<string | null>(null);
-  const [passwordInvalid, setPasswordInvalid] = useState(false);
-  const [rehearseError, setRehearseError] = useState<string | null>(null);
-  // The submission in flight, kept in a ref so two activations dispatched
-  // before React re-renders (a fast double click) share one request instead of
-  // queueing two restores. `pending` blocks re-entry only while a request is
-  // outstanding; the key is kept after an unknown outcome (network or 5xx) so
-  // the retry replays the same restore, and dropped after a definitive answer.
   const flightRef = useRef<{
     key: string;
     digest: string;
     backupId: string;
     pending: boolean;
   } | null>(null);
+  const plan = useMutation(planRestoreMutation());
+  const execute = useMutation(executeRestoreMutation());
+  const repositoryNames = new Map(
+    (repositories.data?.items ?? []).map((repository) => [
+      repository.id,
+      repository.name,
+    ]),
+  );
 
   function requestPlan() {
     setPassword("");
@@ -401,7 +439,9 @@ function PlanStep({
     if (sameSubmission && existing.pending) {
       return;
     }
-    const parsed = parseVerifySql(verifySql);
+    const parsed = rehearse
+      ? parseVerifySql(verifySql)
+      : { ok: true as const, statements: [] };
     if (!parsed.ok) {
       setVerifyError(parsed.message);
       return;
@@ -441,9 +481,6 @@ function PlanStep({
           setPasswordInvalid(isConfirmationFailed(error));
           setVerifyError(fields.verifySql ?? null);
           setRehearseError(fields.rehearse ?? null);
-          // A 4xx is a definitive refusal: nothing was queued, so the next
-          // attempt gets its own key. Anything else may have been accepted,
-          // so the retry keeps the key and the server replays it.
           const definitive =
             error instanceof ApiError &&
             error.status >= 400 &&
@@ -464,15 +501,18 @@ function PlanStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>只读计划</CardTitle>
+        <CardTitle>3 · 恢复计划</CardTitle>
         <CardDescription>
-          生成计划不写恢复记录、不写文件、也不访问
-          FTP。执行时服务端会重新计算计划，摘要不一致会被拒绝。
+          查看空间需求与导出位置，确认后开始隔离恢复。备份内容变化时需要重新生成计划。
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div>
-          <Button disabled={plan.isPending} onClick={requestPlan}>
+          <Button
+            variant={current ? "outline" : "default"}
+            disabled={plan.isPending}
+            onClick={requestPlan}
+          >
             {plan.isPending ? <Spinner data-icon="inline-start" /> : null}
             {current ? "重新生成计划" : "生成计划"}
           </Button>
@@ -581,11 +621,12 @@ function PlanSummary({
   plan: RestorePlan;
   repositoryNames: Map<string, string>;
 }) {
+  const location = exportLocation(plan.export_path);
   return (
     <div className="flex flex-col gap-4">
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-        <dt className="text-muted-foreground">目标 LSN</dt>
-        <dd className="font-mono text-xs">{plan.target_to_lsn}</dd>
+        <dt className="text-muted-foreground">恢复范围</dt>
+        <dd>{plan.links.length} 个备份点</dd>
         <dt className="text-muted-foreground">工作空间</dt>
         <dd>
           需要 {formatBytes(plan.required_work_bytes)}，可用{" "}
@@ -596,77 +637,90 @@ function PlanSummary({
           需要 {formatBytes(plan.required_export_bytes)}，可用{" "}
           {formatBytes(plan.available_export_bytes)}
         </dd>
-        <dt className="text-muted-foreground">导出路径</dt>
-        <dd className="font-mono text-xs break-all">{plan.export_path}</dd>
+        <dt className="text-muted-foreground">导出位置</dt>
+        <dd className="break-all">
+          <span className="font-mono text-xs">{location.root}</span>
+          {location.pending ? (
+            <span className="text-muted-foreground"> · 将新建恢复目录</span>
+          ) : null}
+        </dd>
         <dt className="text-muted-foreground">演练</dt>
         <dd>{plan.rehearsal_available ? "可用" : "不可用"}</dd>
-        <dt className="text-muted-foreground">计划摘要</dt>
-        <dd className="flex items-center gap-2">
-          <span className="font-mono text-xs" title={plan.plan_digest}>
-            {shortenDigest(plan.plan_digest)}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void navigator.clipboard.writeText(plan.plan_digest).then(
-                () => toast.add({ type: "success", title: "已复制计划摘要" }),
-                () =>
-                  toast.add({
-                    type: "error",
-                    title: "无法复制计划摘要",
-                  }),
-              );
-            }}
-          >
-            <CopyIcon data-icon="inline-start" />
-            复制
-          </Button>
-        </dd>
       </dl>
-
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>序号</TableHead>
-            <TableHead>类型</TableHead>
-            <TableHead>来源</TableHead>
-            <TableHead>仓库</TableHead>
-            <TableHead>LSN</TableHead>
-            <TableHead>载荷</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {plan.links.map((link) => (
-            <TableRow key={link.backup_id}>
-              <TableCell>{link.seq}</TableCell>
-              <TableCell>{link.kind === "full" ? "全量" : "增量"}</TableCell>
-              <TableCell>{linkSourceLabel[link.source]}</TableCell>
-              <TableCell>
-                {link.repository_id === ""
-                  ? "—"
-                  : (repositoryNames.get(link.repository_id) ??
-                    link.repository_id)}
-              </TableCell>
-              <TableCell className="font-mono text-xs">
-                {link.from_lsn} → {link.to_lsn}
-              </TableCell>
-              <TableCell>
-                {formatBytes(link.payload_size)} +{" "}
-                {formatBytes(link.metadata_size)} 元数据
-              </TableCell>
+      <Diagnostics>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          <dt className="text-muted-foreground">目标 LSN</dt>
+          <dd className="font-mono text-xs">{plan.target_to_lsn}</dd>
+          <dt className="text-muted-foreground">计划摘要</dt>
+          <dd className="flex items-center gap-2">
+            <span className="font-mono text-xs" title={plan.plan_digest}>
+              {shortenDigest(plan.plan_digest)}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                void navigator.clipboard.writeText(plan.plan_digest).then(
+                  () => toast.add({ type: "success", title: "已复制计划摘要" }),
+                  () =>
+                    toast.add({
+                      type: "error",
+                      title: "无法复制计划摘要",
+                    }),
+                );
+              }}
+            >
+              <CopyIcon data-icon="inline-start" />
+              复制
+            </Button>
+          </dd>
+        </dl>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>序号</TableHead>
+              <TableHead>类型</TableHead>
+              <TableHead>来源</TableHead>
+              <TableHead>仓库</TableHead>
+              <TableHead>数据量</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+          </TableHeader>
+          <TableBody>
+            {plan.links.map((link) => (
+              <TableRow key={link.backup_id}>
+                <TableCell>{link.seq}</TableCell>
+                <TableCell>{link.kind === "full" ? "全量" : "增量"}</TableCell>
+                <TableCell>{linkSourceLabel[link.source]}</TableCell>
+                <TableCell>
+                  {link.repository_id === ""
+                    ? "—"
+                    : (repositoryNames.get(link.repository_id) ??
+                      link.repository_id)}
+                </TableCell>
+                <TableCell>
+                  {formatBytes(link.payload_size)} +{" "}
+                  {formatBytes(link.metadata_size)} 元数据
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          <dt className="text-muted-foreground">风险代码</dt>
+          <dd className="flex flex-wrap gap-2 font-mono text-xs break-all">
+            {plan.risks.map((code) => (
+              <span key={code}>{code}</span>
+            ))}
+          </dd>
+        </dl>
+      </Diagnostics>
 
       <div className="flex flex-col gap-2">
         <p className="text-sm font-medium">风险</p>
         {plan.risks.map((code) => (
           <Alert key={code}>
             <ShieldAlertIcon />
-            <AlertTitle className="font-mono text-xs">{code}</AlertTitle>
-            <AlertDescription>{riskText(code)}</AlertDescription>
+            <AlertTitle>{riskText(code)}</AlertTitle>
           </Alert>
         ))}
       </div>
@@ -709,7 +763,7 @@ function ConfirmStep({
   return (
     <div className="flex flex-col gap-4 border-t pt-4">
       <div>
-        <p className="text-sm font-medium">确认执行</p>
+        <p className="text-sm font-medium">4 · 确认执行</p>
         <p className="text-sm text-muted-foreground">
           需要重新输入管理员密码。密码只用于这一次确认，不会被保存，提交后立即从输入框清除。
         </p>
@@ -746,7 +800,7 @@ function ConfirmStep({
           onChange={(event) => onPassword(event.target.value)}
         />
         <FieldDescription>
-          密码错误会得到 403，且不会创建恢复记录。改密与恢复确认共用同一限速。
+          密码错误不会开始恢复；多次错误会被暂时限制。
         </FieldDescription>
         {passwordInvalid ? (
           <FieldError>密码确认失败，请重新输入。</FieldError>
@@ -765,37 +819,32 @@ function ConfirmStep({
         </div>
         {rehearsalDisabled ? (
           <FieldDescription>
-            当前部署没有配置
-            mysqld，演练不可用。恢复本身仍可执行，只是不能在隔离实例上校验。
+            当前部署没有配置演练用的数据库程序，演练不可用。恢复本身仍可执行。
           </FieldDescription>
         ) : (
           <FieldDescription>
-            演练在导出发布之后进行。演练失败不会让已发布的导出变成失败的恢复。
+            恢复完成后启动临时数据库检查数据，演练失败不影响已导出的数据。
           </FieldDescription>
         )}
         {rehearseError ? <FieldError>{rehearseError}</FieldError> : null}
       </Field>
 
-      <Field data-invalid={verifyError ? true : undefined}>
-        <FieldLabel htmlFor="restore-verify-sql">
-          校验语句（verify_sql）
-        </FieldLabel>
-        <Textarea
-          id="restore-verify-sql"
-          value={verifySql}
-          aria-invalid={verifyError ? true : undefined}
-          onChange={(event) => onVerifySql(event.target.value)}
-          placeholder="每行一条只读 SELECT，可留空"
-          className="font-mono"
-          spellCheck={false}
-        />
-        <FieldDescription>
-          与恢复引擎同一上限：最多 16 条，每条 1 到 4096 字节，不能包含 NUL
-          或语句内部的分号（允许一个结尾分号），且必须以 SELECT
-          开头。留空表示不附加校验语句。引擎仍是最终裁定。
-        </FieldDescription>
-        {verifyError ? <FieldError>{verifyError}</FieldError> : null}
-      </Field>
+      {rehearse ? (
+        <Field data-invalid={verifyError ? true : undefined}>
+          <FieldLabel htmlFor="restore-verify-sql">校验语句</FieldLabel>
+          <Textarea
+            id="restore-verify-sql"
+            value={verifySql}
+            aria-invalid={verifyError ? true : undefined}
+            onChange={(event) => onVerifySql(event.target.value)}
+            placeholder="每行一条只读 SELECT，可留空"
+            className="font-mono"
+            spellCheck={false}
+          />
+          <FieldDescription>最多 16 条只读查询，可留空。</FieldDescription>
+          {verifyError ? <FieldError>{verifyError}</FieldError> : null}
+        </Field>
+      ) : null}
 
       <div>
         <Button

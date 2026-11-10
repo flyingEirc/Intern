@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 const (
@@ -30,6 +32,7 @@ const (
 
 type authFixture struct {
 	database *store.Store
+	dsn      string
 	dir      string
 	keys     string
 	keyFile  string
@@ -61,8 +64,13 @@ func newAuthFixture(t *testing.T) *authFixture {
 // newUnconfiguredAuthFixture serves with no KEK and no preflight settings.
 func newUnconfiguredAuthFixture(t *testing.T) *authFixture {
 	t.Helper()
-	fixture := &authFixture{dir: filepath.Join(t.TempDir(), "metadata"), keys: t.TempDir()}
-	database, err := store.Open(t.Context(), fixture.dir)
+	fixture := &authFixture{
+		dsn: pgtest.New(t), dir: filepath.Join(t.TempDir(), "metadata"), keys: t.TempDir(),
+	}
+	if err := os.MkdirAll(fixture.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(t.Context(), fixture.dsn)
 	if err != nil {
 		t.Fatal(err)
 	}

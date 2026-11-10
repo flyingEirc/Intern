@@ -64,11 +64,13 @@ func TestW4Worker(t *testing.T) {
 		run  func(*testing.T, *fixture)
 	}{
 		{"a1-a2-e2e", a1E2E},
+		{"a2-default-chain-rotation", a2DefaultChainRotation},
 		{"a2-priority", a2Priority},
 		{"a3-cancel", a3Cancel},
 		{"a4-sse", a4SSE},
 		{"a3-sigterm", a3SIGTERM},
 		{"a3-sigkill", a3SIGKILL},
+		{"a3-postgres-owner-loss", a3PostgresOwnerLoss},
 	}
 	for _, step := range steps {
 		t.Run(step.name, func(t *testing.T) {
@@ -105,7 +107,7 @@ func a1E2E(t *testing.T, f *fixture) {
 		t.Fatalf("replica samples covered %d verified of %d backups, want 3 of 3", summary.verified, summary.seen)
 	}
 	f.assertNoSecret(t, nil)
-	t.Logf("W4-A1 e2e chain=seq:1,2,3 lsn_continuous=true replay_run_id=%s conflict=409 replicas_verified=3 protection_local=%s protection_remote=%s protection_requires_verified=true uploaded_window=observed samples=%d uploaded_backups=%s logs_agree=sqlite log_rows=%d lists_agree=sqlite,local,ftp",
+	t.Logf("W4-A1 e2e chain=seq:1,2,3 lsn_continuous=true replay_run_id=%s conflict=409 replicas_verified=3 protection_local=%s protection_remote=%s protection_requires_verified=true uploaded_window=observed samples=%d uploaded_backups=%s logs_agree=postgres log_rows=%d lists_agree=postgres,local,ftp",
 		first, protection.Local.BackupID, protection.Remote[0].BackupID, summary.samples,
 		strings.Join(summary.window, ","), logRows)
 }
@@ -197,7 +199,7 @@ func e2eMembers(t *testing.T, f *fixture) []dispatch.BackupView {
 	return members
 }
 
-// e2eObjects requires the API view, the SQLite row, the local object directory
+// e2eObjects requires the API view, the PostgreSQL row, the local object directory
 // and the FTP copy to agree on every chain member.
 func (f *fixture) e2eObjects(t *testing.T, members []dispatch.BackupView) {
 	t.Helper()
@@ -215,7 +217,7 @@ func (f *fixture) e2eObjects(t *testing.T, members []dispatch.BackupView) {
 	}
 }
 
-// e2eObject compares one backup across the API, SQLite, the local repository and
+// e2eObject compares one backup across the API, PostgreSQL, the local repository and
 // the FTP copy, including the replicated payload bytes.
 func (f *fixture) e2eObject(t *testing.T, remote *ftp.Repository, member dispatch.BackupView) {
 	t.Helper()
@@ -223,7 +225,7 @@ func (f *fixture) e2eObject(t *testing.T, remote *ftp.Repository, member dispatc
 	if view.Status != "completed" || view.PayloadSHA256 == "" || view.ObjectPath == "" {
 		t.Fatalf("backup view incomplete: %+v", view)
 	}
-	f.requireSQLiteBackup(t, member)
+	f.requirePostgreSQLBackup(t, member)
 	localHash := f.hashLocal(t, member.ObjectPath)
 	ftpHash := f.hashFTP(t, remote, member.ObjectPath)
 	if localHash != member.PayloadSHA256 || ftpHash != member.PayloadSHA256 {
@@ -235,7 +237,7 @@ func (f *fixture) e2eObject(t *testing.T, remote *ftp.Repository, member dispatc
 }
 
 // e2eProtection requires local = the newest backup, remote = the newest
-// verified one, the run list to agree with SQLite on the web run IDs, and the
+// verified one, the run list to agree with PostgreSQL on the web run IDs, and the
 // paged log endpoint to equal run_logs for every run of the sequence.
 func (f *fixture) e2eProtection(t *testing.T, members []dispatch.BackupView, out e2eRuns) (dispatch.Protection, int) {
 	t.Helper()
@@ -251,7 +253,7 @@ func (f *fixture) e2eProtection(t *testing.T, members []dispatch.BackupView, out
 	}
 	listed := f.listRuns(t, "source_id="+f.sourceID)
 	if !runsAgree(t, f, listed, []string{out.full.ID, out.inc1.ID, out.inc2.ID}) {
-		t.Fatalf("runs list disagrees with sqlite for %s: %+v", strings.Join([]string{out.full.ID, out.inc1.ID, out.inc2.ID}, ","), idsOf(listed))
+		t.Fatalf("runs list disagrees with postgres for %s: %+v", strings.Join([]string{out.full.ID, out.inc1.ID, out.inc2.ID}, ","), idsOf(listed))
 	}
 	logRows := 0
 	for _, id := range []string{out.full.ID, out.inc1.ID, out.inc2.ID} {
@@ -260,21 +262,21 @@ func (f *fixture) e2eProtection(t *testing.T, members []dispatch.BackupView, out
 	return protection, logRows
 }
 
-// requireSQLiteBackup requires the stored backup row to match the API view.
-func (f *fixture) requireSQLiteBackup(t *testing.T, member dispatch.BackupView) {
+// requirePostgreSQLBackup requires the stored backup row to match the API view.
+func (f *fixture) requirePostgreSQLBackup(t *testing.T, member dispatch.BackupView) {
 	t.Helper()
-	var sqliteID, sqliteSHA, sqlitePath string
-	var sqliteSeq int
+	var postgresID, postgresSHA, postgresPath string
+	var postgresSeq int
 	must(t, f.view(t).QueryRowContext(t.Context(),
-		`SELECT id, seq, object_path, payload_sha256 FROM backups WHERE id = ?`, member.ID,
-	).Scan(&sqliteID, &sqliteSeq, &sqlitePath, &sqliteSHA))
-	if sqliteID != member.ID || sqliteSeq != member.Seq || sqlitePath != member.ObjectPath || sqliteSHA != member.PayloadSHA256 {
-		t.Fatalf("sqlite backup mismatch id=%s seq=%d", sqliteID, sqliteSeq)
+		`SELECT id, seq, object_path, payload_sha256 FROM backups WHERE id = $1`, member.ID,
+	).Scan(&postgresID, &postgresSeq, &postgresPath, &postgresSHA))
+	if postgresID != member.ID || postgresSeq != member.Seq || postgresPath != member.ObjectPath || postgresSHA != member.PayloadSHA256 {
+		t.Fatalf("postgres backup mismatch id=%s seq=%d", postgresID, postgresSeq)
 	}
 }
 
 func a2Priority(t *testing.T, f *fixture) {
-	policy := f.createPolicy(t, "w4-priority", 8)
+	policy := f.createPolicy(t, "w4-priority")
 	f.enable(t, policy)
 	full1 := f.triggerRun(t, policy, store.RunKindFull, "w4-pri-full-1")
 	f.waitXtrabackup(t, full1)
@@ -290,8 +292,8 @@ func a2Priority(t *testing.T, f *fixture) {
 	if n := len(f.listRuns(t, "status=running")); n != 1 {
 		t.Fatalf("running while queued = %d", n)
 	}
-	incAt := f.sqliteString(t, `SELECT scheduled_at FROM runs WHERE id = ?`, inc)
-	fullAt := f.sqliteString(t, `SELECT scheduled_at FROM runs WHERE id = ?`, full2)
+	incAt := f.postgresString(t, `SELECT scheduled_at FROM runs WHERE id = $1`, inc)
+	fullAt := f.postgresString(t, `SELECT scheduled_at FROM runs WHERE id = $1`, full2)
 	if !parseStamp(t, incAt).Before(parseStamp(t, fullAt)) {
 		t.Fatalf("the incremental must be queued first for the ordering to prove anything: inc=%s full=%s", incAt, fullAt)
 	}
@@ -302,12 +304,12 @@ func a2Priority(t *testing.T, f *fixture) {
 	highest := watch.report(t)
 	f.requireClaimOrder(t, full2, inc)
 	if concurrent := f.requireDisjointRuns(t); concurrent != 1 {
-		t.Fatalf("sqlite intervals show %d concurrent runs", concurrent)
+		t.Fatalf("postgres intervals show %d concurrent runs", concurrent)
 	}
 	if highest != 1 {
 		t.Fatalf("running_max=%d", highest)
 	}
-	t.Log("W4-A2 priority running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint")
+	t.Log("W4-A2 priority running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first postgres_intervals=disjoint")
 }
 
 // watchRunning starts sampling the running-run count. The sampler reports the
@@ -411,7 +413,7 @@ func (w *runningWatch) report(t *testing.T) int {
 
 // requireClaimOrder proves the queued full was claimed before the queued
 // incremental of the same policy. started_at is compared as a parsed time, not
-// as text, in both the API and SQLite.
+// as text, in both the API and PostgreSQL.
 func (f *fixture) requireClaimOrder(t *testing.T, fullID, incID string) {
 	t.Helper()
 	full, inc := f.getRun(t, fullID), f.getRun(t, incID)
@@ -421,10 +423,10 @@ func (f *fixture) requireClaimOrder(t *testing.T, fullID, incID string) {
 		t.Fatalf("incremental was claimed before full: full=%s inc=%s", fullStart, incStart)
 	}
 	for _, id := range []string{fullID, incID} {
-		stored := parseStamp(t, f.sqliteString(t, `SELECT started_at FROM runs WHERE id = ?`, id))
+		stored := parseStamp(t, f.postgresString(t, `SELECT started_at FROM runs WHERE id = $1`, id))
 		api := parseStamp(t, ptrString(map[string]*string{fullID: full.StartedAt, incID: inc.StartedAt}[id]))
 		if !stored.Equal(api) {
-			t.Fatalf("run %s started_at sqlite=%s api=%s", id, stored, api)
+			t.Fatalf("run %s started_at postgres=%s api=%s", id, stored, api)
 		}
 	}
 }
@@ -435,7 +437,7 @@ type runInterval struct {
 	start, end time.Time
 }
 
-// requireDisjointRuns reads every stored run interval from SQLite and requires
+// requireDisjointRuns reads every stored run interval from PostgreSQL and requires
 // that no two overlap: [started_at, finished_at) is the only authority for the
 // global backup concurrency. It returns the highest observed concurrency.
 func (f *fixture) requireDisjointRuns(t *testing.T) int {
@@ -494,7 +496,7 @@ func overlapping(all []runInterval, item runInterval) int {
 }
 
 func a3Cancel(t *testing.T, f *fixture) {
-	policy := f.createPolicy(t, "w4-cancel", 8)
+	policy := f.createPolicy(t, "w4-cancel")
 	f.enable(t, policy)
 	before := f.completedBackupsForPolicy(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-cancel-full")
@@ -600,7 +602,7 @@ func (f *fixture) waitTerminal(t *testing.T, id string) store.Run {
 }
 
 func a4SSE(t *testing.T, f *fixture) {
-	policy := f.createPolicy(t, "w4-sse", 8)
+	policy := f.createPolicy(t, "w4-sse")
 	f.enable(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-sse-full")
 	// Everything stored at this point is replayed to a new subscriber. The
@@ -609,7 +611,7 @@ func a4SSE(t *testing.T, f *fixture) {
 	// returned, so timing it would measure the replay path, not live delivery.
 	// The watermark is read before subscribing, so a frame written in between is
 	// counted as live rather than skipped.
-	replayed := int64(f.sqliteCount(t, `SELECT COALESCE(MAX(seq), 0) FROM run_logs WHERE run_id = ?`, runID))
+	replayed := int64(f.postgresCount(t, `SELECT COALESCE(MAX(seq), 0) FROM run_logs WHERE run_id = $1`, runID))
 	triggered := time.Now()
 	_, body := f.operator.stream(t, "/api/v1/runs/"+runID+"/events")
 	defer func() { _ = body.Close() }()
@@ -633,7 +635,7 @@ func a4SSE(t *testing.T, f *fixture) {
 	raw, err := json.Marshal(logs)
 	must(t, err)
 	f.assertNoSecret(t, append([]byte(joined), raw...))
-	t.Logf("W4-A4 sse sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed first_event_ms=%d first_live_event=%s replayed_last_seq=%d logs_agree=sqlite log_rows=%d",
+	t.Logf("W4-A4 sse sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed first_event_ms=%d first_live_event=%s replayed_last_seq=%d logs_agree=postgres log_rows=%d",
 		latency.Milliseconds(), event, replayed, rows)
 }
 
@@ -711,7 +713,7 @@ func structuredFrame(frame string) (string, int64, bool) {
 
 func a3SIGTERM(t *testing.T, f *fixture) {
 	f.startServeChild(t)
-	policy := f.createPolicy(t, "w4-sigterm", 8)
+	policy := f.createPolicy(t, "w4-sigterm")
 	f.enable(t, policy)
 	before := f.completedBackupsForPolicy(t, policy)
 	runID := f.triggerRun(t, policy, store.RunKindFull, "w4-sigterm-full")
@@ -732,7 +734,7 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 	// The drain must record a terminal outcome for the interrupted run. A row
 	// still `running` after the child exited means the drain silently dropped
 	// the outcome, and `completed` would be a false success.
-	status, class, code := f.sqliteRunOutcome(t, runID)
+	status, class, code := f.postgresRunOutcome(t, runID)
 	requireSIGTERMOutcome(t, runID, status, class, code)
 	if n := f.completedBackupsForRun(t, runID); n != 0 {
 		t.Fatalf("SIGTERM published %d completed backups", n)
@@ -762,7 +764,7 @@ func a3SIGTERM(t *testing.T, f *fixture) {
 		t.Fatalf("the restarted child reports the SIGTERM run as status=%s class=%q, want %s class=%q",
 			recovered.Status, errorClass(recovered), status, class)
 	}
-	if stored, storedClass, _ := f.sqliteRunOutcome(t, runID); stored != status || storedClass != class {
+	if stored, storedClass, _ := f.postgresRunOutcome(t, runID); stored != status || storedClass != class {
 		t.Fatalf("recovered SIGTERM run is %s class=%q, want %s class=%q", stored, storedClass, status, class)
 	}
 	f.assertNoSecret(t, nil)
@@ -794,7 +796,7 @@ func requireSIGTERMOutcome(t *testing.T, runID, status, class, code string) {
 
 func a3SIGKILL(t *testing.T, f *fixture) {
 	f.startServeChild(t)
-	policy := f.createPolicy(t, "w4-sigkill", 8)
+	policy := f.createPolicy(t, "w4-sigkill")
 	f.enable(t, policy)
 	fullID := f.triggerRun(t, policy, store.RunKindFull, "w4-sigkill-full")
 	full := f.waitRun(t, fullID, store.RunStatusCompleted)
@@ -843,11 +845,11 @@ func a3SIGKILL(t *testing.T, f *fixture) {
 	f.requireRefusedIncremental(t, policy)
 	admission := f.requireAdmissionFull(t, policy)
 	f.requireAdmittedIncremental(t, policy, admission)
-	status, class, code := f.sqliteRunOutcome(t, incID)
+	status, class, code := f.postgresRunOutcome(t, incID)
 	// The locked marker text stays contiguous, so the gate can match it; the
 	// run outcome the restart's recovery recorded follows it, read from the
 	// same row the assertions above used.
-	t.Logf("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true sqlite_interrupted=true status=%s error_class=%q error_code=%q %s", status, class, code, backup.evidence())
+	t.Logf("W4-A3 sigkill sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true postgres_interrupted=true status=%s error_class=%q error_code=%q %s", status, class, code, backup.evidence())
 }
 
 // requireRefusedIncremental triggers the incremental that follows a killed
@@ -865,7 +867,7 @@ func (f *fixture) requireRefusedIncremental(t *testing.T, policy string) {
 		t.Fatalf("post-restart incremental ended %s class=%q code=%q, want failed %s/%s",
 			refused.Status, errorClass(refused), errorCode(refused), store.RunErrorRequiresFull, parentNotCompleted)
 	}
-	if stored, class, code := f.sqliteRunOutcome(t, next); stored != store.RunStatusFailed || class != store.RunErrorRequiresFull || code != parentNotCompleted {
+	if stored, class, code := f.postgresRunOutcome(t, next); stored != store.RunStatusFailed || class != store.RunErrorRequiresFull || code != parentNotCompleted {
 		t.Fatalf("stored post-restart incremental is %s class=%q code=%q, want failed %q/%q",
 			stored, class, code, store.RunErrorRequiresFull, parentNotCompleted)
 	}
@@ -909,7 +911,7 @@ func (f *fixture) requireAdmittedIncremental(t *testing.T, policy, admission str
 }
 
 // requireKilledRunRecovered requires the SIGKILLed run to be failed/interrupted
-// in both the API and SQLite, and its staging and work directories to be
+// in both the API and PostgreSQL, and its staging and work directories to be
 // reclaimed by recovery.
 func (f *fixture) requireKilledRunRecovered(t *testing.T, runID string) {
 	t.Helper()
@@ -919,9 +921,9 @@ func (f *fixture) requireKilledRunRecovered(t *testing.T, runID string) {
 	}
 	var status, class string
 	must(t, f.view(t).QueryRowContext(t.Context(),
-		`SELECT status, COALESCE(error_class, '') FROM runs WHERE id = ?`, runID).Scan(&status, &class))
+		`SELECT status, COALESCE(error_class, '') FROM runs WHERE id = $1`, runID).Scan(&status, &class))
 	if status != store.RunStatusFailed || class != store.RunErrorInterrupted {
-		t.Fatalf("killed run sqlite status=%s class=%s", status, class)
+		t.Fatalf("killed run postgres status=%s class=%s", status, class)
 	}
 	if left := f.pendingDirs(); len(left) != 0 {
 		t.Fatalf("pending after recovery: %s", left)
@@ -1005,13 +1007,13 @@ func lsnContinuous(members []dispatch.BackupView) bool {
 }
 
 // runsAgree requires every listed run ID to be the web run ID of a completed
-// SQLite row and to appear as completed in the API list.
+// PostgreSQL row and to appear as completed in the API list.
 func runsAgree(t *testing.T, f *fixture, listed []store.Run, ids []string) bool {
 	t.Helper()
 	view := f.view(t)
 	for _, id := range ids {
 		var status string
-		if err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = ?`, id).Scan(&status); err != nil {
+		if err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = $1`, id).Scan(&status); err != nil {
 			return false
 		}
 		if status != store.RunStatusCompleted {
@@ -1127,14 +1129,14 @@ func (f *fixture) requireLogsAgree(t *testing.T, runID string) int {
 	deadline := time.Now().Add(30 * time.Second)
 	var listed, stored []store.RunLog
 	for time.Now().Before(deadline) {
-		stored = f.sqliteLogs(t, runID)
+		stored = f.postgresLogs(t, runID)
 		listed = f.allLogs(t, runID)
 		if len(listed) == len(stored) && sameLogs(listed, stored) {
 			return len(listed)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("run %s logs disagree: api=%s sqlite=%s", runID, describeLogs(listed), describeLogs(stored))
+	t.Fatalf("run %s logs disagree: api=%s postgres=%s", runID, describeLogs(listed), describeLogs(stored))
 	return 0
 }
 

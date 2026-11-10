@@ -5,7 +5,7 @@
 # or unset GITHUB_SHA is a rejection, not a wildcard.
 #
 # Every marker is emitted only after the worker's own assertions passed, and each
-# value is read back from state: the restore row served by the API, SQLite, the
+# value is read back from state: the restore row served by the API, PostgreSQL, the
 # local repository, the real FTP namespace, the export volume, or a brand-new
 # MySQL 8.4.11 container started on that export and digested there.
 #
@@ -38,11 +38,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ] + [
     "links=ftp:3", "rehearsal=true",
     "risks=no_auto_replace_production,server_uuid_duplicate,pitr_unavailable",
-    "chain=seq:1,2,3", "replicas_verified=3", "local_payloads=removed", "logs_agree=sqlite",
+    "chain=seq:1,2,3", "replicas_verified=3", "local_payloads=removed", "logs_agree=postgres",
     "admin_only=true", "cross_origin=cross_origin_rejected", "confirm=403,confirmation_failed",
     "no_row=true", "limiter=429", "digest_changed=409,plan_changed", "replay_same_id=true",
     "conflict=409", "audit_atomic=true",
-    "run_blocked_by_restore=true", "restore_blocked_by_run=true", "sqlite_intervals=disjoint",
+    "run_blocked_by_restore=true", "restore_blocked_by_run=true", "postgres_intervals=disjoint",
     "canceled_queued=true", "canceled_running=true", "side_effects=explicit",
     "sigkill=failed/interrupted", "published_intact=true", "cleanup=exact",
     "refused=source_unavailable:409", "recovery_repeated=true",
@@ -72,11 +72,11 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A2 plan target=inc2 links=ftp:3 digest=[0-9a-f]{64} lsn=[1-9][0-9]* required_export=[1-9][0-9]* available_export=[1-9][0-9]* export_path=[^ ]+/\\{restore_id\\} rehearsal=true risks=[a-z_,]+")) and
   ($output | test("W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=[0-9a-f]{16} ftp_writes=0 local_payloads=removed")) and
   ($output | test("W5-A2 refused backup_not_found=404 unconfigured=503")) and
-  ($output | test("W5-A6 e2e chain=seq:1,2,3 inc1=[0-9a-f]{32} inc2=[0-9a-f]{32} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=[1-9][0-9]* phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing")) and
+  ($output | test("W5-A6 e2e chain=seq:1,2,3 inc1=[0-9a-f]{32} inc2=[0-9a-f]{32} replicas_verified=3 local_payloads=removed logs_agree=postgres log_rows=[1-9][0-9]* phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing")) and
   # The state line is matched whole, in the order the worker logged it: a marker
   # that merely appears somewhere in the output proves nothing about the case
   # that emitted it.
-  ($output | test("W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=[1-9][0-9]* export_bytes=[1-9][0-9]* verify_status=(passed|not_requested) side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite")) and
+  ($output | test("W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=[1-9][0-9]* export_bytes=[1-9][0-9]* verify_status=(passed|not_requested) side_effects=explicit canceled_queued=true canceled_running=true logs_agree=postgres")) and
   # Each restore names its published export and the source snapshot recorded at
   # that restore point in the same run; the harness starts a brand-new pinned
   # server on that export and digests the data it finds there.
@@ -103,7 +103,7 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   ($output | test("W5-A3 restored=full container_snapshot=([0-9a-f]{64}) expected_snapshot=\\1 match=true")) and
   # The mutual-exclusion line must itself carry running_max=1: the gate requires
   # the observation, it does not merely refuse a worse-looking one.
-  ($output | test("W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=[1-9][0-9]* sqlite_intervals=disjoint")) and
+  ($output | test("W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=[1-9][0-9]* postgres_intervals=disjoint")) and
   # The SIGKILL line must itself carry every recovery fact: they cannot be moved
   # onto some other line and still count.
   ($output | test("W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true")) and

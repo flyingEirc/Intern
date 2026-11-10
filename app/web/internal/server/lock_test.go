@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -30,7 +28,7 @@ type lockedResponse struct {
 
 func waitForMetadataLock(t *testing.T, fixture *authFixture, req *http.Request, status int) {
 	t.Helper()
-	release := holdMetadataWriteLock(t, fixture.dir)
+	release := holdMetadataWriteLock(t, fixture.dsn)
 	done := make(chan lockedResponse, 1)
 	started := make(chan struct{})
 	go func() {
@@ -64,13 +62,9 @@ func waitForMetadataLock(t *testing.T, fixture *authFixture, req *http.Request, 
 	}
 }
 
-func holdMetadataWriteLock(t *testing.T, dir string) func() {
+func holdMetadataWriteLock(t *testing.T, dsn string) func() {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: filepath.Join(dir, "intern.db")}
-	query := u.Query()
-	query.Add("_pragma", "busy_timeout(0)")
-	u.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +73,7 @@ func holdMetadataWriteLock(t *testing.T, dir string) func() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.ExecContext(context.Background(), "UPDATE instance SET created_at = created_at"); err != nil {
+	if _, err = tx.ExecContext(context.Background(), "LOCK TABLE users, sessions, session_tombstones IN ACCESS EXCLUSIVE MODE"); err != nil {
 		t.Fatal(err)
 	}
 	return func() { _ = tx.Rollback() }

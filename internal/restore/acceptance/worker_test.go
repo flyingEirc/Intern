@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/restore"
 )
@@ -226,14 +227,14 @@ func assertPlanRisks(t *testing.T, plan restore.Plan) {
 // assertPlanReadOnly proves the read-only plan contract from observable state.
 func (w *worker) assertPlanReadOnly(t *testing.T, opts restore.Options, plan restore.Plan) {
 	t.Helper()
-	dbBefore := fileDigestOf(t, w.paths.db)
+	dbBefore := pgtest.Digest(t, w.db)
 	repoBefore := treeDigest(t, w.paths.repo)
 	exportBefore := strings.Join(entryNames(t, w.paths.export), ",")
 	ftpBefore := w.remoteDigest(t)
 	if _, err := restore.BuildPlan(t.Context(), opts, plan.TargetBackupID); err != nil {
 		t.Fatalf("second plan: %s", withhold(err.Error()))
 	}
-	if dbBefore != fileDigestOf(t, w.paths.db) || repoBefore != treeDigest(t, w.paths.repo) ||
+	if dbBefore != pgtest.Digest(t, w.db) || repoBefore != treeDigest(t, w.paths.repo) ||
 		exportBefore != strings.Join(entryNames(t, w.paths.export), ",") || ftpBefore != w.remoteDigest(t) {
 		t.Fatal("plan changed database, repository, export root or replica")
 	}

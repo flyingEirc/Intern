@@ -24,17 +24,21 @@ export function PageHeader({
   children?: ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-heading text-lg font-medium">{title}</h2>
+    <header className="flex flex-col gap-4 border-b pb-5 md:flex-row md:items-end md:justify-between">
+      <div className="flex min-w-0 flex-col gap-1">
+        <h1 className="font-heading text-2xl font-semibold tracking-tight">
+          {title}
+        </h1>
         {description ? (
-          <p className="text-sm text-muted-foreground">{description}</p>
+          <p className="max-w-3xl text-sm text-muted-foreground">
+            {description}
+          </p>
         ) : null}
       </div>
       {children ? (
         <div className="flex flex-wrap items-center gap-2">{children}</div>
       ) : null}
-    </div>
+    </header>
   );
 }
 
@@ -121,6 +125,7 @@ export function DetailSkeleton() {
       <span className="sr-only">正在加载</span>
       <Skeleton className="h-8 w-56" />
       <Skeleton className="h-40 w-full" />
+      <Skeleton className="h-32 w-full" />
     </div>
   );
 }

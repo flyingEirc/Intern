@@ -1,7 +1,7 @@
 // Package replication copies completed local physical backups to a remote
 // repository and proves each copy by reading it back.
 //
-// State lives in the caller's control-plane SQLite database, in its own goose
+// State lives in the caller's control-plane PostgreSQL database, in its own goose
 // table (replication_goose_db_version) applied after the physical migrations
 // that own the backups table. A replica row is per (backup, repository); its
 // idem_key makes enqueue repeatable.
@@ -245,7 +245,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	provider, err := goose.NewProvider(goose.DialectSQLite3, db, fsys,
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys,
 		goose.WithDisableGlobalRegistry(true), goose.WithTableName(versionTable))
 	if err != nil {
 		return err
@@ -273,15 +273,15 @@ func Version(ctx context.Context, db *sql.DB) (current, latest int64, err error)
 		return 0, latest, nil
 	}
 	var exists bool
-	if err = db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)", versionTable).Scan(&exists); err != nil || !exists {
+	if err = db.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL", versionTable).Scan(&exists); err != nil || !exists {
 		return 0, latest, err
 	}
 	err = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_id), 0) FROM replication_goose_db_version v
-WHERE is_applied = 1 AND id = (SELECT MAX(id) FROM replication_goose_db_version WHERE version_id = v.version_id)`).Scan(&current)
+WHERE is_applied AND id = (SELECT MAX(id) FROM replication_goose_db_version WHERE version_id = v.version_id)`).Scan(&current)
 	return current, latest, err
 }
 
-// stampLayout is a fixed-width UTC timestamp, so SQLite text order is time order.
+// stampLayout is a fixed-width UTC timestamp, so text order is time order.
 const stampLayout = "2006-01-02T15:04:05.000000000Z"
 
 func stamp(value time.Time) string { return value.UTC().Format(stampLayout) }

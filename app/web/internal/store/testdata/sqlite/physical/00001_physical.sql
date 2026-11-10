@@ -1,0 +1,57 @@
+-- +goose Up
+CREATE TABLE chains (
+    id TEXT PRIMARY KEY NOT NULL,
+    source_id TEXT NOT NULL,
+    server_uuid TEXT NOT NULL,
+    server_version TEXT NOT NULL,
+    tool_version TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    sealed_at TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1))
+);
+CREATE INDEX chains_source ON chains(source_id, started_at);
+CREATE TABLE backups (
+    id TEXT PRIMARY KEY NOT NULL,
+    chain_id TEXT NOT NULL REFERENCES chains(id),
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    parent_id TEXT REFERENCES backups(id),
+    kind TEXT NOT NULL CHECK (kind IN ('physical-full', 'physical-incremental')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    instance_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    -- Decimal text preserves the entire unsigned 64-bit XtraBackup LSN range.
+    from_lsn TEXT,
+    to_lsn TEXT,
+    last_lsn TEXT,
+    checkpoints BLOB,
+    xtrabackup_info BLOB,
+    object_path TEXT NOT NULL UNIQUE,
+    payload_size INTEGER,
+    payload_sha256 TEXT,
+    metadata_size INTEGER,
+    metadata_sha256 TEXT,
+    key_id TEXT NOT NULL,
+    local_present INTEGER NOT NULL DEFAULT 0 CHECK (local_present IN (0, 1)),
+    failure_code TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(chain_id, seq)
+);
+CREATE TABLE cleanup_ledger (
+    id INTEGER PRIMARY KEY,
+    backup_id TEXT NOT NULL REFERENCES backups(id),
+    instance_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('staging', 'workdir', 'object')),
+    target TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error_code TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(kind, target)
+);
+CREATE INDEX cleanup_instance ON cleanup_ledger(instance_id, run_id);
+
+-- +goose Down
+DROP TABLE cleanup_ledger;
+DROP TABLE backups;
+DROP TABLE chains;

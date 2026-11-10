@@ -88,11 +88,12 @@ func TestReserveLocalDeleteRollsBackOnFailure(t *testing.T) {
 	mustBegin(t, s, "incremental", "inc")
 	mustComplete(t, s, completion("inc", "incremental", 100, 200))
 	chainID := request.Plan.ChainID
-	execSQL(t, s, `CREATE TRIGGER reject_presence BEFORE UPDATE OF local_present ON backups BEGIN SELECT RAISE(ABORT, 'injected presence failure'); END`)
+	execSQL(t, s, `CREATE FUNCTION reject_presence() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected presence failure'; END $$`)
+	execSQL(t, s, `CREATE TRIGGER reject_presence BEFORE UPDATE OF local_present ON backups FOR EACH ROW EXECUTE FUNCTION reject_presence()`)
 	if _, err := s.ReserveLocalDelete(t.Context(), chainID, time.Now()); err == nil {
 		t.Fatal("reservation failure ignored")
 	}
-	execSQL(t, s, "DROP TRIGGER reject_presence")
+	execSQL(t, s, "DROP TRIGGER reject_presence ON backups")
 	assertLocalPresent(t, s, "full", true)
 	assertLocalPresent(t, s, "inc", true)
 	if reserved, err := s.LocalDeletePending(t.Context(), chainID); err != nil || len(reserved) != 0 {
@@ -226,7 +227,7 @@ func assertReclaimAttempt(t *testing.T, s *Store, id int64) {
 	t.Helper()
 	var attempts int64
 	var code sql.NullString
-	err := s.db.QueryRowContext(t.Context(), "SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = ?", id).Scan(&attempts, &code)
+	err := s.db.QueryRowContext(t.Context(), "SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = $1", id).Scan(&attempts, &code)
 	if err != nil {
 		t.Fatal(err)
 	}

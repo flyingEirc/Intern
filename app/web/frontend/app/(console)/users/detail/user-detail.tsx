@@ -100,12 +100,7 @@ export function UserDetail() {
   const account = useUser(canManage ? id : null);
 
   if (!canManage) {
-    return (
-      <NoPermission
-        action="管理用户"
-        note="当前账号没有管理用户的权限。用户详情只对管理员开放，服务端仍会逐请求拒绝。"
-      />
-    );
+    return <NoPermission action="管理用户" note="用户管理仅对管理员开放。" />;
   }
   if (id === null) {
     return (

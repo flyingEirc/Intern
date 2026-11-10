@@ -111,13 +111,23 @@ func randomBytes(size int) []byte {
 }
 
 func (p *Passwords) Hash(password string) (string, error) {
+	return p.hash(password, false)
+}
+
+// HashAnonymous shares the anonymous budget with login verification. Setup may
+// never consume the slot reserved for authenticated password operations.
+func (p *Passwords) HashAnonymous(password string) (string, error) {
+	return p.hash(password, true)
+}
+
+func (p *Passwords) hash(password string, anonymous bool) (string, error) {
 	if err := ValidatePassword(password); err != nil {
 		return "", err
 	}
-	if err := p.acquireSlot(false); err != nil {
+	if err := p.acquireSlot(anonymous); err != nil {
 		return "", err
 	}
-	defer p.releaseSlot(false)
+	defer p.releaseSlot(anonymous)
 	salt := randomBytes(16)
 	hash := argon2.IDKey([]byte(password), salt, p.params.Time, p.params.Memory, p.params.Parallelism, 32)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", p.params.Memory, p.params.Time, p.params.Parallelism,

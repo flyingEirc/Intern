@@ -97,7 +97,7 @@ func TestSessionsSurviveServiceRestart(t *testing.T) {
 	if err := f.database.Close(); err != nil {
 		t.Fatal(err)
 	}
-	database, err := store.Open(t.Context(), f.dir)
+	database, err := store.Open(t.Context(), f.dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func (f *authFixture) ageSession(t *testing.T, token string, elapsed time.Durati
 	var payload []byte
 	var expiry float64
 	if err := f.database.DB().QueryRowContext(t.Context(),
-		`SELECT data, expiry FROM sessions WHERE token = ?`, token).Scan(&payload, &expiry); err != nil {
+		`SELECT data, expiry FROM sessions WHERE token = $1`, token).Scan(&payload, &expiry); err != nil {
 		t.Fatal(err)
 	}
 	deadline, values, err := f.service.Sessions.Codec.Decode(payload)
@@ -186,7 +186,7 @@ func (f *authFixture) ageSession(t *testing.T, token string, elapsed time.Durati
 		t.Fatal(err)
 	}
 	if _, err = f.database.DB().ExecContext(t.Context(),
-		`UPDATE sessions SET data = ?, expiry = ? WHERE token = ?`, aged, expiry-elapsed.Seconds(), token); err != nil {
+		`UPDATE sessions SET data = $1, expiry = $2 WHERE token = $3`, aged, expiry-elapsed.Seconds(), token); err != nil {
 		t.Fatal(err)
 	}
 }

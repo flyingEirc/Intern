@@ -2,6 +2,12 @@
 
 import { HardDriveIcon, PlusIcon } from "lucide-react";
 import Link from "next/link";
+import { useMemo, useState } from "react";
+import {
+  DataPanel,
+  LoadMoreButton,
+  RowActions,
+} from "@/components/resources/data-panel";
 import { PlaintextBadge } from "@/components/resources/plaintext-warning";
 import {
   ListSkeleton,
@@ -18,7 +24,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { Spinner } from "@/components/ui/spinner";
 import {
   Table,
   TableBody,
@@ -40,18 +45,31 @@ import {
 export function RepositoriesView() {
   const session = useSession();
   const list = useRepositoryPages();
+  const [query, setQuery] = useState("");
   const canManage = hasPermission(
     session.data?.permissions,
     managePermission.repositories,
   );
   const repositories = list.data?.pages.flatMap((page) => page.items) ?? [];
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return repositories;
+    return repositories.filter((repository) =>
+      [
+        repository.name,
+        repositoryKindLabel[repository.kind],
+        tlsModeLabel[repository.tls_mode],
+        repositoryEndpoint(repository),
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [query, repositories]);
 
   return (
-    <div className="flex flex-col gap-4">
-      <PageHeader
-        title="备份仓库"
-        description="本地目录、明文 FTP 与 FTPS 仓库；凭据只写不读，写入性探测按仓库配置执行。"
-      >
+    <div className="flex flex-col gap-5">
+      <PageHeader title="备份仓库" description="管理备份的本地存储和异地副本。">
         {canManage ? (
           <Button
             nativeButton={false}
@@ -76,7 +94,7 @@ export function RepositoriesView() {
             </EmptyMedia>
             <EmptyTitle>还没有备份仓库</EmptyTitle>
             <EmptyDescription>
-              备份需要至少一个本地仓库；副本仓库可以是明文 FTP 或 FTPS。
+              备份需要至少一个本地仓库；异地副本可以是明文 FTP 或 FTPS。
             </EmptyDescription>
             {canManage ? (
               <EmptyContent>
@@ -93,7 +111,19 @@ export function RepositoriesView() {
       ) : null}
 
       {repositories.length > 0 ? (
-        <div className="flex flex-col gap-3">
+        <DataPanel
+          title="仓库列表"
+          count={visible.length}
+          search={query}
+          onSearch={setQuery}
+          footer={
+            <LoadMoreButton
+              hasNextPage={list.hasNextPage}
+              isFetching={list.isFetchingNextPage}
+              onLoadMore={() => list.fetchNextPage()}
+            />
+          }
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -103,10 +133,18 @@ export function RepositoriesView() {
                 <TableHead>位置</TableHead>
                 <TableHead>凭据</TableHead>
                 <TableHead>更新时间</TableHead>
+                <TableHead>操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {repositories.map((repository) => (
+              {visible.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="h-20 text-center">
+                    没有匹配的记录
+                  </TableCell>
+                </TableRow>
+              ) : null}
+              {visible.map((repository) => (
                 <TableRow key={repository.id}>
                   <TableCell>
                     <Link
@@ -138,25 +176,30 @@ export function RepositoriesView() {
                     </Badge>
                   </TableCell>
                   <TableCell>{formatDateTime(repository.updated_at)}</TableCell>
+                  <TableCell>
+                    <RowActions
+                      label={repository.name}
+                      actions={[
+                        {
+                          label: "查看",
+                          href: `/repositories/detail?id=${repository.id}`,
+                        },
+                        ...(canManage
+                          ? [
+                              {
+                                label: "编辑",
+                                href: `/repositories/new?id=${repository.id}`,
+                              },
+                            ]
+                          : []),
+                      ]}
+                    />
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          {list.hasNextPage ? (
-            <div>
-              <Button
-                variant="outline"
-                disabled={list.isFetchingNextPage}
-                onClick={() => list.fetchNextPage()}
-              >
-                {list.isFetchingNextPage ? (
-                  <Spinner data-icon="inline-start" />
-                ) : null}
-                加载更多
-              </Button>
-            </div>
-          ) : null}
-        </div>
+        </DataPanel>
       ) : null}
     </div>
   );

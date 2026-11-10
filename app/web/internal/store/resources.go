@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
 	"github.com/flyingEirc/Intern/internal/storage/ftp"
@@ -166,11 +166,6 @@ type PolicyInput struct {
 	FullCron            string
 	IncrementalCron     string
 	Timezone            string
-	MaxChainLength      int64
-	Parallel            int64
-	Throttle            int64
-	ZstdLevel           int64
-	PageTracking        bool
 	Enabled             bool
 	Preflight           *PreflightRecord
 }
@@ -184,14 +179,14 @@ var ErrReferenced = errors.New("resource is still referenced")
 // deployment does not configure. The server maps it to 503 unavailable.
 var ErrUnavailable = errors.New("credential encryption is not configured")
 
-// resourceError maps a missing row to ErrNotFound and a unique-name violation
-// to ErrConflict. SQLite reports both UNIQUE and PRIMARY KEY conflicts as 2067.
+// resourceError maps a missing row to ErrNotFound and a PostgreSQL unique
+// constraint violation to ErrConflict.
 func resourceError(err error) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	var sqliteErr *sqlite.Error
-	if errors.As(err, &sqliteErr) && (sqliteErr.Code() == 2067 || sqliteErr.Code() == 1555) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrConflict
 	}
 	return err
@@ -526,10 +521,10 @@ func (s *Store) repositoryReferences(ctx context.Context, q *storesql.Queries, t
 	}
 	total := policies
 	for _, count := range []string{
-		`SELECT COUNT(*) FROM runs WHERE local_repository_id = ?`,
-		`SELECT COUNT(*) FROM runs WHERE replica_repository_id = ?`,
-		`SELECT COUNT(*) FROM replicas WHERE repository_id = ?`,
-		`SELECT COUNT(*) FROM replicas WHERE local_repository_id = ?`,
+		`SELECT COUNT(*) FROM runs WHERE local_repository_id = $1`,
+		`SELECT COUNT(*) FROM runs WHERE replica_repository_id = $1`,
+		`SELECT COUNT(*) FROM replicas WHERE repository_id = $1`,
+		`SELECT COUNT(*) FROM replicas WHERE local_repository_id = $1`,
 	} {
 		rows, err := countRows(ctx, tx, count, id)
 		if err != nil {
@@ -700,7 +695,7 @@ func (s *Store) DeleteSource(ctx context.Context, id string, entry AuditLog) err
 		if err != nil {
 			return err
 		}
-		chains, err := countRows(ctx, tx, `SELECT COUNT(*) FROM chains WHERE source_id = ?`, id)
+		chains, err := countRows(ctx, tx, `SELECT COUNT(*) FROM chains WHERE source_id = $1`, id)
 		if err != nil {
 			return err
 		}
@@ -739,11 +734,12 @@ func (s *Store) CreatePolicy(ctx context.Context, in PolicyInput, entry AuditLog
 
 func insertPolicy(ctx context.Context, q *storesql.Queries, id string, in PolicyInput, replica, preflight sql.NullString, entry AuditLog) (Policy, error) {
 	now := timestamp()
+	tuning := DefaultPolicyTuning()
 	row, err := q.CreatePolicy(ctx, storesql.CreatePolicyParams{
 		ID: id, Name: in.Name, SourceID: in.SourceID, LocalRepositoryID: in.LocalRepositoryID,
 		ReplicaRepositoryID: replica, FullCron: in.FullCron, IncrementalCron: in.IncrementalCron,
-		Timezone: in.Timezone, MaxChainLength: in.MaxChainLength, Parallel: in.Parallel,
-		Throttle: in.Throttle, ZstdLevel: in.ZstdLevel, PageTracking: encodeBool(in.PageTracking),
+		Timezone: in.Timezone, MaxChainLength: tuning.MaxChainLength, Parallel: tuning.Parallel,
+		Throttle: tuning.Throttle, ZstdLevel: tuning.ZstdLevel, PageTracking: encodeBool(tuning.PageTracking),
 		Enabled: encodeBool(in.Enabled), LastPreflightJson: preflight, CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
@@ -756,8 +752,8 @@ func insertPolicy(ctx context.Context, q *storesql.Queries, id string, in Policy
 	return created, insertSuccessAudit(ctx, q, entry, "policy", created.ID)
 }
 
-// UpdatePolicy replaces every mutable field, including the enabled decision and
-// the preflight that authorised it.
+// UpdatePolicy replaces the business fields, including the enabled decision
+// and authorising preflight. Historical technical tuning columns stay intact.
 func (s *Store) UpdatePolicy(ctx context.Context, id string, in PolicyInput, entry AuditLog) (Policy, error) {
 	replica, preflight, err := policyParams(in)
 	if err != nil {
@@ -779,9 +775,8 @@ func replacePolicy(ctx context.Context, q *storesql.Queries, id string, in Polic
 	row, err := q.UpdatePolicy(ctx, storesql.UpdatePolicyParams{
 		Name: in.Name, SourceID: in.SourceID, LocalRepositoryID: in.LocalRepositoryID,
 		ReplicaRepositoryID: replica, FullCron: in.FullCron, IncrementalCron: in.IncrementalCron,
-		Timezone: in.Timezone, MaxChainLength: in.MaxChainLength, Parallel: in.Parallel,
-		Throttle: in.Throttle, ZstdLevel: in.ZstdLevel, PageTracking: encodeBool(in.PageTracking),
-		Enabled: encodeBool(in.Enabled), LastPreflightJson: preflight, UpdatedAt: timestamp(), ID: id,
+		Timezone: in.Timezone,
+		Enabled:  encodeBool(in.Enabled), LastPreflightJson: preflight, UpdatedAt: timestamp(), ID: id,
 	})
 	if err != nil {
 		return Policy{}, resourceError(err)
@@ -867,7 +862,7 @@ func (s *Store) DeletePolicy(ctx context.Context, id string, entry AuditLog) err
 		}
 		// runs.policy_id references policies, so a policy with run history is
 		// refused rather than turning the foreign-key violation into a 500.
-		runs, err := countRows(ctx, tx, `SELECT COUNT(*) FROM runs WHERE policy_id = ?`, id)
+		runs, err := countRows(ctx, tx, `SELECT COUNT(*) FROM runs WHERE policy_id = $1`, id)
 		if err != nil {
 			return err
 		}

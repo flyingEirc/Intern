@@ -203,7 +203,7 @@ func queuedReplicas(t *testing.T, f *fixture, backupID, repositoryID string) int
 	t.Helper()
 	var queued int
 	if err := f.database.DB().QueryRowContext(f.t.Context(),
-		`SELECT COUNT(*) FROM replicas WHERE backup_id = ? AND repository_id = ?`, backupID, repositoryID,
+		`SELECT COUNT(*) FROM replicas WHERE backup_id = $1 AND repository_id = $2`, backupID, repositoryID,
 	).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func insertTerminalRun(t *testing.T, database *store.Store, policy store.Policy,
 	now := store.ScheduleStamp(time.Now())
 	_, err = database.DB().ExecContext(t.Context(), `
 INSERT INTO runs (id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, local_repository_id, replica_repository_id)
-VALUES (?, ?, ?, 'full', 'manual', ?, 'lazy-repl', 'completed', ?, ?, ?, ?, ?, ?, 512, ?, ?)`,
+VALUES ($1, $2, $3, 'full', 'manual', $4, 'lazy-repl', 'completed', $5, $6, $7, $8, $9, $10, 512, $11, $12)`,
 		id.String(), policy.ID, policy.SourceID, "lazy-repl:"+id.String(), now, now, now, now, backupID, chainID,
 		policy.LocalRepositoryID, policy.ReplicaRepositoryID)
 	if err != nil {

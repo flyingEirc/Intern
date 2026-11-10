@@ -62,7 +62,7 @@ describe("RestoreDetail side effects", () => {
     );
     renderWithClient(<RestoreDetail />);
 
-    expect(await screen.findByText("终态副作用")).toBeInTheDocument();
+    expect(await screen.findByText("恢复结束后保留的内容")).toBeInTheDocument();
     const expected = [
       work ? "工作目录已删除" : "工作目录未删除",
       pending ? "待发布导出已删除" : "待发布导出未删除",

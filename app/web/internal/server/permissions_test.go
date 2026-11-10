@@ -37,8 +37,7 @@ const (
 	bodyLocalRepository = `{"name":"local","kind":"local","tls_mode":"none","root":"{{root}}"}`
 	bodySource          = `{"name":"source","socket":"/run/mysqld/mysqld.sock","datadir":"/var/lib/mysql","username":"backup","password":"` + matrixSecret + `"}`
 	bodyPolicy          = `{"name":"policy","source_id":"{{free_source}}","local_repository_id":"{{free_repository}}",` +
-		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","max_chain_length":3,` +
-		`"parallel":2,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`
+		`"full_cron":"0 2 * * *","incremental_cron":"0 * * * *","timezone":"UTC","enabled":false}`
 	bodyRunTrigger = `{"kind":"full"}`
 	// W5 restore bodies. The runtime is unconfigured, so an allowed plan or
 	// execute answers 503 before any engine work; the fixed digest is a valid
@@ -58,6 +57,8 @@ func TestEveryRoutePermissionMatrix(t *testing.T) {
 	cases := map[string]permissionCase{
 		"GET /healthz":                      {"", 200, 200, 200, 200},
 		"GET /readyz":                       {"", 200, 200, 200, 200},
+		"GET /api/v1/auth/setup":            {"", 200, 200, 200, 200},
+		"POST /api/v1/auth/setup":           {`{"username":"initial","password":"` + testPassword + `"}`, 409, 409, 409, 409},
 		"POST /api/v1/auth/login":           {`{"username":"loginuser","password":"` + testPassword + `"}`, 200, 200, 200, 200},
 		"POST /api/v1/auth/logout":          {"", 204, 204, 204, 401},
 		"GET /api/v1/auth/session":          {"", 200, 200, 200, 401},
@@ -236,7 +237,7 @@ func (f *authFixture) matrixRequest(t *testing.T, seeded seededResources, target
 	if path == "/api/v1/policies/:id/runs" {
 		// Enable directly: this fixture cannot run the preflight the API path
 		// requires, and an enabled policy is what reaches the runtime check.
-		if _, err := f.database.DB().ExecContext(t.Context(), `UPDATE policies SET enabled = 1 WHERE id = ?`, seeded.policyID); err != nil {
+		if _, err := f.database.DB().ExecContext(t.Context(), `UPDATE policies SET enabled = 1 WHERE id = $1`, seeded.policyID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -449,7 +450,6 @@ func (f *authFixture) seedResources(t *testing.T) seededResources {
 	policy, err := f.database.CreatePolicy(ctx, store.PolicyInput{
 		Name: "matrix-policy", SourceID: policySource, LocalRepositoryID: policyRepository,
 		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
-		MaxChainLength: 3, Parallel: 1, Throttle: 0, ZstdLevel: 3,
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)

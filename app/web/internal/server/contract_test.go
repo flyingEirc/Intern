@@ -32,6 +32,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/resources"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 )
 
@@ -175,7 +176,7 @@ func testEngine(t *testing.T, database Readiness, output io.Writer, proxies []st
 	metadata, ok := database.(*store.Store)
 	if !ok {
 		var err error
-		metadata, err = store.Open(t.Context(), filepath.Join(t.TempDir(), "metadata"))
+		metadata, err = store.Open(t.Context(), pgtest.New(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,8 +230,11 @@ func TestOperationSecurityAndExplicitErrors(t *testing.T) {
 	doc := loadContract(t)
 	public := map[string]bool{
 		"GET /healthz": true, "GET /readyz": true, "POST /api/v1/auth/login": true,
+		"GET /api/v1/auth/setup": true, "POST /api/v1/auth/setup": true,
 	}
 	required := map[string][]string{
+		"GET /api/v1/auth/setup":             {"413"},
+		"POST /api/v1/auth/setup":            {"400", "403", "409", "413", "415", "429", "503"},
 		"POST /api/v1/auth/login":            {"401", "403", "429", "503"},
 		"POST /api/v1/auth/logout":           {"401", "403"},
 		"GET /api/v1/auth/session":           {"401"},
@@ -285,6 +289,7 @@ func TestOperationSecurityAndExplicitErrors(t *testing.T) {
 		"POST /api/v1/restores/{id}/cancel": {"401", "403", "404", "409"},
 	}
 	retryAfter := map[string][]string{
+		"POST /api/v1/auth/setup":   {"429", "503"},
 		"POST /api/v1/auth/login":   {"429", "503"},
 		"PUT /api/v1/auth/password": {"429", "503"},
 		"POST /api/v1/users":        {"503"},
@@ -361,8 +366,8 @@ func assertDeclaredRetryAfter(t *testing.T, operation *openapi3.Operation, key, 
 }
 
 func TestHealthAndReadinessAPI(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
-	database, err := store.Open(t.Context(), dir)
+	dsn := pgtest.New(t)
+	database, err := store.Open(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,12 +376,12 @@ func TestHealthAndReadinessAPI(t *testing.T) {
 	for _, path := range []string{"/healthz", "/readyz"} {
 		requestAPI(t, client, httptest.NewRequest(http.MethodGet, path, nil), http.StatusOK)
 	}
-	other, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	other, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if _, err = other.ExecContext(t.Context(), "INSERT INTO web_goose_db_version (version_id, is_applied) VALUES (99, 1)"); err != nil {
+	if _, err = other.ExecContext(t.Context(), "INSERT INTO web_goose_db_version (version_id, is_applied) VALUES (99, TRUE)"); err != nil {
 		t.Fatal(err)
 	}
 	requestAPI(t, client, httptest.NewRequest(http.MethodGet, "/readyz", nil), http.StatusServiceUnavailable)
@@ -474,7 +479,7 @@ func newRunContractFixture(t *testing.T) *runContractFixture {
 	fixture := &runContractFixture{authFixture: f, t: t, cookie: f.login(t, "admin", testPassword), dispatcher: dispatcher}
 	seeded := f.seedResources(t)
 	fixture.source = seeded.freeSource
-	if _, err = f.database.DB().ExecContext(t.Context(), `UPDATE policies SET enabled = 1 WHERE id = ?`, seeded.policyID); err != nil {
+	if _, err = f.database.DB().ExecContext(t.Context(), `UPDATE policies SET enabled = 1 WHERE id = $1`, seeded.policyID); err != nil {
 		t.Fatal(err)
 	}
 	policy, err := f.database.Policy(t.Context(), seeded.policyID)
@@ -520,7 +525,7 @@ func TestRunAPIContractRoundTrips(t *testing.T) {
 	// A disabled policy answers 409 conflict.
 	disabled, err := f.database.CreatePolicy(t.Context(), store.PolicyInput{
 		Name: "contract-disabled", SourceID: f.policy.SourceID, LocalRepositoryID: f.policy.LocalRepositoryID,
-		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC", MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)
@@ -708,7 +713,7 @@ func (f *runContractFixture) disabledPolicy(t *testing.T) string {
 	t.Helper()
 	policy, err := f.database.CreatePolicy(t.Context(), store.PolicyInput{
 		Name: "preview-disabled", SourceID: f.policy.SourceID, LocalRepositoryID: f.policy.LocalRepositoryID,
-		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC", MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
+		FullCron: "0 2 * * *", IncrementalCron: "0 * * * *", Timezone: "UTC",
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)

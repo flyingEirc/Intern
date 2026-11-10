@@ -107,16 +107,18 @@ describe("PolicyForm", () => {
     });
     renderWithClient(<PolicyForm policy={policy} />);
 
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "保存修改" }));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
 
     expect(await screen.findByText("保存被预检拒绝")).toBeInTheDocument();
-    expect(screen.getByText("socket")).toBeInTheDocument();
-    expect(screen.getByText("identity")).toBeInTheDocument();
-    expect(screen.getByText("失败：space")).toBeInTheDocument();
-    expect(screen.getByText("insufficient_space")).toBeInTheDocument();
+    expect(screen.getByText("其他检查项")).toBeInTheDocument();
+    expect(screen.getByText("数据库身份")).toBeInTheDocument();
+    expect(screen.getByText("失败：其他检查项")).toBeInTheDocument();
+    expect(screen.getByText(/not enough free space/)).toBeInTheDocument();
     expect(screen.getByText(/10GiB/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "预检诊断" }));
+    expect(await screen.findByText("socket")).toBeInTheDocument();
+    expect(screen.getByText(/space \/ insufficient_space/)).toBeInTheDocument();
     expect(screen.getByLabelText("名称")).toHaveValue("nightly");
     expect(push).not.toHaveBeenCalled();
   });
@@ -168,8 +170,6 @@ describe("PolicyForm", () => {
       <PolicyForm policy={{ ...policy, replica_repository_id: "none" }} />,
     );
 
-    // The trigger of a closed Base UI select renders the selected label once
-    // the choices have loaded, never the raw id.
     await waitFor(() =>
       expect(
         screen.getByRole("combobox", { name: "数据源" }),
@@ -181,5 +181,57 @@ describe("PolicyForm", () => {
     expect(
       screen.getByRole("combobox", { name: "副本仓库（可选）" }),
     ).toHaveTextContent("不使用副本");
+  });
+
+  it.each([
+    "30 4 1 1 *",
+    "0 */5 * * *",
+  ])("submits only business fields and preserves unmatched schedule %s", async (incrementalCron) => {
+    routeFetch({
+      "GET /api/v1/sources": [
+        () => json(200, { items: [], next_before: null }),
+      ],
+      "GET /api/v1/repositories": [
+        () => json(200, { items: [], next_before: null }),
+      ],
+      [`PUT /api/v1/policies/${policy.id}`]: [
+        () => json(200, { ...policy, full_cron: "15 4 1 2 *" }),
+      ],
+    });
+    renderWithClient(
+      <PolicyForm
+        policy={{
+          ...policy,
+          full_cron: "15 4 1 2 *",
+          incremental_cron: incrementalCron,
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("全量安排")).toHaveValue("15 4 1 2 *");
+    expect(screen.getByLabelText("增量安排")).toHaveValue(incrementalCron);
+    expect(screen.queryByLabelText("最大链长")).not.toBeInTheDocument();
+    expect(screen.queryByText(/page tracking/i)).not.toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() =>
+      expect(push).toHaveBeenCalledWith(`/policies/detail?id=${policy.id}`),
+    );
+    const request = fetchMock.mock.calls
+      .map(([input]) => input as Request)
+      .find((item) => item.method === "PUT");
+    expect(await request?.json()).toEqual({
+      name: "nightly",
+      source_id: "source-1",
+      local_repository_id: "repository-local",
+      replica_repository_id: null,
+      full_cron: "15 4 1 2 *",
+      incremental_cron: incrementalCron,
+      timezone: "Asia/Shanghai",
+      enabled: true,
+    });
   });
 });

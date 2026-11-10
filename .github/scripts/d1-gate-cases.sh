@@ -46,6 +46,7 @@ restore=99999999999999999999999999999999
 sigterm_run=01a184e9-8f93-7448-80df-205f2e349aa9
 instance=7f3a91c0e5b24d8a
 mysql_container=0123456789abcdef0123456789abcdef
+postgres_container=abcdef0123456789abcdef0123456789
 intern_container=fedcba9876543210fedcba9876543210
 upgrade_tag=intern:"$tag"-upgrade-mysql8.4
 
@@ -63,13 +64,13 @@ payload() {
 		"D1-A1 non_root=true image_user=999:999 container_uid=999 container_gid=999 entrypoint=[\"/usr/local/bin/intern-web\"]" \
 		"D1-A1 versions mysqld=8.4.11 xtrabackup=8.4.0-7 xbstream=8.4.0-7 matrix_server=8.4.11 matrix_tool=8.4.0-7 match=true" \
 		"D1-A1 gpl files=8 notice=true offer=true versions=true mysql_gpl=18 pxb_gpl=6 source_sha_bound=true procps_lgpl=9 procps_named=3 go_modules=182 go_license_texts=182 copied_objects=89 matrix=8.4.11,8.4.0-7" \
-		"D1-A1 compose_pins=true compose=app/web/deploy/compose.yaml env_example=app/web/deploy/.env.example dockerfile=app/web/deploy/Dockerfile matrix_images=2" \
+		"D1-A1 compose_pins=true compose=app/web/deploy/compose.yaml env_example=app/web/deploy/.env.example dockerfile=app/web/deploy/Dockerfile matrix_images=2 postgres_pin=true" \
 		"D1-A2 identity daemon=linux/amd64 platform=linux/amd64 compose=2.35.1 project=$project" \
-		"D1-A2 create_admin=created user=d1-admin login=200 negotiated=1.3 stdin=true" \
+		"D1-A2 setup=created user=d1-admin status=201 session=200 negotiated=1.3 once=true" \
 		"D1-A2 https=verified plaintext=refused untrusted_ca=refused" \
 		"D1-A2 datadir_ro=refused metadata_dir=0700 owner=999:999" \
-		"D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true container_user=999:999 mysql=$mysql_container" \
-		"D1-A2 stack=healthy compose_file=app/web/deploy/compose.yaml project=$project mysql=$mysql_container intern=$intern_container api=https://127.0.0.1:49153 mysql_port=49154 healthcheck=intern-web" \
+		"D1-A2 kek secret=/run/secrets/intern_kek mode=0600 owner=999:999 digest_bound=true database_url_secret=0600 database_url_digest_bound=true container_user=999:999 mysql=$mysql_container" \
+		"D1-A2 stack=healthy compose_file=app/web/deploy/compose.yaml project=$project mysql=$mysql_container intern=$intern_container api=https://127.0.0.1:49153 mysql_port=49154 healthcheck=intern-web postgres=$postgres_container" \
 		"D1-A2 socket=preflight_passed checks=7 source=$source_id repository=$repository sealed=true" \
 		"D1-A3 topology=compose-mysql->intern-web->local-repository policy=$policy source=$source_id repository=$repository replica=none" \
 		"D1-A3 full run=$full_run backup=$full_backup status=completed seq=1 payload_bytes=268435456 sha256=$payload_sha" \
@@ -82,8 +83,8 @@ payload() {
 		"D1-A4 recreate instance_id=$instance login=1.3 chain_members=4 a3_pair_readable=true restores=1 incremental=$full_backup migration=ready kek_digest_bound=true volumes=5" \
 		"D1-A4 upgrade instance_id=$instance login=1.3 chain_members=5 a3_pair_readable=true restores=1 incremental=$inc_backup migration=ready kek_digest_bound=true volumes=5" \
 		"D1-A4 upgrade from=intern:$tag-mysql8.4 to=$upgrade_tag source_label=$source-upgrade previous_label=$source labels_differ=true container=$intern_container" \
-		"D1-A4 kek=preserved volumes=metadata,backups,work instance_id=$instance" \
-		"D1-A5 second_container=refused flock_text=true exit=1 primary_healthy=true primary_api=200" \
+		"D1-A4 kek=preserved volumes=postgres,metadata,backups,work instance_id=$instance" \
+		"D1-A5 second_container=refused pg_owner_lock=true different_metadata_dir=true exit=1 primary_healthy=true primary_api=200" \
 		"D1-A5 kek_refusal=missing_permissions missing=refused permissions=refused fixed_text=true metadata_dir=/tmp/d1-refusal-metadata" \
 		"D1-A5 sigterm run=$sigterm_run observed_running=true grace_seconds=120 stop_seconds=7 exit_code=0 oom_killed=false" \
 		"D1-A5 no_false_completed=true run_status=failed error_class=backup_failed backup_id=none completed_runs_before=3 completed_runs_after=3" \
@@ -185,7 +186,10 @@ reject foreign_project 'if has("Output") then .Output |= sub("compose=2.35.1 pro
 reject unhealthy_stack 'if has("Output") then .Output |= sub("stack=healthy"; "stack=unhealthy") else . end'
 reject copied_compose 'if has("Output") then .Output |= sub("stack=healthy compose_file=app/web/deploy/compose.yaml"; "stack=healthy compose_file=/tmp/compose.yaml") else . end'
 reject no_deployment_health 'if has("Output") then .Output |= sub("healthcheck=intern-web"; "healthcheck=none") else . end'
-reject no_create_admin 'if has("Output") then .Output |= sub("create_admin=created user=d1-admin login=200"; "create_admin=absent user=d1-admin login=500") else . end'
+reject no_postgres_pin 'if has("Output") then .Output |= sub("matrix_images=2 postgres_pin=true"; "matrix_images=2 postgres_pin=false") else . end'
+reject postgres_unhealthy 'if has("Output") then .Output |= sub("healthcheck=intern-web postgres=abcdef0123456789abcdef0123456789"; "healthcheck=intern-web postgres=none") else . end'
+reject database_secret_unbound 'if has("Output") then .Output |= sub("database_url_secret=0600 database_url_digest_bound=true"; "database_url_secret=0644 database_url_digest_bound=false") else . end'
+reject no_setup 'if has("Output") then .Output |= sub("setup=created user=d1-admin status=201 session=200"; "setup=absent user=d1-admin status=500 session=500") else . end'
 reject weak_tls 'if has("Output") then .Output |= sub("negotiated=1.3"; "negotiated=1.0") else . end'
 reject plaintext_api 'if has("Output") then .Output |= sub("api=https://127.0.0.1:49153"; "api=http://127.0.0.1:49153") else . end'
 reject untrusted_ok 'if has("Output") then .Output |= sub("untrusted_ca=refused"; "untrusted_ca=accepted") else . end'
@@ -218,8 +222,8 @@ reject no_kek_line 'if has("Output") then .Output |= select((. // "") | contains
 reject upgrade_same_tag "if has(\"Output\") then .Output |= sub(\"to=${upgrade_tag}\"; \"to=intern:${tag}-mysql8.4\") else . end"
 reject upgrade_foreign_label "if has(\"Output\") then .Output |= sub(\"source_label=${source}-upgrade previous_label=${source}\"; \"source_label=${wrong_source}-upgrade previous_label=${source}\") else . end"
 reject upgrade_previous_foreign "if has(\"Output\") then .Output |= sub(\"previous_label=${source} labels_differ=true\"; \"previous_label=${wrong_source} labels_differ=true\") else . end"
-reject second_container_allowed 'if has("Output") then .Output |= sub("second_container=refused flock_text=true exit=1"; "second_container=accepted flock_text=true exit=0") else . end'
-reject no_flock_text 'if has("Output") then .Output |= sub("flock_text=true"; "flock_text=false") else . end'
+reject second_container_allowed 'if has("Output") then .Output |= sub("second_container=refused pg_owner_lock=true different_metadata_dir=true exit=1"; "second_container=accepted pg_owner_lock=true different_metadata_dir=true exit=0") else . end'
+reject no_pg_owner_lock 'if has("Output") then .Output |= sub("pg_owner_lock=true different_metadata_dir=true"; "pg_owner_lock=false different_metadata_dir=true") else . end'
 reject kek_refusal_accepted 'if has("Output") then .Output |= sub("kek_refusal=missing_permissions missing=refused permissions=refused"; "kek_refusal=none missing=accepted permissions=accepted") else . end'
 reject short_grace 'if has("Output") then .Output |= sub("grace_seconds=120"; "grace_seconds=30") else . end'
 reject stop_beyond_grace 'if has("Output") then .Output |= sub("stop_seconds=7"; "stop_seconds=125") else . end'

@@ -3,7 +3,6 @@ package server
 import (
 	"database/sql"
 	"encoding/json/v2"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/app/web/internal/storetest"
 )
 
 func TestMutationAuditCoverageAndSecretScan(t *testing.T) {
@@ -19,10 +19,7 @@ func TestMutationAuditCoverageAndSecretScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admin, err := f.database.CreateAdmin(t.Context(), "admin", hash)
-	if err != nil {
-		t.Fatal(err)
-	}
+	admin := storetest.SeedAdmin(t, f.database, "admin", hash)
 	cookie := f.login(t, "admin", testPassword)
 	failed := f.request(t, "POST", "/api/v1/auth/login", `{"username":"missing","password":"wrong-private-credential"}`, nil, 401)
 	if decodeResponse[render.ErrorResponse](t, failed).Error.Code != render.Unauthorized {
@@ -45,7 +42,7 @@ func TestMutationAuditCoverageAndSecretScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	all := string(encoded) + rawAudit(t, f.dir) + f.logs.String()
+	all := string(encoded) + rawAudit(t, f.dsn) + f.logs.String()
 	for _, secret := range []string{
 		testPassword, changedPassword, "wrong-private-credential", "operator-private-credential", "$argon2id$", hash,
 		cookie.Value, renewed.Value, cookie.String(), renewed.String(), "private-authorization-marker",
@@ -61,15 +58,30 @@ func assertMutationAuditFields(t *testing.T, entries []store.AuditLog, actorID s
 	if len(entries) != 7 {
 		t.Fatalf("audit rows=%d, want 7", len(entries))
 	}
-	if entries[0].ActorType != "anonymous" || entries[0].Result != "denied" || *entries[0].Status != 401 {
+	assertAnonymousAuditDenial(t, entries[0])
+	assertPasswordAudit(t, entries[2], actorID)
+	assertFailedLoginAudit(t, entries[4])
+	assertSetupAudit(t, entries[6])
+}
+
+func assertAnonymousAuditDenial(t *testing.T, entry store.AuditLog) {
+	t.Helper()
+	if entry.ActorType != "anonymous" || entry.Result != "denied" || *entry.Status != 401 {
 		t.Fatal("anonymous denial missing")
 	}
-	assertPasswordAudit(t, entries[2], actorID)
-	if entries[4].ActorType != "anonymous" || entries[4].ActorName != "missing" || entries[4].Result != "denied" {
+}
+
+func assertFailedLoginAudit(t *testing.T, entry store.AuditLog) {
+	t.Helper()
+	if entry.ActorType != "anonymous" || entry.ActorName != "missing" || entry.Result != "denied" {
 		t.Fatal("failed login actor missing")
 	}
-	if entries[6].ActorType != "system" || entries[6].Action != "users.create_admin" {
-		t.Fatal("bootstrap audit missing")
+}
+
+func assertSetupAudit(t *testing.T, entry store.AuditLog) {
+	t.Helper()
+	if entry.ActorType != "system" || entry.Action != "auth.setup" || entry.Detail.Role != "admin" {
+		t.Fatal("browser setup audit missing")
 	}
 }
 
@@ -84,13 +96,13 @@ func assertPasswordAudit(t *testing.T, entry store.AuditLog, actorID string) {
 // alone could hide an accidental extra JSON property while still leaking on disk.
 func rawAudit(t *testing.T, dir string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	var text string
-	err = db.QueryRowContext(t.Context(), `SELECT COALESCE(group_concat(ts || actor_type || actor_id || actor_name || action || resource_type || resource_id || ip || result || COALESCE(status, '') || request_id || detail_json, ''), '') FROM audit_logs`).Scan(&text)
+	err = db.QueryRowContext(t.Context(), `SELECT COALESCE(string_agg(ts || actor_type || actor_id || actor_name || action || resource_type || resource_id || ip || result || COALESCE(status::text, '') || request_id || detail_json, ''), '') FROM audit_logs`).Scan(&text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +119,7 @@ func TestAuditDetailJSONContainsOnlyWhitelistedKeys(t *testing.T) {
 	req := apiRequest("POST", "/api/v1/users", `{"username":"other","password":"`+testPassword+`","role":"viewer"}`, cookie)
 	req.Header.Set("Origin", "https://evil.example")
 	requestAPI(t, f.client, req, 403)
-	got := detailJSONList(t, f.dir)
+	got := detailJSONList(t, f.dsn)
 	want := []string{
 		`{"role":"admin"}`,
 		`{}`,
@@ -141,7 +153,7 @@ func TestAuditDetailJSONContainsOnlyWhitelistedKeys(t *testing.T) {
 
 func detailJSONList(t *testing.T, dir string) []string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
