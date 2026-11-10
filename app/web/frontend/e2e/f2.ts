@@ -184,12 +184,12 @@ async function main(): Promise<void> {
     b.ab("wait", "--text", "检查项");
     const preflightText = b.text();
     for (const check of [
-      "identity",
-      "compatibility",
-      "volume",
-      "mount",
-      "privileges",
-      "capacity",
+      "数据库身份",
+      "版本兼容",
+      "数据卷",
+      "挂载",
+      "权限",
+      "可用空间",
     ]) {
       expect(
         preflightText.includes(check),
