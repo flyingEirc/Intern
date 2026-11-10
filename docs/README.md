@@ -4,8 +4,8 @@
 
 | 目录 / 文档 | 内容与阅读时机 |
 | --- | --- |
-| [roadmap/Web优先与多应用架构-2026-10-17.md](roadmap/Web优先与多应用架构-2026-10-17.md) | 当前总路线：Web 优先、CLI 暂停扩展、app/internal 目录和 Web 推进阶段。所有开发先阅读。 |
-| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B、C、D 均已原生验收并合入 main：C 的子任务 #27–#32（P2、S1、P3、R1、W3、W4，验收 C-A1–C-A5），D 的 P4 #36 与 W5 #37（含仅从 FTP 副本的实际恢复与 prepare、导出由新 MySQL 8.4.11 容器启动）。阶段 E（[#15](https://github.com/flyingEirc/Intern/issues/15)）的 D1 #41、S2 #42 与 G #44 已在候选 `9489f6c` 验收（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)，14 个 job 全绿）并随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 合入 main（merge `2a2040d`）；V1 #43 内网实测于 2026-11-05 取消，FTP/FTPS 由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI（固定 Pure-FTPd 1.0.54 夹具）覆盖（截至 2026-11-05 最近一次整套 main 运行为 merge `7355766` 的 [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492)，14/14 全绿），阶段 E 已关闭。前端 F #19 暂缓，Web 首版与物理 PITR 未交付。实施 Web 任何子任务前阅读。 |
+| [roadmap/Web优先与多应用架构-2026-10-17.md](roadmap/Web优先与多应用架构-2026-10-17.md) | 当前总路线：Web 优先、CLI 暂停扩展、app/internal 目录、Web 阶段 A–F 与下一阶段（PG 控制面与旧 SQLite 升级、浏览器首管、业务策略默认值、业务术语与响应式 UI；工作区已实现，待独立验收）。所有开发先阅读。 |
+| [roadmap/Web备份控制面与流式管道-2026-10-17.md](roadmap/Web备份控制面与流式管道-2026-10-17.md) | **首版方案已由用户确认（2026-10-18），落档于 [#11](https://github.com/flyingEirc/Intern/issues/11)**：XtraBackup 物理链、Docker 单宿主机、本地主仓库与 FTP 副本、隔离恢复和演练、调度与鉴权。阶段 B–E 与前端 F（#54/#56–#59/#65/#74）均已原生验收并合入 main，Web 首版已于 2026-11-09 交付；版本矩阵仍为 `candidate`、无公开镜像，N1–N3 未交付。下一阶段以 PostgreSQL 为 Web 唯一元数据库、浏览器一次性首管与业务化策略为目标；工作区入口已实现，完整验收未完成（见总路线第 3.2 节）。实施 Web 任何子任务前阅读。 |
 | [roadmap/数据库备份与恢复-2026-10-17.md](roadmap/数据库备份与恢复-2026-10-17.md) | 备份恢复详细方案：范围、选型、逻辑/物理设计、CLI 基线和历史验证；开发顺序与当前应用职责以 Web 优先总路线为准。 |
 | [workflow/issue.md](workflow/issue.md) | 以 GitHub Issue 跟踪背景、功能、步骤、验收、交付；含 harness/模型和 UI/UX 证据要求。开始或调整任务时阅读。 |
 | [workflow/pr.md](workflow/pr.md) | 小功能提交、提交前检查、PR 的关联 Issue 与逐项验收汇总。提交或提 PR 前阅读。 |

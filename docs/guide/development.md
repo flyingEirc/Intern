@@ -4,13 +4,15 @@
 
 当前主线为完成 Web；CLI 暂停新功能，只做必要维护和共享接口兼容。Web 首版范围已确认（[#11](https://github.com/flyingEirc/Intern/issues/11)），前端栈按 2026-11-06 的用户决定执行（[#19](https://github.com/flyingEirc/Intern/issues/19)、[#54](https://github.com/flyingEirc/Intern/issues/54)，见 [Web 优先总路线第 3.1 节](../roadmap/Web优先与多应用架构-2026-10-17.md)），不得静默更换。后端阶段 B–E 已交付，前端阶段 F 自 2026-11-06 实施；对前端暴露的接口以 OpenAPI 契约 `app/web/api/openapi.yaml` 为准，接口变更须同步契约、测试与前端生成客户端（[#18](https://github.com/flyingEirc/Intern/issues/18)、#54）。契约测试使用 kin-openapi 校验规范本身、Gin 路由与规范操作双向一致，以及 API 测试中的全部请求与响应；后端不做代码生成（[#22](https://github.com/flyingEirc/Intern/issues/22)）。
 
+2026-11-09 用户决定进入下一阶段（**工作区已实现，待独立验收**，见 [Web 优先总路线第 3.2 节](../roadmap/Web优先与多应用架构-2026-10-17.md)）：Web 唯一业务元数据库改为 PostgreSQL，覆盖物理链与复制持久层，备份载荷、工作文件与 KEK 不入 PG；CLI 既有 SQLite 保留必要兼容。PG 锁与数据共用唯一物理连接，断链后禁止驱动重连并让 Store 永久失败、取消 serve/运行工具；同一 PG 单 owner。旧 SQLite 走一次性受控升级，不得静默空库。浏览器一次性首管是唯一日常首管路径，Web 生产命令 `intern-web user create-admin` 和仅服务它的 `store.OpenCurrent` 已删除，恢复账号走已认证用户管理或明确运维恢复流程，不增加后门；`app/cli` 的逻辑备份兼容不是 Web 首管入口。策略低层默认值只由服务端提供，编辑业务字段不得静默覆盖历史调优。界面按已记录的成熟 Base UI 组件实施。准确入口见下方命令表；完整 `mise run check`、原生部署、真实链满/owner-loss 与 CI 未完成前不得宣称通过。
+
 ## 目录与共享接口
 
 | 项目根目录下的路径 | 职责 |
 | --- | --- |
 | `internal/` | CLI/Web 共享的备份恢复、制品、密钥、元数据和调度能力；不能依赖产品入口。 |
 | `app/cli/` | CLI 命令、配置与终端交互；保留兼容，暂停功能扩展。 |
-| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate`、`user create-admin`）、Gin + `encoding/json/v2` 协议层、SQLite / goose / sqlc 控制面库、scs 服务端会话与 admin / operator / viewer 三角色、变更审计，以及 `api/openapi.yaml` 契约；`frontend/` 是 Web 前端（见下文「Web 前端」），其静态导出经 `internal/webui` 在 `webui` 构建标签下嵌入。 |
+| `app/web/` | 当前主线 Web 产品和后端：Cobra 入口（`serve`、`migrate status|up|import-sqlite`）、Gin + `encoding/json/v2` 协议层、PostgreSQL / goose / sqlc 控制面库、scs 服务端会话与 admin / operator / viewer 三角色、变更审计，以及 `api/openapi.yaml` 契约；`frontend/` 是 Web 前端（见下文「Web 前端」），其静态导出经 `internal/webui` 在 `webui` 构建标签下嵌入。工作区实现待独立验收。 |
 | `app/site/` | 个人产品站点，不承担备份控制面。 |
 | `mobile/` | 后续可能的客户端，当前不作实现承诺。 |
 | `docs/` | 核心路线、流程与开发约束，按 [文档规范](documentation.md) 维护。 |
@@ -79,9 +81,11 @@
 | 契约变更后重新生成前端客户端 | `mise run frontend:generate` |
 | 前端开发服务器（代理到 `INTERN_DEV_BACKEND`，默认 `http://127.0.0.1:8080`） | `cd app/web/frontend && bun run dev` |
 | agent-browser 端到端（先 `build`，再驱动真实 `bin/intern-web`） | `mise run frontend:e2e` |
-| 启动 Web 后端（监听前自动迁移元数据库） | `./bin/intern-web serve --metadata-dir <绝对路径> --listen 127.0.0.1:8080` |
-| 查看或执行 Web 元数据库迁移 | `./bin/intern-web migrate status` / `./bin/intern-web migrate up` |
-| 创建初始管理员（serve 运行期间也可执行） | `./bin/intern-web user create-admin --username <用户名> --metadata-dir <绝对路径>`（终端无回显输入两次；脚本使用 `--password-stdin` 从标准输入读一行，不接受命令行明文） |
+| 启动 Web 后端（工作区已实现，待独立验收） | `./bin/intern-web serve --database-url-file /run/secrets/intern_database_url --metadata-dir /var/lib/intern/metadata`；DSN 也可用 `--database-url`/`INTERN_DATABASE_URL`，与 `--database-url-file`/`INTERN_DATABASE_URL_FILE` 互斥。secret 必须是 Unix `O_NOFOLLOW`/`O_NONBLOCK` 读取的 `0600` 常规文件、单行且不超过 4096 字节；禁止打印 DSN |
+| 查看或执行 PG 迁移（工作区已实现，待独立验收） | `./bin/intern-web migrate status` 调 `store.ReadStatus(ctx, dsn)`，只读、不持 owner 锁；`./bin/intern-web migrate up` 复用 `store.Open(ctx, dsn)` 并持同库 owner 锁 |
+| 从旧 SQLite 受控升级到 PG（工作区已实现，待独立验收） | `./bin/intern-web migrate import-sqlite --sqlite-file /absolute/intern.db --database-url-file /run/secrets/intern_database_url --metadata-dir /var/lib/intern/metadata`，对应 `store.ImportSQLite(ctx, dsn, absoluteFile)`；源只读持排他锁、目标空 PG 持 owner 锁、单事务复制并核验，失败回滚且不删源 |
+| W4 原生入口（工作区已扩展，待原生结果） | `go test -v -tags=integration -count=1 -timeout=45m ./app/web/integration -run '^TestW4NativeContainers$'`。八项固定为 `a1-a2-e2e`、`a2-default-chain-rotation`、`a2-priority`、`a3-cancel`、`a4-sse`、`a3-sigterm`、`a3-sigkill`、`a3-postgres-owner-loss`；只接受原生 linux/amd64，缺项、skip 或仿真不得放行 |
+| D1 原生入口与开发仿真（工作区已实现，待原生结果） | `go test -v -tags=integration -count=1 -timeout=60m ./app/web/integration -run '^TestD1NativeContainers$'`。仅当 `INTERN_D1_DEVELOPMENT_EMULATION=true` 且 `GITHUB_ACTIONS` 未设置时允许 Linux Docker 的 amd64 仿真，并明确记录“不能满足原生 CI”；任何其他情况仍调用原生 linux/amd64 门禁 |
 | 查看开发入口帮助 | `mise run run --help` |
 | 快速回归 | `mise run test` |
 | 业务提交完整本地检查 | `mise run check`（build、test-race、golangci-lint） |
@@ -107,9 +111,15 @@ W5 恢复 API 的裁定边界：`verify_sql` 由恢复引擎唯一裁定，API �
 
 用户创建、修改、改密、角色/禁用、会话吊销及登出的数据库变更与成功审计同事务提交；审计写入失败则变更不生效。失败/拒绝请求和登录审计仍尽力记录，Cookie 传输与改密后的 token 轮换不属于数据库事务，不承诺网络与数据库原子性。每进程密码哈希总并发为 2、匿名登录最多占 1；过载仍以 `503` 与 `Retry-After` 拒绝，不采用无界等待。会话响应缓冲最多 8 MiB，超限或尝试流式输出返回单一 `500`，不静默截断 `200`；这不是整进程内存上限，也不是 SSE 支持。
 
+以下两条仅记录已交付首版 Web SQLite 的排空与写事务边界，不是 CLI 或下一阶段 PG 的运行保证。下一阶段 PG 锁与数据共用唯一物理连接，断链后禁止驱动自动重连，Store 永久失败并取消 serve/运行工具；工作区 PG 驱动的取消边界见下方实现记录，尚待独立验收。
+
 `--shutdown-timeout` 是优雅关闭窗口，不是整个进程的绝对退出上限。窗口结束后取消请求并关闭连接，再等待脱离审计的截止窗口、SQLite `busy_timeout` 和少量调度余量（当前额外最多 10.5 秒）。SQLite busy 回调及内核磁盘 I/O 不保证能被 context 立即中断；超过排空窗口仍会报告错误，不承诺有限时间排空任意卡死 I/O。部署的停止宽限期应覆盖这些窗口。
 
-控制面库只有一条写连接（`SetMaxOpenConns(1)`）。因此写事务不能继承调用方的可取消 context：调用方在事务中途被取消时，连接可能停留在半开事务上，此后每次写入（包括系统审计）都要等满 `busy_timeout` 才报 `SQLITE_BUSY`，直到进程重启。`withTx`/`withTxDB` 因此只在开始前查询调用方 context —— 已结束则直接返回其错误，否则 `BeginTx`、每条语句以及 `Commit`/`Rollback` 都在 `context.WithoutCancel` 加 30 秒上限的窗口内执行。调用方被取消不会中断已开始的写事务，也绝不会留下半开事务；取消的语义是"这次写仍然完成"，不是"放弃这次写"。需要取消语义的调用点必须自己在进入事务前判断，或者像 dispatcher 的终态写一样显式使用脱离窗口。
+控制面库只有一条写连接（`SetMaxOpenConns(1)`，首版 SQLite）。因此写事务不能继承调用方的可取消 context：调用方在事务中途被取消时，连接可能停留在半开事务上，此后每次写入（包括系统审计）都要等满 `busy_timeout` 才报 `SQLITE_BUSY`，直到进程重启。`withTx`/`withTxDB` 因此只在开始前查询调用方 context —— 已结束则直接返回其错误，否则 `BeginTx`、每条语句以及 `Commit`/`Rollback` 都在 `context.WithoutCancel` 加 30 秒上限的窗口内执行。调用方被取消不会中断已开始的写事务，也绝不会留下半开事务；取消的语义是"这次写仍然完成"，不是"放弃这次写"。需要取消语义的调用点必须自己在进入事务前判断，或者像 dispatcher 的终态写一样显式使用脱离窗口。下一阶段 PG 的连接/事务实现由 PG Issue 决定，不能把本条当作 PG 已具备相同语义。
+
+**PG 驱动实现记录（2026-11-10，代码已落工作区，未完成验收）**：`app/web/internal/store/owner.go` 的 Exec / Query / Ping 在调用前检查请求 context；实际 Exec / Query / Ping / ResetSession 使用脱离调用方取消的独立 6 秒 context，`store.go` 固定服务端 `statement_timeout` 与 `lock_timeout` 为 5 秒。Query 在检测到调用方取消时先关闭 rows；返回的 rows 在 `Close()` 完成协议排空后才释放独立 context，避免把未读完的结果留给下一条语句。ResetSession 的存活探测不继承请求取消，避免普通取消被 pgx 当作坏连接而丢失 owner 锁。已执行的 Exec 若成功后才发现请求取消，会返回调用方错误，**这不代表 SQL 没有执行或已经回滚**；Query 同样不以取消作为连接失效依据。
+
+PG 写事务在开始前检查调用方 context，并在脱离取消的 30 秒窗口内处理业务变更与成功审计；单语句仍受上述超时约束，不把 30 秒解释为整个进程的退出上限。实现不使用 `CancelRequest`：其投递可能影响下一条语句或 COMMIT，固定 sleep 不能提供同步保证。真实断链与普通请求取消必须分别验收；核心 race、owner 失效、真实工具取消及原生 CI 未完成前，不得据此宣称 #81 已通过。
 
 panic 发生在响应输出前时，可以丢弃部分缓冲并返回统一 `500`；字节已发送后无法收回或改写状态，只记录错误，不能把这类情形描述为已回滚。改密事务成功后若 token 轮换失败，密码与成功审计仍保留，旧会话不得被提升到新 epoch，需要用新密码重新登录。
 
