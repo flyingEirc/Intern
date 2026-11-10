@@ -696,7 +696,17 @@ async function main(): Promise<void> {
       if (scenario.frequency === "weekly") {
         choose("星期", "周三");
       }
-      b.ab("fill", "#full-time", scenario.time);
+      // Native time inputs expose separate hour/minute keyboard segments.
+      b.ab("focus", "#full-time");
+      b.ab("press", "ArrowLeft");
+      for (const digit of scenario.time.slice(0, 2)) b.ab("press", digit);
+      b.ab("press", "ArrowRight");
+      for (const digit of scenario.time.slice(3)) b.ab("press", digit);
+      b.ab("press", "Tab");
+      expect(
+        b.ab("get", "value", "#full-time") === scenario.time,
+        "B4 native time control rejected keyboard entry",
+      );
       b.click("每小时");
       for (const [label, option] of [
         ["间隔", scenario.interval],
