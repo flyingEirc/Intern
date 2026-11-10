@@ -78,7 +78,7 @@ func connectFailure(owner *ownerGuard, db *sql.DB, err error) error {
 	if ownerErr := owner.errValue(); ownerErr != nil {
 		return errors.Join(ownerErr, closeErr)
 	}
-	return errors.Join(fmt.Errorf("connect to PostgreSQL: %w", err), closeErr)
+	return errors.Join(redactConnectError(err), closeErr)
 }
 
 func bootstrapStore(ctx context.Context, db *sql.DB, owner *ownerGuard) (*Store, error) {

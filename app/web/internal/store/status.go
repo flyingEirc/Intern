@@ -38,24 +38,11 @@ func ReadStatus(ctx context.Context, dsn string) (_ Status, retErr error) {
 	if err = readReplicaVersionPairs(ctx, nil, &status); err != nil {
 		return Status{}, err
 	}
-	if strings.TrimSpace(dsn) == "" {
-		return Status{}, errors.New("database_url is required")
-	}
-	config, err := pgx.ParseConfig(dsn)
+	db, err := openReadOnly(ctx, dsn)
 	if err != nil {
-		return Status{}, errors.New("invalid PostgreSQL database configuration")
-	}
-	if config.RuntimeParams == nil {
-		config.RuntimeParams = map[string]string{}
-	}
-	config.RuntimeParams["default_transaction_read_only"] = "on"
-	db := sql.OpenDB(stdlib.GetConnector(*config))
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	defer func() { retErr = errors.Join(retErr, db.Close()) }()
-	if err = db.PingContext(ctx); err != nil {
 		return Status{}, err
 	}
+	defer func() { retErr = errors.Join(retErr, db.Close()) }()
 	if err = readAppliedVersions(ctx, db, versions, &status); err != nil {
 		return Status{}, err
 	}
@@ -101,9 +88,37 @@ func readInstanceID(ctx context.Context, db *sql.DB) (string, error) {
 	return instance.ID, err
 }
 
-func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+// rowQueryer is the read surface shared by a pool and a transaction.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// openReadOnly is a single read-only session. Startup rejects writes, and a
+// failed dial is returned as a fixed reason without the connection identity.
+func openReadOnly(ctx context.Context, dsn string) (*sql.DB, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("database_url is required")
+	}
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, errors.New("invalid PostgreSQL database configuration")
+	}
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["default_transaction_read_only"] = "on"
+	db := sql.OpenDB(stdlib.GetConnector(*config))
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err = db.PingContext(ctx); err != nil {
+		return nil, errors.Join(redactConnectError(err), db.Close())
+	}
+	return db, nil
+}
+
+func tableExists(ctx context.Context, q rowQueryer, name string) (bool, error) {
 	var exists bool
-	err := db.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists)
+	err := q.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists)
 	return exists, err
 }
 

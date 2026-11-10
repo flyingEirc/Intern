@@ -34,7 +34,9 @@ var (
 	importHookMu sync.Mutex
 	// importAfterRow, when set, runs after each copied row inside the import
 	// transaction. Tests hold that transaction open; production leaves it nil.
-	importAfterRow func(context.Context, *sql.Tx, string, int64) error
+	importAfterRow            func(context.Context, *sql.Tx, string, int64) error
+	errDestinationHasData     = errors.New("PostgreSQL destination already contains business data; refusing to overwrite")
+	errDestinationInitialized = errors.New("PostgreSQL destination was already initialized; refusing to overwrite")
 )
 
 func signalImportRow(ctx context.Context, tx *sql.Tx, table string, count int64) error {
@@ -50,6 +52,8 @@ func signalImportRow(ctx context.Context, tx *sql.Tx, table string, count int64)
 // ImportSQLite performs a one-time, offline upgrade into an empty PostgreSQL
 // control plane. It leaves the SQLite source untouched and holds the legacy
 // process lock until the single copy transaction commits or rolls back.
+// An occupied or already initialized target is refused on a read-only session
+// before Open migrates or inserts an instance row.
 func ImportSQLite(ctx context.Context, dsn, sourcePath string) (_ ImportResult, retErr error) {
 	source, err := openLegacySource(ctx, sourcePath)
 	if err != nil {
@@ -57,6 +61,9 @@ func ImportSQLite(ctx context.Context, dsn, sourcePath string) (_ ImportResult, 
 	}
 	defer func() { retErr = errors.Join(retErr, source.Close()) }()
 	if err = validateLegacySQLite(ctx, source.tx); err != nil {
+		return ImportResult{}, err
+	}
+	if err = rejectOccupiedDestination(ctx, dsn); err != nil {
 		return ImportResult{}, err
 	}
 	destination, err := Open(ctx, dsn)
@@ -205,6 +212,63 @@ func restartImportedSequences(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// rejectOccupiedDestination reads the target before any migration. A fresh
+// database has no business tables and is not a refusal.
+func rejectOccupiedDestination(ctx context.Context, dsn string) (retErr error) {
+	db, err := openReadOnly(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, db.Close()) }()
+	return destinationOccupation(ctx, db)
+}
+
+func destinationOccupation(ctx context.Context, q rowQueryer) error {
+	for _, table := range legacyTables {
+		if table == "instance" {
+			continue
+		}
+		occupied, err := legacyTableOccupied(ctx, q, table)
+		if err != nil {
+			return err
+		}
+		if occupied {
+			return errDestinationHasData
+		}
+	}
+	completed, err := setupAlreadyCompleted(ctx, q)
+	if err != nil {
+		return err
+	}
+	if completed {
+		return errDestinationInitialized
+	}
+	return nil
+}
+
+func legacyTableOccupied(ctx context.Context, q rowQueryer, table string) (bool, error) {
+	exists, err := tableExists(ctx, q, table)
+	if err != nil || !exists {
+		return false, err
+	}
+	var present bool
+	err = q.QueryRowContext(ctx, legacyExistsSQL(table)).Scan(&present)
+	return present, err
+}
+
+func setupAlreadyCompleted(ctx context.Context, q rowQueryer) (bool, error) {
+	exists, err := tableExists(ctx, q, "setup_state")
+	if err != nil || !exists {
+		return false, err
+	}
+	var completed bool
+	err = q.QueryRowContext(ctx, "SELECT completed FROM setup_state WHERE singleton = 1").Scan(&completed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return completed, err
+}
+
 func requireEmptyTarget(ctx context.Context, tx *sql.Tx) error {
 	for _, table := range legacyTables {
 		if table == "instance" {
@@ -215,7 +279,7 @@ func requireEmptyTarget(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 		if present {
-			return errors.New("PostgreSQL destination already contains business data; refusing to overwrite")
+			return errDestinationHasData
 		}
 	}
 	var completed bool
@@ -223,7 +287,7 @@ func requireEmptyTarget(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	if completed {
-		return errors.New("PostgreSQL destination was already initialized; refusing to overwrite")
+		return errDestinationInitialized
 	}
 	return nil
 }

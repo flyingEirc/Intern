@@ -419,6 +419,124 @@ func requireImportCanceled(t *testing.T, done <-chan error) {
 	}
 }
 
+func TestImportSQLiteRejectsOccupiedTargetWithoutWriting(t *testing.T) {
+	_, source := legacyDatabase(t)
+	dsn := pgtest.New(t)
+	occupyDestinationWithoutInstance(t, dsn)
+	before := snapshotControlPlane(t, dsn)
+	requireEmptyInstanceAndGoose(t, before)
+	_, err := ImportSQLite(t.Context(), dsn, source)
+	t.Run("refuses occupied destination", func(t *testing.T) {
+		requireOccupiedRefusal(t, err, source)
+	})
+	after := snapshotControlPlane(t, dsn)
+	t.Run("goose version tables unchanged", func(t *testing.T) {
+		requireGooseUnchanged(t, before, after)
+	})
+	t.Run("instance rows unchanged", func(t *testing.T) {
+		requireInstanceUnchanged(t, before, after)
+	})
+}
+
+func requireEmptyInstanceAndGoose(t *testing.T, state controlPlaneState) {
+	t.Helper()
+	if state.instance != "empty" || state.web == "absent" || state.web == "empty" {
+		t.Fatalf("precondition goose=%q instance=%q", state.web, state.instance)
+	}
+}
+
+func requireOccupiedRefusal(t *testing.T, err error, source string) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "already contains") {
+		t.Fatalf("occupied import = %v", err)
+	}
+	if _, statErr := os.Stat(source); statErr != nil {
+		t.Fatalf("legacy SQLite removed: %v", statErr)
+	}
+}
+
+func requireGooseUnchanged(t *testing.T, before, after controlPlaneState) {
+	t.Helper()
+	if before.web != after.web || before.physical != after.physical || before.replication != after.replication {
+		t.Fatalf("goose version tables changed\nbefore web=%q physical=%q replication=%q\nafter web=%q physical=%q replication=%q",
+			before.web, before.physical, before.replication, after.web, after.physical, after.replication)
+	}
+}
+
+func requireInstanceUnchanged(t *testing.T, before, after controlPlaneState) {
+	t.Helper()
+	if before.instance != after.instance {
+		t.Fatalf("instance rows changed: %q -> %q", before.instance, after.instance)
+	}
+}
+
+func occupyDestinationWithoutInstance(t *testing.T, dsn string) {
+	t.Helper()
+	s, err := Open(t.Context(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	_, err = s.db.ExecContext(t.Context(), `INSERT INTO users (id, username, password_hash, role, disabled, session_epoch, created_at, updated_at)
+VALUES ('occupied-user', 'occupied', 'hash', 'viewer', 0, 0, 'now', 'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(t.Context(), "DELETE FROM instance"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type controlPlaneState struct {
+	web, physical, replication, instance string
+}
+
+func snapshotControlPlane(t *testing.T, dsn string) controlPlaneState {
+	t.Helper()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	return controlPlaneState{
+		web:         relationDump(t, db, "web_goose_db_version", "SELECT version_id::text || ' ' || is_applied::text FROM web_goose_db_version ORDER BY version_id, id"),
+		physical:    relationDump(t, db, "physical_goose_db_version", "SELECT version_id::text || ' ' || is_applied::text FROM physical_goose_db_version ORDER BY version_id, id"),
+		replication: relationDump(t, db, "replication_goose_db_version", "SELECT version_id::text || ' ' || is_applied::text FROM replication_goose_db_version ORDER BY version_id, id"),
+		instance:    relationDump(t, db, "instance", "SELECT id || ' ' || created_at FROM instance ORDER BY singleton"),
+	}
+}
+
+func relationDump(t *testing.T, db *sql.DB, table, query string) string {
+	t.Helper()
+	var exists bool
+	if err := db.QueryRowContext(t.Context(), "SELECT to_regclass($1) IS NOT NULL", table).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		return "absent"
+	}
+	rows, err := db.QueryContext(t.Context(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	lines := make([]string, 0)
+	for rows.Next() {
+		var line string
+		if err = rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, line)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) == 0 {
+		return "empty"
+	}
+	return strings.Join(lines, "\n")
+}
+
 func requireImportRolledBack(t *testing.T, dsn, identity string) {
 	t.Helper()
 	s := openTestStore(t, dsn)
