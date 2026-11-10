@@ -139,7 +139,7 @@ docker compose exec -T intern intern-web migrate status # 只读 JSON 状态，�
 
 ### 2.3 PostgreSQL 与旧库升级（工作区已实现，待独立验收）
 
-以下入口已在工作区实现，但完整 `mise run check`、Compose 原生部署、真实 owner-loss 与 CI 尚未完成；不能据此宣布 #81 通过。
+以下入口已提交 PR #90；2026-11-10 原生开发基线 `b45a711` 的 [run 42763282901](https://github.com/flyingEirc/Intern/actions/runs/42763282901) 已通过 Compose/D1、W4 活工具 owner-loss、fast 与既有 CLI/Web 容器门禁（[详细证据](https://github.com/flyingEirc/Intern/issues/80#issuecomment-6760406034)）。完整旧库升级业务连续性与后续最终 head 的 full/UI、独立复验仍待完成，不能据此宣布 #81 通过；本节参考部署的完整交付验收状态以此边界为准。
 
 - **DSN**：`--database-url` / `INTERN_DATABASE_URL` 直接给 DSN，或首选的 `--database-url-file` / `INTERN_DATABASE_URL_FILE` 指向权限 `0600` 的常规非符号链接文件；YAML 键为 `database_url` / `database_url_file`。两种来源互斥，文件必须只有一个非空行且不超过 4096 字节，Unix 读取使用 `O_NOFOLLOW` 与 `O_NONBLOCK`。日志、审计与错误不得打印 DSN。`--metadata-dir` 仍是绝对、`0700` 私有目录，只作本机目录安全边界与迁移源，不再创建或读取 `intern.db`。
 - **启动**：`./bin/intern-web serve --database-url-file /run/secrets/intern_database_url --metadata-dir /var/lib/intern/metadata`。`store.Open(ctx, dsn)` 迁移并持有 owner；`migrate status` 调 `store.ReadStatus(ctx, dsn)`，只读、不改库、不持 owner 锁；`migrate up` 复用 `store.Open` 并在同库 owner 锁下迁移。同一 PG 跨不同 metadata-dir 仍互斥，锁与数据共用唯一物理连接；断链后禁止驱动重连，Store 永久失败，serve 取消调度与运行工具，并以 `errors.Join(runErr, database.Err())` 非零退出，排空后才关闭数据库。
