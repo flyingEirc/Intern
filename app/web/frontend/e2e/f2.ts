@@ -15,6 +15,7 @@ import { z } from "zod";
 import {
   zErrorResponse,
   zGetPolicyResponse,
+  zPolicySchedule,
   zPreflightResult,
   zSource,
 } from "../lib/api/generated/zod.gen";
@@ -628,6 +629,127 @@ async function main(): Promise<void> {
         "disabled historical policy keeps five nondefault SQL fixture values after separate name/time/repository browser edits; PG/API evidence in B2-historical-values.json, including IANA timezone and custom cron",
       screenshot: b.shot("07b-history-keeps-tuning"),
     });
+    // B4: set business schedules through their actual controls. Only the
+    // server computes fire instants; compare every displayed row with its API.
+    const scheduleEvidence = [];
+    for (const scenario of [
+      {
+        frequency: "daily",
+        time: "02:17",
+        interval: "每 6 小时",
+        minute: "第 23 分钟",
+        fullCron: "17 2 * * *",
+        incrementalCron: "23 */6 * * *",
+        timezone: "Europe/Berlin",
+      },
+      {
+        frequency: "weekly",
+        time: "04:19",
+        interval: "每 12 小时",
+        minute: "第 31 分钟",
+        fullCron: "19 4 * * 3",
+        incrementalCron: "31 */12 * * *",
+        timezone: "America/New_York",
+      },
+    ] as const) {
+      b.open(`${stack.origin}/policies/new?id=${browserCreated.id}`);
+      b.ab("wait", "--text", "保存修改");
+      b.ab(
+        "click",
+        `[aria-label="全量保护频率"] button:nth-child(${scenario.frequency === "daily" ? 1 : 2})`,
+      );
+      if (scenario.frequency === "weekly") {
+        b.ab("find", "role", "combobox", "click", "--name", "星期");
+        b.ab("find", "role", "option", "click", "--name", "周三", "--exact");
+      }
+      b.ab("fill", "#full-time", scenario.time);
+      b.click("每小时");
+      for (const [label, option] of [
+        ["间隔", scenario.interval],
+        ["在第几分钟", scenario.minute],
+      ] as const) {
+        b.ab("find", "role", "combobox", "click", "--name", label);
+        b.ab("find", "role", "option", "click", "--name", option, "--exact");
+      }
+      b.fill("时区", scenario.timezone);
+      b.click("保存修改");
+      b.ab("wait", "--url", "**/policies/detail?id=*");
+      b.ab("wait", "--text", "UTC");
+      const saved = await readPolicy(browserCreated.id);
+      const stored = readStoredPolicy(browserCreated.id);
+      for (const observed of [saved, stored]) {
+        expect(
+          observed.full_cron === scenario.fullCron &&
+            observed.incremental_cron === scenario.incrementalCron &&
+            observed.timezone === scenario.timezone &&
+            !observed.enabled,
+          `B4 ${scenario.frequency} business schedule persisted as ${JSON.stringify(observed)}`,
+        );
+      }
+      const response = await api(
+        "GET",
+        `/api/v1/policies/${browserCreated.id}/schedule?count=10`,
+        adminCookie,
+      );
+      expect(response.status === 200, `schedule preview = ${response.status}`);
+      const preview = zPolicySchedule.parse(response.json);
+      expect(
+        preview.timezone === scenario.timezone &&
+          !preview.enabled &&
+          preview.fires.length === 10,
+        `B4 schedule preview = ${JSON.stringify(preview)}`,
+      );
+      const rows = JSON.parse(
+        b.ab(
+          "eval",
+          "Array.from(document.querySelectorAll('tbody tr'), row => Array.from(row.querySelectorAll('td'), cell => cell.textContent.trim()))",
+        ),
+      ) as string[][];
+      expect(
+        rows.length === preview.fires.length,
+        "B4 preview row count differs from API",
+      );
+      for (const [index, fire] of preview.fires.entries()) {
+        const row = rows[index];
+        expect(row !== undefined, `B4 missing preview row ${index}`);
+        expect(
+          row?.[0] === (fire.kind === "full" ? "全量" : "增量"),
+          `B4 row ${index} kind differs from API`,
+        );
+        for (const timezone of [scenario.timezone, "UTC"]) {
+          const rendered = new Intl.DateTimeFormat("zh-CN", {
+            dateStyle: "medium",
+            timeStyle: "medium",
+            timeZone: timezone,
+          }).format(new Date(fire.at));
+          expect(
+            row?.[1]?.includes(`${rendered}（${timezone}）`) === true,
+            `B4 row ${index} lacks API fire ${fire.at} in ${timezone}`,
+          );
+        }
+        expect(
+          row?.[2] === "按计划" && !fire.missed,
+          `B4 disabled preview row ${index} claims a missed fire`,
+        );
+      }
+      scheduleEvidence.push({
+        scenario,
+        api: saved,
+        postgres: stored,
+        preview,
+        rows,
+      });
+      await Bun.write(
+        path.join(run.evidence, "B4-business-schedules.json"),
+        `${JSON.stringify(scheduleEvidence, null, 2)}\n`,
+      );
+      b.record({
+        id: `07c-${scenario.frequency}-schedule`,
+        acceptance: "B4",
+        description: `${scenario.frequency} full and ${scenario.interval} incremental set in the UI in ${scenario.timezone}; exact crons read from PG/API and all 10 displayed local/UTC fires match schedule API`,
+        screenshot: b.shot(`07c-${scenario.frequency}-schedule`),
+      });
+    }
 
     // --- F2-A5: role-based visibility ---
     b.signOut();
