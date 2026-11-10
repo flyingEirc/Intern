@@ -13,6 +13,7 @@
 import { z } from "zod";
 import {
   zErrorResponse,
+  zGetPolicyResponse,
   zPreflightResult,
   zSource,
 } from "../lib/api/generated/zod.gen";
@@ -398,6 +399,43 @@ async function main(): Promise<void> {
       description:
         "a rejected update of an enabled policy keeps it enabled with its original source and cron",
       screenshot: b.shot("07-update-refused"),
+    });
+
+    // B2: a name-only edit through the form must not touch the five tuning columns.
+    const beforePolicyRename = zGetPolicyResponse.parse(
+      (await api("GET", `/api/v1/policies/${goodPolicyId}`, adminCookie)).json,
+    );
+    b.open(`${stack.origin}/policies/new?id=${goodPolicyId}`);
+    b.ab("wait", "--text", "\u4fdd\u5b58\u4fee\u6539");
+    b.fill("\u540d\u79f0", "f2-policy-renamed");
+    b.click("\u4fdd\u5b58\u4fee\u6539");
+    b.ab("wait", "--text", "\u7b56\u7565\u5df2\u66f4\u65b0");
+    const afterPolicyRename = zGetPolicyResponse.parse(
+      (await api("GET", `/api/v1/policies/${goodPolicyId}`, adminCookie)).json,
+    );
+    expect(
+      afterPolicyRename.name === "f2-policy-renamed" &&
+        afterPolicyRename.max_chain_length ===
+          beforePolicyRename.max_chain_length &&
+        afterPolicyRename.parallel === beforePolicyRename.parallel &&
+        afterPolicyRename.throttle === beforePolicyRename.throttle &&
+        afterPolicyRename.zstd_level === beforePolicyRename.zstd_level &&
+        afterPolicyRename.page_tracking === beforePolicyRename.page_tracking &&
+        afterPolicyRename.full_cron === beforePolicyRename.full_cron &&
+        afterPolicyRename.incremental_cron ===
+          beforePolicyRename.incremental_cron &&
+        afterPolicyRename.source_id === beforePolicyRename.source_id &&
+        afterPolicyRename.local_repository_id ===
+          beforePolicyRename.local_repository_id &&
+        afterPolicyRename.enabled === beforePolicyRename.enabled,
+      `a name-only edit changed tuning: ${JSON.stringify(afterPolicyRename)}`,
+    );
+    b.record({
+      id: "07b-name-only-keeps-tuning",
+      acceptance: "B2",
+      description:
+        "renaming an enabled policy through the form keeps the five server-owned tuning values, both schedules and the source",
+      screenshot: b.shot("07b-name-only-keeps-tuning"),
     });
 
     // --- F2-A5: role-based visibility ---

@@ -251,7 +251,12 @@ async function main(): Promise<void> {
         policy.replica_repository_id === ftpId &&
         policy.full_cron === "0 3 1 1 *" &&
         policy.incremental_cron === "30 4 1 1 *" &&
-        policy.timezone === "UTC",
+        policy.timezone === "UTC" &&
+        policy.max_chain_length === 7 &&
+        policy.parallel === 1 &&
+        policy.throttle === 0 &&
+        policy.zstd_level === 3 &&
+        policy.page_tracking === false,
       `policy read back as ${JSON.stringify(policy)}`,
     );
     const policies = zListPoliciesResponse.parse(
