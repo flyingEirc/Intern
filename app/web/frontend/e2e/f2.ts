@@ -18,6 +18,11 @@ import {
   zSource,
 } from "../lib/api/generated/zod.gen";
 import {
+  checkLabel,
+  preflightCheckLabel,
+  preflightUnknownCheckLabel,
+} from "../lib/resources/preflight";
+import {
   apiLogin,
   Browser,
   createUser,
@@ -183,17 +188,18 @@ async function main(): Promise<void> {
     b.ab("wait", "--text", "本次预检结果");
     b.ab("wait", "--text", "检查项");
     const preflightText = b.text();
-    for (const check of [
-      "数据库身份",
-      "版本兼容",
-      "数据卷",
-      "挂载",
-      "权限",
-      "可用空间",
+    for (const code of [
+      "identity",
+      "compatibility",
+      "volume",
+      "mount",
+      "privileges",
+      "capacity",
     ]) {
+      const label = checkLabel(code);
       expect(
-        preflightText.includes(check),
-        `preflight output lacks the ${check} check`,
+        label !== preflightUnknownCheckLabel && preflightText.includes(label),
+        `preflight output lacks the ${code} check (${label})`,
       );
     }
     expect(
@@ -210,7 +216,7 @@ async function main(): Promise<void> {
 
     b.open(`${stack.origin}/sources/detail?id=${source.id}`);
     b.ab("wait", "--text", "编辑");
-    b.click("编辑");
+    b.click("编辑", "link");
     b.ab("wait", "--text", "保存修改");
     const passwordValue = b.ab("get", "attr", "#source-password", "value");
     expect(
@@ -282,23 +288,33 @@ async function main(): Promise<void> {
     b.click("运行预检");
     b.ab("wait", "--text", "本次预检结果");
     b.ab("wait", "--text", "未通过");
-    // The page must render what the backend reported: the failing check or
-    // error code, not just a generic failure.
-    const failing = [
-      failedResult.error?.check,
-      failedResult.error?.code,
-    ].filter(
-      (value): value is string => typeof value === "string" && value !== "",
-    );
-    const failureText = b.text();
+    // The main view names the failing check in business words; machine codes
+    // stay in the diagnostics fold. A code the table lacks keeps the generic
+    // name, so there the raw code must still be reachable after expanding it.
+    const failure = failedResult.error;
     expect(
-      failing.length > 0,
+      failure !== undefined,
       `the backend reported no failing check: ${JSON.stringify(failedResult)}`,
     );
-    for (const name of failing) {
+    const failureText = b.text();
+    const failingCheck = failure?.check ?? "";
+    if (preflightCheckLabel[failingCheck] !== undefined) {
+      const label = checkLabel(failingCheck);
       expect(
-        failureText.includes(name),
-        `the page does not show the failing check ${name}; backend ${JSON.stringify(failedResult)}; page: ${failureText.slice(0, 1200)}`,
+        failureText.includes(label),
+        `the page does not show the failing check ${failingCheck} as ${label}; backend ${JSON.stringify(failedResult)}; page: ${failureText.slice(0, 1200)}`,
+      );
+    } else {
+      b.click("预检诊断");
+      const expanded = b.text();
+      expect(
+        failingCheck !== "" && expanded.includes(failingCheck),
+        `the page does not show the unknown failing check ${failingCheck}; backend ${JSON.stringify(failedResult)}; page: ${expanded.slice(0, 1200)}`,
+      );
+      const failingCode = failure?.code ?? "";
+      expect(
+        failingCode !== "" && expanded.includes(failingCode),
+        `the page does not show the unknown failure code ${failingCode}; backend ${JSON.stringify(failedResult)}; page: ${expanded.slice(0, 1200)}`,
       );
     }
     b.record({
@@ -368,7 +384,7 @@ async function main(): Promise<void> {
     expect(enabled.status === 200, `enable good policy = ${enabled.status}`);
     b.open(`${stack.origin}/policies/detail?id=${goodPolicyId}`);
     b.ab("wait", "--text", "已启用");
-    b.click("编辑");
+    b.click("编辑", "link");
     b.ab("wait", "--text", "保存修改");
     b.ab("find", "role", "combobox", "click", "--name", "数据源");
     b.ab("wait", "--text", "f2-bad-source");
