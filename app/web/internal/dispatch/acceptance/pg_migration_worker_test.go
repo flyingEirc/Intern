@@ -3,11 +3,15 @@
 package acceptance
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json/v2"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +21,12 @@ import (
 	"testing"
 	"time"
 
+	aesgcm "github.com/tink-crypto/tink-go/v2/proto/aes_gcm_go_proto"
+	"google.golang.org/protobuf/proto"
+
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/pgtest"
+	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
 const migrationLegacySource = "06c34299f03becdaf0fdcdffff5fbd4319bedafb"
@@ -119,11 +127,13 @@ func migrationImportPlane(t *testing.T, f *fixture, source, before string) {
 		t.Logf("PG-G3 table=%s rows=%d sha256=%s equal=true", table, oldRows, oldDigest)
 	}
 	must(t, legacy.Close())
+	beforeRepeat := migrationDestinationState(t, pg)
 	refused := migrationCommand(t, f, "/tmp/candidate-web", "", false,
 		"migrate", "import-sqlite", "--sqlite-file", source, "--database-url-file", secretFile)
 	if !strings.Contains(string(refused), "already contains business data") {
 		t.Fatal("repeated import did not reach occupied-destination refusal")
 	}
+	migrationAssertDestinationUnchanged(t, pg, beforeRepeat)
 	if migrationFileHash(t, source) != before {
 		t.Fatal("controlled import changed or deleted source SQLite")
 	}
@@ -165,6 +175,7 @@ func migrationConsumerContinuity(t *testing.T, f *fixture, source, historical, c
 	migrationServe(t, f, "/tmp/candidate-web", true)
 	f.login(t)
 	migrationSetupClosed(t, f)
+	migrationStop(t, f)
 	f.assertNoSecret(t, nil)
 	if migrationFileHash(t, source) != before {
 		t.Fatal("serve changed source SQLite")
@@ -193,6 +204,11 @@ func migrationContinuedBackup(t *testing.T, f *fixture) {
 	if verified != 4 {
 		t.Fatalf("verified historical and new replicas=%d want=4", verified)
 	}
+	// Reclaim only this fixture's newly published member after FTP verification.
+	repo, err := local.Open(f.layout.local)
+	must(t, err)
+	must(t, repo.ReclaimPublished(members[3].ObjectPath))
+	must(t, repo.Close())
 	migrationRestore(t, f, "continued", *continued.BackupID, f.w5Snapshot(t))
 }
 
@@ -203,15 +219,67 @@ func migrationCommand(t *testing.T, f *fixture, binary, input string, success bo
 	command.Stdin = strings.NewReader(input)
 	command.Env = migrationEnv()
 	output, err := command.CombinedOutput()
+	migrationAssertNoSecret(t, f, output)
 	if (err == nil) != success {
 		t.Fatalf("migration command success=%t want=%t", err == nil, success)
 	}
-	for _, secret := range []string{f.secret.admin, f.secret.operator, f.secret.source, f.secret.ftp, f.dsn} {
-		if strings.Contains(string(output), secret) {
-			t.Fatal("migration command exposed a secret")
+	return output
+}
+
+// migrationAssertNoSecret supplements the fixture's business credentials with
+// this scenario's actual database credentials and cleartext KEK material.
+func migrationAssertNoSecret(t *testing.T, f *fixture, output []byte) {
+	t.Helper()
+	if containsAny(output, migrationSecretNeedles(t, f)) {
+		t.Fatal("migration output exposed a secret")
+	}
+}
+
+func migrationSecretNeedles(t *testing.T, f *fixture) [][]byte {
+	t.Helper()
+	needles := append(f.secretNeedles(), []byte(f.dsn))
+	databaseURL, err := url.Parse(f.dsn)
+	if err != nil {
+		t.Fatal("cannot parse migration database URL for secret scan")
+	}
+	if databaseURL.User != nil {
+		password, _ := databaseURL.User.Password()
+		needles = append(needles, []byte(password), []byte(url.QueryEscape(password)), []byte(url.PathEscape(password)))
+	}
+	raw, err := os.ReadFile(f.layout.kek)
+	must(t, err)
+	needles = append(needles, bytes.TrimSpace(raw))
+	var keyset struct {
+		Key []struct {
+			KeyData struct {
+				Value []byte `json:"value"`
+			} `json:"keyData"`
+		} `json:"key"`
+	}
+	must(t, json.Unmarshal(raw, &keyset))
+	if len(keyset.Key) == 0 {
+		t.Fatal("migration secret scan found no KEK material")
+	}
+	for _, key := range keyset.Key {
+		var material aesgcm.AesGcmKey
+		must(t, proto.Unmarshal(key.KeyData.Value, &material))
+		if len(material.KeyValue) == 0 {
+			t.Fatal("migration secret scan found empty KEK material")
+		}
+		for _, secret := range [][]byte{key.KeyData.Value, material.KeyValue} {
+			needles = append(needles, secret, []byte(base64.StdEncoding.EncodeToString(secret)), []byte(hex.EncodeToString(secret)))
 		}
 	}
-	return output
+	return needles
+}
+
+func migrationAssertServeLogs(t *testing.T, f *fixture) {
+	t.Helper()
+	for _, path := range f.childLogs {
+		output, err := os.ReadFile(path)
+		must(t, err)
+		migrationAssertNoSecret(t, f, output)
+	}
 }
 
 func migrationEnv() []string {
@@ -251,6 +319,9 @@ func migrationServe(t *testing.T, f *fixture, binary string, postgres bool) {
 			_ = command.Wait()
 		}
 		_ = logFile.Close()
+		output, readErr := os.ReadFile(logFile.Name())
+		must(t, readErr)
+		migrationAssertNoSecret(t, f, output)
 	})
 	f.bindChildClients(t)
 	f.waitHealth(t)
@@ -258,6 +329,7 @@ func migrationServe(t *testing.T, f *fixture, binary string, postgres bool) {
 
 func migrationStop(t *testing.T, f *fixture) {
 	t.Helper()
+	defer migrationAssertServeLogs(t, f)
 	if f.child == nil || f.child.ProcessState != nil {
 		return
 	}
@@ -269,6 +341,7 @@ func migrationStop(t *testing.T, f *fixture) {
 		must(t, err)
 	case <-time.After(30 * time.Second):
 		_ = f.child.Process.Kill()
+		<-done
 		t.Fatal("migration serve failed to drain")
 	}
 }
@@ -315,11 +388,12 @@ func migrationTable(t *testing.T, db *sql.DB, table string, columns []string) ([
 func migrationRestore(t *testing.T, f *fixture, name, backup string, point w5Snapshot) {
 	t.Helper()
 	plan, _ := f.w5Plan(t, backup, http.StatusOK)
-	if name != "continued" {
-		for _, link := range plan.Links {
-			if link.Source != "ftp" {
-				t.Fatal("imported historical point did not use its retained FTP replica")
-			}
+	if len(plan.Links) == 0 {
+		t.Fatal("migration restore selected no links")
+	}
+	for _, link := range plan.Links {
+		if link.Source != "ftp" {
+			t.Fatal("migration restore did not use its verified FTP replica")
 		}
 	}
 	id := f.w5RunRestore(t, backup, plan, "migration-"+name, false, nil)
@@ -327,7 +401,7 @@ func migrationRestore(t *testing.T, f *fixture, name, backup string, point w5Sna
 	if restored.ExportPath == nil || *restored.ExportPath != filepath.Join(f.layout.export, id) {
 		t.Fatal("migration restore did not publish its exact export")
 	}
-	t.Logf("PG-G3 export point=%s id=%s snapshot=%s", name, id, point.digest)
+	t.Logf("PG-G3 export point=%s id=%s snapshot=%s source=ftp", name, id, point.digest)
 }
 
 func migrationCrashHistory(t *testing.T, f *fixture, db *sql.DB) string {
@@ -361,33 +435,70 @@ func migrationFailureCommands(t *testing.T, f *fixture, source, secretFile strin
 	_, err = db.ExecContext(t.Context(), "UPDATE runs SET request_hash=?", "invalid\x00text")
 	must(t, err)
 	must(t, db.Close())
+	// Materialize the empty schema and identity before the failing command so
+	// rollback must preserve an observed target, including its setup flag.
+	target, err := store.Open(t.Context(), f.dsn)
+	must(t, err)
+	if target.InstanceID() == f.instanceID {
+		t.Fatal("rollback target unexpectedly shares the legacy instance identity")
+	}
+	must(t, target.Close())
+	pg, err := sql.Open("pgx", f.dsn)
+	must(t, err)
+	defer func() { must(t, pg.Close()) }()
+	var completed bool
+	must(t, pg.QueryRowContext(t.Context(), "SELECT completed FROM setup_state WHERE singleton=1").Scan(&completed))
+	if completed {
+		t.Fatal("empty rollback target is already initialized")
+	}
+	empty := migrationDestinationState(t, pg)
+	invalidBefore := migrationFileHash(t, invalid)
+	sourceBefore := migrationFileHash(t, source)
 	failed := migrationCommand(t, f, "/tmp/candidate-web", "", false, "migrate", "import-sqlite", "--sqlite-file", invalid, "--database-url-file", secretFile)
 	if !strings.Contains(string(failed), "import SQLite table runs") {
 		t.Fatal("rollback injection failed before copying the runs table")
 	}
-	pg, err := sql.Open("pgx", f.dsn)
-	must(t, err)
-	defer func() { must(t, pg.Close()) }()
-	for _, table := range migrationTables[1:] {
-		var count int
-		must(t, pg.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table).Scan(&count))
-		if count != 0 {
-			t.Fatalf("failed production import published %s rows=%d", table, count)
-		}
+	migrationAssertDestinationUnchanged(t, pg, empty)
+	if migrationFileHash(t, invalid) != invalidBefore {
+		t.Fatal("failed import changed or deleted its source SQLite")
 	}
 	_, err = pg.ExecContext(t.Context(), `INSERT INTO users(id,username,password_hash,role,created_at,updated_at) VALUES ('occupied','occupied','hash','viewer','now','now')`)
 	must(t, err)
+	occupied := migrationDestinationState(t, pg)
 	refused := migrationCommand(t, f, "/tmp/candidate-web", "", false, "migrate", "import-sqlite", "--sqlite-file", source, "--database-url-file", secretFile)
 	if !strings.Contains(string(refused), "already contains business data") {
 		t.Fatal("nonempty import failed without reaching destination protection")
 	}
-	var username string
-	must(t, pg.QueryRowContext(t.Context(), "SELECT username FROM users").Scan(&username))
-	if username != "occupied" {
-		t.Fatal("nonempty import changed destination")
+	migrationAssertDestinationUnchanged(t, pg, occupied)
+	if migrationFileHash(t, source) != sourceBefore {
+		t.Fatal("refused import changed or deleted its source SQLite")
 	}
 	_, err = pg.ExecContext(t.Context(), "DELETE FROM users")
 	must(t, err)
+}
+
+// migrationDestinationState includes full rows for identity, setup completion,
+// all business tables and each independently owned migration history.
+func migrationDestinationState(t *testing.T, db *sql.DB) map[string]string {
+	t.Helper()
+	state := make(map[string]string, len(migrationTables)+4)
+	tables := append([]string(nil), migrationTables...)
+	tables = append(tables, "setup_state", "web_goose_db_version", "physical_goose_db_version", "replication_goose_db_version")
+	for _, table := range tables {
+		_, count, digest := migrationTable(t, db, table, nil)
+		state[table] = fmt.Sprintf("rows=%d sha256=%s", count, digest)
+	}
+	return state
+}
+
+func migrationAssertDestinationUnchanged(t *testing.T, db *sql.DB, before map[string]string) {
+	t.Helper()
+	after := migrationDestinationState(t, db)
+	for table, state := range before {
+		if after[table] != state {
+			t.Fatalf("rejected import changed target %s: before=%s after=%s", table, state, after[table])
+		}
+	}
 }
 
 func migrationSetupClosed(t *testing.T, f *fixture) {
