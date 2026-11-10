@@ -1636,7 +1636,10 @@ func (f *d1Fixture) pinSIGTERMThrottle(ctx context.Context, policyID string) {
 		`' AND name = 'd1-throttled' RETURNING throttle`
 	out, code := f.execIn(ctx, "postgres", "psql", "-U", "intern", "-d", "intern",
 		"-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
-	if code != 0 || strings.TrimSpace(out) != "1" {
+	// psql prints the RETURNING value and then the command tag, so only the
+	// first line is the pinned value.
+	pinned := strings.TrimSpace(strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+	if code != 0 || pinned != "1" {
 		f.fatal("the SIGTERM fixture could not pin throttle=1 on %s: exit=%d %s", policyID, code, out)
 	}
 }
