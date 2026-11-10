@@ -48,6 +48,17 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
     "refused=source_unavailable:409", "recovery_repeated=true",
     "verify_status=passed", "verify_status=not_requested"
   ]) as $markers |
+  "06c34299f03becdaf0fdcdffff5fbd4319bedafb" as $legacy |
+  ["instance", "users", "sessions", "session_tombstones", "audit_logs",
+   "repositories", "sources", "policies", "runs", "run_logs", "restores",
+   "restore_logs", "chains", "backups", "cleanup_ledger", "replicas",
+   "replica_members", "replica_parts"] as $tables |
+  ["full", "inc1", "inc2", "continued"] as $points |
+  ($output | split("\n")) as $lines |
+  [$lines[] | capture("PG-G3 table=(?<name>[a-z_]+) rows=(?<rows>[0-9]+) sha256=(?<digest>[0-9a-f]{64}) equal=true$")] as $imported |
+  [$lines[] | capture("PG-G3 export point=(?<point>full|inc1|inc2|continued) id=(?<id>[0-9a-f]{32}) snapshot=(?<snapshot>[0-9a-f]{64}) source=ftp$")] as $exports |
+  [$lines[] | capture("PG-G3 restored point=(?<point>full|inc1|inc2|continued) actual_snapshot=(?<actual>[0-9a-f]{64}) expected_snapshot=(?<expected>[0-9a-f]{64}) match=true$")] as $restored |
+  [$lines[] | capture("PG-G3 binary path=(?<path>/tmp/legacy-web|/tmp/candidate-web) sha256=(?<digest>[0-9a-f]{64}) legacy_source=(?<source>[0-9a-f]{40})$")] as $binaries |
   ($events | length) > 0 and
   all($events[]; .Action != "skip" and .Action != "fail") and
   ([$events[] | select(.Action == "pass" and .Test == "TestW5NativeContainers" and
@@ -107,6 +118,29 @@ jq -e -s --arg source "${GITHUB_SHA:-}" '
   # The SIGKILL line must itself carry every recovery fact: they cannot be moved
   # onto some other line and still count.
   ($output | test("W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true")) and
+  # Migration extends the existing W5 run without replacing any locked case.
+  # Require the retired production source, every imported table, and exactly
+  # four independently started MySQL exports, bound point-for-point to the
+  # snapshots the worker observed. The original three W5 restores stay required.
+  ($output | split("PG-G3 legacy ") | length == 2) and
+  any($lines[]; test("PG-G3 legacy source=" + $legacy + " schema=web:9,physical:1,replication:2 instance=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12} sqlite_sha256=[0-9a-f]{64} origin=retired-production-serve chain=full,inc1,inc2 fault_history=explicit-owned-crash-fixture$")) and
+  ($output | split("PG-G3 import ") | length == 2) and
+  any($lines[]; test("PG-G3 import command=production tables=18 equal=true source_intact=true repeat=refused nonempty=refused rollback=empty$")) and
+  ($output | split("PG-G3 table=") | length == 19) and
+  (($imported | map(.name) | sort) == ($tables | sort)) and
+  ($output | split("PG-G3 continuity ") | length == 2) and
+  any($lines[]; test("PG-G3 continuity login=original setup=closed history=visible chain=1,2,3,4 lsn=continuous replicas=4 cleanup=recovered$")) and
+  ($output | split("PG-G3 export ") | length == 5) and
+  (($exports | map(.point) | sort) == ($points | sort)) and
+  ($exports | map(.id) | unique | length == 4) and
+  ($output | split("PG-G3 restored ") | length == 5) and
+  (($restored | map(.point) | sort) == ($points | sort)) and
+  all($restored[]; . as $point |
+    .actual == .expected and
+    any($exports[]; .point == $point.point and .snapshot == $point.expected)) and
+  ($output | split("PG-G3 binary ") | length == 3) and
+  (($binaries | map(.path) | sort) == ["/tmp/candidate-web", "/tmp/legacy-web"]) and
+  all($binaries[]; .source == $legacy) and
   # A false success after SIGKILL, a deleted published export, or a second
   # concurrency slot are refusals even when every marker above is present.
   ($output | test("sigkill=completed") | not) and
