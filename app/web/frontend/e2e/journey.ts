@@ -57,12 +57,18 @@ function choose(label: string, option: string): void {
   expect(Boolean(id), `missing control label ${label}`);
   b.ab("focus", `#${id}`);
   b.ab("press", "Space");
-  b.waitText(option);
-  b.ab("wait", '[role="option"]');
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'true'`,
+  );
+  const popupId = b.ab("get", "attr", `#${id}`, "aria-controls");
+  const popup = `[id=${JSON.stringify(popupId)}]`;
+  b.ab("wait", `${popup} [role="option"]`);
   const labels = JSON.parse(
     b.ab(
       "eval",
-      "Array.from(document.querySelectorAll('[role=option]'), (element) => element.textContent.trim())",
+      `Array.from(document.querySelectorAll(${JSON.stringify(`${popup} [role="option"]`)}), (element) => element.textContent.trim())`,
     ),
   ) as string[];
   const index = labels.indexOf(option);
@@ -70,6 +76,11 @@ function choose(label: string, option: string): void {
   b.ab("press", "Home");
   for (let cursor = 0; cursor < index; cursor += 1) b.ab("press", "ArrowDown");
   b.ab("press", "Enter");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'false' && (document.getElementById(${JSON.stringify(popupId)})?.getBoundingClientRect().height ?? 0) === 0`,
+  );
 }
 
 /** The id of the detail page the browser is on. */

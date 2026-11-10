@@ -39,6 +39,43 @@ import { startStack } from "./stack";
 const run = runContext("f2");
 const b = new Browser(`intern-f2-e2e-${process.pid}`, run.evidence, run.headed);
 
+// Match the journey's keyboard selection against the actual rendered options.
+function choose(label: string, option: string): void {
+  const id = JSON.parse(
+    b.ab(
+      "eval",
+      `Array.from(document.querySelectorAll('label')).find((element) => element.textContent.trim() === ${JSON.stringify(label)})?.htmlFor`,
+    ),
+  ) as string;
+  expect(Boolean(id), `missing control label ${label}`);
+  b.ab("focus", `#${id}`);
+  b.ab("press", "Space");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'true'`,
+  );
+  const popupId = b.ab("get", "attr", `#${id}`, "aria-controls");
+  const popup = `[id=${JSON.stringify(popupId)}]`;
+  b.ab("wait", `${popup} [role="option"]`);
+  const labels = JSON.parse(
+    b.ab(
+      "eval",
+      `Array.from(document.querySelectorAll(${JSON.stringify(`${popup} [role="option"]`)}), (element) => element.textContent.trim())`,
+    ),
+  ) as string[];
+  const index = labels.indexOf(option);
+  expect(index >= 0, `missing option ${option}`);
+  b.ab("press", "Home");
+  for (let cursor = 0; cursor < index; cursor += 1) b.ab("press", "ArrowDown");
+  b.ab("press", "Enter");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'false' && (document.getElementById(${JSON.stringify(popupId)})?.getBoundingClientRect().height ?? 0) === 0`,
+  );
+}
+
 async function main(): Promise<void> {
   const stack = await startStack(
     run.image === undefined ? undefined : { reuseImage: run.image },
@@ -452,9 +489,7 @@ async function main(): Promise<void> {
       ["数据源", "f2-source-renamed"],
       ["本地仓库", "f2-local"],
     ] as const) {
-      b.ab("find", "role", "combobox", "click", "--name", label);
-      b.ab("wait", '[role="option"]');
-      b.ab("find", "role", "option", "click", "--name", option);
+      choose(label, option);
     }
     b.click("自定义全量");
     b.fill("全量安排", policyBody.full_cron);
@@ -604,9 +639,7 @@ async function main(): Promise<void> {
         b.fill("全量安排", expectedHistory.full_cron);
       } else {
         expectedHistory.replica_repository_id = plainRepository.id;
-        b.ab("find", "role", "combobox", "click", "--name", "副本仓库（可选）");
-        b.ab("wait", '[role="option"]');
-        b.ab("find", "role", "option", "click", "--name", "f2-plain-ftp");
+        choose("副本仓库（可选）", "f2-plain-ftp");
         b.record({
           id: "U2-policy-edit-filled",
           acceptance: "U2",
@@ -661,9 +694,7 @@ async function main(): Promise<void> {
         `[aria-label="全量保护频率"] button:nth-child(${scenario.frequency === "daily" ? 1 : 2})`,
       );
       if (scenario.frequency === "weekly") {
-        b.ab("find", "role", "combobox", "click", "--name", "星期");
-        b.ab("wait", '[role="option"]');
-        b.ab("find", "role", "option", "click", "--name", "周三", "--exact");
+        choose("星期", "周三");
       }
       b.ab("fill", "#full-time", scenario.time);
       b.click("每小时");
@@ -671,9 +702,7 @@ async function main(): Promise<void> {
         ["间隔", scenario.interval],
         ["在第几分钟", scenario.minute],
       ] as const) {
-        b.ab("find", "role", "combobox", "click", "--name", label);
-        b.ab("wait", '[role="option"]');
-        b.ab("find", "role", "option", "click", "--name", option, "--exact");
+        choose(label, option);
       }
       b.fill("时区", scenario.timezone);
       b.click("保存修改");
