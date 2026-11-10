@@ -453,6 +453,7 @@ async function main(): Promise<void> {
       ["本地仓库", "f2-local"],
     ] as const) {
       b.ab("find", "role", "combobox", "click", "--name", label);
+      b.ab("wait", '[role="option"]');
       b.ab("find", "role", "option", "click", "--name", option);
     }
     b.click("自定义全量");
@@ -604,6 +605,7 @@ async function main(): Promise<void> {
       } else {
         expectedHistory.replica_repository_id = plainRepository.id;
         b.ab("find", "role", "combobox", "click", "--name", "副本仓库（可选）");
+        b.ab("wait", '[role="option"]');
         b.ab("find", "role", "option", "click", "--name", "f2-plain-ftp");
         b.record({
           id: "U2-policy-edit-filled",
@@ -660,6 +662,7 @@ async function main(): Promise<void> {
       );
       if (scenario.frequency === "weekly") {
         b.ab("find", "role", "combobox", "click", "--name", "星期");
+        b.ab("wait", '[role="option"]');
         b.ab("find", "role", "option", "click", "--name", "周三", "--exact");
       }
       b.ab("fill", "#full-time", scenario.time);
@@ -669,6 +672,7 @@ async function main(): Promise<void> {
         ["在第几分钟", scenario.minute],
       ] as const) {
         b.ab("find", "role", "combobox", "click", "--name", label);
+        b.ab("wait", '[role="option"]');
         b.ab("find", "role", "option", "click", "--name", option, "--exact");
       }
       b.fill("时区", scenario.timezone);
@@ -885,6 +889,16 @@ async function main(): Promise<void> {
       acceptance: "F2-A2",
       description: "no page errors or CSP violations",
     });
+  } catch (error) {
+    b.record({
+      id: "failure",
+      acceptance: "diagnostic",
+      description:
+        "the first failed step; see the process error for its assertion",
+      screenshot: b.shot("failure"),
+    });
+    b.writeManifest(run.commit, run.dirty);
+    throw error;
   } finally {
     b.close();
     await stack.stop();

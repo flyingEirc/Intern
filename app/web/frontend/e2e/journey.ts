@@ -58,6 +58,7 @@ function choose(label: string, option: string): void {
   b.ab("focus", `#${id}`);
   b.ab("press", "Space");
   b.waitText(option);
+  b.ab("wait", '[role="option"]');
   const labels = JSON.parse(
     b.ab(
       "eval",
@@ -124,7 +125,34 @@ async function main(): Promise<void> {
         "the first-run setup page at 375, 768 and 1440 logical pixels, before any administrator exists",
       screenshots: setupShots,
     });
-    b.setup(stack.origin, stack.admin.username, stack.admin.password);
+    b.ab("focus", "#setup-username");
+    b.ab("type", ":focus", stack.admin.username);
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "setup-password",
+      "setup Tab missed password",
+    );
+    b.ab("type", ":focus", stack.admin.password);
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "setup-confirm",
+      "setup Tab missed confirmation",
+    );
+    b.ab("type", ":focus", stack.admin.password);
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "text", ":focus") === "创建管理员并进入控制台",
+      "setup Tab missed submit",
+    );
+    b.record({
+      id: "U3-setup-keyboard",
+      acceptance: "U3",
+      description:
+        "setup username, password and confirmation entered with keyboard typing and Tab; focus reaches the submit button before Enter creates the administrator",
+      screenshot: b.shot("U3-setup-keyboard"),
+    });
+    b.ab("press", "Enter");
+    b.waitText("数据保护概览");
     const admin = await apiLogin(
       api,
       stack.admin.username,
@@ -223,18 +251,46 @@ async function main(): Promise<void> {
 
     b.open(`${stack.origin}/policies/new`);
     b.waitText("创建策略");
-    b.fill("名称", "journey-policy");
+    b.ab("focus", "#policy-name");
+    b.ab("type", ":focus", "journey-policy");
     choose("数据源", "journey-source");
     choose("本地仓库", "journey-local");
     choose("副本仓库（可选）", "journey-ftp");
-    // Far-off schedules: only the buttons on the policy page start backups.
-    b.click("自定义全量");
-    b.fill("全量安排", "0 3 1 1 *");
-    b.click("自定义增量");
-    b.fill("增量安排", "30 4 1 1 *");
-    b.fill("时区", "UTC");
-    b.ab("focus", '[role="switch"][aria-label="创建后立即启用"]');
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "aria-label") === "创建后立即启用",
+      "policy Tab missed enabled switch",
+    );
     b.ab("press", "Space");
+    // Far-off schedules: only the buttons on the policy page start backups.
+    b.ab("focus", '[aria-label="全量保护频率"] button:last-child');
+    b.ab("press", "Space");
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "full-cron",
+      "policy Tab missed custom full cron",
+    );
+    b.ab("press", "Home");
+    b.ab("press", "Shift+End");
+    b.ab("type", ":focus", "0 3 1 1 *");
+    b.ab("focus", '[aria-label="增量保护频率"] button:last-child');
+    b.ab("press", "Space");
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "incremental-cron",
+      "policy Tab missed custom incremental cron",
+    );
+    b.ab("press", "Home");
+    b.ab("press", "Shift+End");
+    b.ab("type", ":focus", "30 4 1 1 *");
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "policy-timezone",
+      "policy Tab missed timezone",
+    );
+    b.ab("press", "Home");
+    b.ab("press", "Shift+End");
+    b.ab("type", ":focus", "UTC");
     b.record({
       id: "U2-policy-create-filled",
       acceptance: "U2",
@@ -242,7 +298,18 @@ async function main(): Promise<void> {
         "the populated policy creation form with source, local/FTP repositories, custom schedules and enabled state at 375, 768 and 1440 pixels",
       screenshots: b.responsive("U2-policy-create-filled"),
     });
-    b.ab("focus", 'button[type="submit"]');
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "type") === "submit",
+      "policy Tab missed submit",
+    );
+    b.record({
+      id: "U3-policy-keyboard",
+      acceptance: "U3",
+      description:
+        "policy name, combobox options, enable switch, custom frequency toggles, cron and timezone entered with keyboard events; Tab reaches submit before Enter, with API readback below",
+      screenshot: b.shot("U3-policy-keyboard"),
+    });
     b.ab("press", "Enter");
     b.ab("wait", "--url", "**/policies/detail?id=*");
     const policyId = detailId();
@@ -388,24 +455,40 @@ async function main(): Promise<void> {
       "--fn",
       `document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)}) !== null`,
     );
-    const clicked = b.ab(
-      "eval",
-      `(() => { const input = document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)}); const target = input?.previousElementSibling; if (target?.getAttribute("role") !== "radio") return false; target.click(); return true; })()`,
-    );
-    expect(clicked === "true", "missing the third backup point");
+    b.ab("focus", '[aria-label="备份点"] tbody tr:first-child [role="radio"]');
+    b.ab("press", "Space");
+    b.ab("press", "ArrowDown");
+    b.ab("press", "ArrowDown");
     b.ab(
       "wait",
       "--fn",
       `document.querySelector(${JSON.stringify(`input[type="radio"][value="${pointId}"]`)})?.previousElementSibling?.getAttribute("aria-checked") === "true"`,
     );
-    b.click("生成计划");
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "text", ":focus") === "生成计划",
+      "restore Tab missed plan button",
+    );
+    b.ab("press", "Enter");
     b.waitText("导出空间");
-    b.click("执行演练", "switch");
-    b.fill(
-      "校验语句",
+    b.ab("focus", "#restore-password");
+    b.ab("type", ":focus", stack.admin.password);
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "aria-label") === "执行演练",
+      "restore Tab missed rehearsal switch",
+    );
+    b.ab("press", "Space");
+    b.ab("press", "Tab");
+    expect(
+      b.ab("get", "attr", ":focus", "id") === "restore-verify-sql",
+      "restore Tab missed verify SQL",
+    );
+    b.ab(
+      "type",
+      ":focus",
       "SELECT COUNT(*) FROM journey.t\nSELECT MAX(v) FROM journey.t",
     );
-    b.fill("管理员密码", stack.admin.password);
     b.record({
       id: "07-restore-confirm",
       acceptance: "J-A3",
@@ -413,8 +496,18 @@ async function main(): Promise<void> {
         "the wizard's read-only plan for the incremental with the rehearsal and two read-only SELECTs, before the confirmed execution",
       screenshot: b.shot("07-restore-confirm"),
     });
-    b.ab("focus", "#restore-verify-sql");
     b.ab("press", "Tab");
+    expect(
+      b.ab("get", "text", ":focus") === "执行恢复",
+      "restore Tab missed confirmation button",
+    );
+    b.record({
+      id: "U3-restore-keyboard",
+      acceptance: "U3",
+      description:
+        "source chosen with keyboard; backup radio selected with Space/ArrowDown, Tab/Enter generates plan; password, rehearsal and SQL use typing/Tab/Space; Tab reaches final confirmation before Enter",
+      screenshot: b.shot("U3-restore-keyboard"),
+    });
     b.ab("press", "Enter");
     b.ab("wait", "--url", "**/restores/detail?id=*");
     const restoreId = detailId();
@@ -503,6 +596,16 @@ async function main(): Promise<void> {
       acceptance: "J-A4",
       description: "no page errors or CSP violations across the whole journey",
     });
+  } catch (error) {
+    b.record({
+      id: "failure",
+      acceptance: "diagnostic",
+      description:
+        "the first failed step; see the process error for its assertion",
+      screenshot: b.shot("failure"),
+    });
+    b.writeManifest(run.commit, run.dirty);
+    throw error;
   } finally {
     if (keepStack && completed) {
       b.signIn(stack.origin, stack.admin.username, stack.admin.password);
