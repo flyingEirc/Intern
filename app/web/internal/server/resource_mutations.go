@@ -59,11 +59,6 @@ type policyRequest struct {
 	FullCron            string  `json:"full_cron"`
 	IncrementalCron     string  `json:"incremental_cron"`
 	Timezone            string  `json:"timezone"`
-	MaxChainLength      int64   `json:"max_chain_length"`
-	Parallel            int64   `json:"parallel"`
-	Throttle            int64   `json:"throttle"`
-	ZstdLevel           int64   `json:"zstd_level"`
-	PageTracking        bool    `json:"page_tracking"`
 	Enabled             bool    `json:"enabled"`
 }
 
@@ -667,9 +662,7 @@ func (h resourceHandlers) policyInput(c *gin.Context, request policyRequest) (st
 	in := store.PolicyInput{
 		Name: request.Name, SourceID: request.SourceID, LocalRepositoryID: request.LocalRepositoryID,
 		ReplicaRepositoryID: request.ReplicaRepositoryID, FullCron: request.FullCron,
-		IncrementalCron: request.IncrementalCron, Timezone: request.Timezone,
-		MaxChainLength: request.MaxChainLength, Parallel: request.Parallel, Throttle: request.Throttle,
-		ZstdLevel: request.ZstdLevel, PageTracking: request.PageTracking, Enabled: request.Enabled,
+		IncrementalCron: request.IncrementalCron, Timezone: request.Timezone, Enabled: request.Enabled,
 	}
 	if err := validatePolicy(request); err != nil {
 		return in, err
@@ -684,10 +677,7 @@ func validatePolicy(request policyRequest) error {
 	if err := validateResourceName(request.Name); err != nil {
 		return err
 	}
-	if err := validatePolicySchedule(request); err != nil {
-		return err
-	}
-	return validatePolicyTuning(request)
+	return validatePolicySchedule(request)
 }
 
 // validatePolicySchedule checks the two standard cron expressions and the IANA
@@ -718,22 +708,6 @@ func validateTimezone(name string) error {
 		return errors.New("timezone must be a non-empty IANA time zone name")
 	}
 	return nil
-}
-
-// validatePolicyTuning applies the frozen numeric ranges.
-func validatePolicyTuning(request policyRequest) error {
-	switch {
-	case request.MaxChainLength < 1:
-		return errors.New("max_chain_length must be at least 1")
-	case request.Parallel < 1:
-		return errors.New("parallel must be at least 1")
-	case request.Throttle < 0:
-		return errors.New("throttle must not be negative")
-	case request.ZstdLevel < 1 || request.ZstdLevel > 22:
-		return errors.New("zstd_level must be between 1 and 22")
-	default:
-		return nil
-	}
 }
 
 // validatePolicyReferences checks the referenced rows and their kinds: the local

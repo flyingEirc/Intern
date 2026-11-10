@@ -36,7 +36,7 @@ import (
 // fixture, a real export volume the harness can also mount into a brand-new
 // server, and the real internal/restore engine behind the HTTP API.
 //
-// Every locked W5 fact is read back through the API, SQLite, the local
+// Every locked W5 fact is read back through the API, PostgreSQL, the local
 // repository, the FTP namespace, the export directory or a rehearsal's own
 // result: no marker value is a constant. The restore inputs are opt-in
 // (INTERN_W5_EXPORT_ROOT, INTERN_W5_XBSTREAM, INTERN_W5_MYSQLD); a run without
@@ -73,6 +73,7 @@ func TestW5Worker(t *testing.T) {
 			t.Fatalf("W5 case %s failed: the shared chain state it was to produce is unknown, so no later case runs", step.name)
 		}
 	}
+	pgMigrationScenario(t)
 }
 
 // requireW5Restore refuses a partially configured restore deployment.
@@ -342,7 +343,7 @@ func (f *fixture) w5ExportListing(t *testing.T, root string) []string {
 
 func (f *fixture) w5RestoreCount(t *testing.T) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM restores`)
+	return f.postgresCount(t, `SELECT COUNT(*) FROM restores`)
 }
 
 // w5ExportState reads one published export: its mode, its total size and a
@@ -623,13 +624,13 @@ func w5LogPhases(logs []store.RestoreLog) []string {
 	return seen
 }
 
-// w5SQLiteRestore reads the stored outcome of one restore.
-func (f *fixture) w5SQLiteRestore(t *testing.T, id string) (status, class, code, effects, started string) {
+// w5PostgreSQLRestore reads the stored outcome of one restore.
+func (f *fixture) w5PostgreSQLRestore(t *testing.T, id string) (status, class, code, effects, started string) {
 	t.Helper()
 	var classValue, codeValue, effectsValue, startedValue sql.NullString
 	var statusValue string
 	must(t, f.view(t).QueryRowContext(t.Context(),
-		`SELECT status, error_class, error_code, side_effects_json, COALESCE(started_at, '') FROM restores WHERE id = ?`, id,
+		`SELECT status, error_class, error_code, side_effects_json, COALESCE(started_at, '') FROM restores WHERE id = $1`, id,
 	).Scan(&statusValue, &classValue, &codeValue, &effectsValue, &startedValue))
 	return statusValue, classValue.String, codeValue.String, effectsValue.String, startedValue.String
 }
@@ -637,13 +638,13 @@ func (f *fixture) w5SQLiteRestore(t *testing.T, id string) (status, class, code,
 // w5AuditCount counts audit rows for one action and result.
 func (f *fixture) w5AuditCount(t *testing.T, action, result string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ?`, action, result)
+	return f.postgresCount(t, `SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND result = $2`, action, result)
 }
 
 // w5AuditFor counts the audit rows one action recorded for one resource id.
 func (f *fixture) w5AuditFor(t *testing.T, action, result, resourceID string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ? AND resource_id = ?`,
+	return f.postgresCount(t, `SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND result = $2 AND resource_id = $3`,
 		action, result, resourceID)
 }
 
@@ -771,7 +772,7 @@ func (f *fixture) w5RequireFTPPlan(t *testing.T, backupID, label string, wantLin
 }
 
 // w5RequirePlanLinks requires the exact member count, every link served by the
-// verified FTP replica, and LSN continuity up to the target recorded in SQLite.
+// verified FTP replica, and LSN continuity up to the target recorded in PostgreSQL.
 func (f *fixture) w5RequirePlanLinks(t *testing.T, label string, plan store.RestorePlan,
 	wantLinks int, backupID string,
 ) {
@@ -789,8 +790,10 @@ func (f *fixture) w5RequirePlanLinks(t *testing.T, label string, plan store.Rest
 	if plan.TargetToLSN != last.ToLSN || plan.TargetToLSN == 0 {
 		t.Fatalf("plan %s target_to_lsn = %d, last link %d", label, plan.TargetToLSN, last.ToLSN)
 	}
-	if stored := f.w5Int64(t, `SELECT to_lsn FROM backups WHERE id = ?`, backupID); uint64(stored) != plan.TargetToLSN {
-		t.Fatalf("plan %s target_to_lsn = %d, SQLite says %d", label, plan.TargetToLSN, stored)
+	stored, err := strconv.ParseUint(f.w5String(t, `SELECT to_lsn FROM backups WHERE id = $1`, backupID), 10, 64)
+	must(t, err)
+	if stored != plan.TargetToLSN {
+		t.Fatalf("plan %s target_to_lsn = %d, PostgreSQL says %d", label, plan.TargetToLSN, stored)
 	}
 }
 
@@ -825,7 +828,7 @@ func (f *fixture) w5RequirePlanIdentity(t *testing.T, label string, plan store.R
 	if !w5DigestPattern.MatchString(plan.Digest) {
 		t.Fatalf("plan %s digest = %q", label, plan.Digest)
 	}
-	if plan.ChainID != f.w5String(t, `SELECT chain_id FROM backups WHERE id = ?`, plan.BackupID) {
+	if plan.ChainID != f.w5String(t, `SELECT chain_id FROM backups WHERE id = $1`, plan.BackupID) {
 		t.Fatalf("plan %s chain = %s, the stored backup says otherwise", label, plan.ChainID)
 	}
 	if plan.SourceID != f.sourceID {
@@ -927,13 +930,6 @@ func w5RequirePlanCapacity(t *testing.T, label, kind string, planned, before, af
 // deployment can rehearse.
 var w5FixedRisks = []string{"no_auto_replace_production", "server_uuid_duplicate", "pitr_unavailable"}
 
-func (f *fixture) w5Int64(t *testing.T, query string, args ...any) int64 {
-	t.Helper()
-	var value int64
-	must(t, f.view(t).QueryRowContext(t.Context(), query, args...).Scan(&value))
-	return value
-}
-
 func (f *fixture) w5String(t *testing.T, query string, args ...any) string {
 	t.Helper()
 	var value sql.NullString
@@ -964,7 +960,7 @@ func (f *fixture) w5UnconfiguredRefusal(t *testing.T) {
 }
 
 // w5A6E2E restores both incremental points over the HTTP API with password
-// re-entry, and reads every result back from the API, SQLite, the export volume,
+// re-entry, and reads every result back from the API, PostgreSQL, the export volume,
 // the restore log and the rehearsal's own answers.
 func w5A6E2E(t *testing.T, f *fixture) {
 	w5RequirePlans(t, w5.plan1, w5.plan2)
@@ -986,11 +982,11 @@ func w5A6E2E(t *testing.T, f *fixture) {
 	}
 
 	logs := f.w5Logs(t, inc1)
-	if rows := f.sqliteCount(t, `SELECT COUNT(*) FROM restore_logs WHERE restore_id = ?`, inc1); rows != len(logs) {
-		t.Fatalf("restore logs: API returned %d, SQLite stores %d", len(logs), rows)
+	if rows := f.postgresCount(t, `SELECT COUNT(*) FROM restore_logs WHERE restore_id = $1`, inc1); rows != len(logs) {
+		t.Fatalf("restore logs: API returned %d, PostgreSQL stores %d", len(logs), rows)
 	}
 	f.assertNoSecret(t, w5RawJSON(t, logs))
-	t.Logf("W5-A6 e2e chain=seq:1,2,3 inc1=%s inc2=%s replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=%d phase_seen=%s",
+	t.Logf("W5-A6 e2e chain=seq:1,2,3 inc1=%s inc2=%s replicas_verified=3 local_payloads=removed logs_agree=postgres log_rows=%d phase_seen=%s",
 		*w5.inc1.BackupID, *w5.inc2.BackupID, len(logs), strings.Join(w5LogPhases(logs), ","))
 	t.Logf("W5-A6 restore=inc1 source=ftp export=%s expected_snapshot=%s verify_status=passed", inc1, w5.snap1.digest)
 	t.Logf("W5-A6 restore=inc2 source=ftp export=%s expected_snapshot=%s verify_status=not_requested", inc2, w5.snap2.digest)
@@ -1148,12 +1144,12 @@ func (f *fixture) w5RequireCompletedStored(t *testing.T, id string, restore stor
 		!restore.SideEffects.PendingExportRemoved || !restore.SideEffects.ExportPublished {
 		t.Fatalf("side_effects = %+v", restore.SideEffects)
 	}
-	stored, class, code, effects, started := f.w5SQLiteRestore(t, id)
+	stored, class, code, effects, started := f.w5PostgreSQLRestore(t, id)
 	if stored != store.RestoreStatusCompleted || class != "" || code != "" {
-		t.Fatalf("SQLite row = %s class=%q code=%q", stored, class, code)
+		t.Fatalf("PostgreSQL row = %s class=%q code=%q", stored, class, code)
 	}
 	if !strings.Contains(effects, `"export_published":true`) {
-		t.Fatalf("SQLite side_effects = %s", effects)
+		t.Fatalf("PostgreSQL side_effects = %s", effects)
 	}
 	if started == "" {
 		t.Fatal("a completed restore has no started_at")
@@ -1321,7 +1317,7 @@ func w5A3Execute(t *testing.T, f *fixture) {
 	if audit := f.w5AuditFor(t, "restores.execute", "success", created); audit != 1 {
 		t.Fatalf("the created restore has %d success audit rows named by id, want 1", audit)
 	}
-	if status, _, _, _, started := f.w5SQLiteRestore(t, created); status == "" || (status == store.RestoreStatusRunning && started == "") {
+	if status, _, _, _, started := f.w5PostgreSQLRestore(t, created); status == "" || (status == store.RestoreStatusRunning && started == "") {
 		t.Fatalf("the created restore row is %q with started_at %q", status, started)
 	}
 	// Replay answers the stored id; a different request with the same key is a
@@ -1418,7 +1414,7 @@ func (f *fixture) w5RequireConfirmationLimiter(validBody string) (denied int, re
 // sampled from the API and cross-checked against the stored intervals.
 func w5A4Exclusion(t *testing.T, f *fixture) {
 	w5RequirePlans(t, w5.planFull)
-	policy := f.createPolicy(t, "w5-exclusion", 8)
+	policy := f.createPolicy(t, "w5-exclusion")
 	f.enable(t, policy)
 
 	// Direction one: a running restore holds the slot, so a queued backup run is
@@ -1469,11 +1465,11 @@ func w5A4Exclusion(t *testing.T, f *fixture) {
 	if concurrent := f.requireDisjointUnion(t); concurrent != 1 {
 		t.Fatalf("the stored intervals show %d concurrent executions", concurrent)
 	}
-	if _, _, _, _, started := f.w5SQLiteRestore(t, queued); started != "" {
+	if _, _, _, _, started := f.w5PostgreSQLRestore(t, queued); started != "" {
 		t.Fatal("a restore canceled while queued was started")
 	}
 	f.assertNoSecret(t, nil)
-	t.Logf("W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=%d queued_samples=%d sqlite_intervals=disjoint",
+	t.Logf("W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=%d queued_samples=%d postgres_intervals=disjoint",
 		runningMax, blockedRun.samples+blockedRestore.samples)
 }
 
@@ -1575,7 +1571,7 @@ func (f *fixture) requireDisjointUnion(t *testing.T) int {
 	return 1
 }
 
-// restoreIntervals reads every started restore's window from SQLite.
+// restoreIntervals reads every started restore's window from PostgreSQL.
 func (f *fixture) restoreIntervals(t *testing.T) []w5UnionInterval {
 	t.Helper()
 	rows, err := f.view(t).QueryContext(t.Context(), `SELECT id, started_at, finished_at FROM restores`)
@@ -1647,15 +1643,15 @@ func w5A5State(t *testing.T, f *fixture) {
 		t.Fatalf("the freed slot re-ran a canceled restore: %s", again.Status)
 	}
 	logs := f.w5Logs(t, running)
-	if rows := f.sqliteCount(t, `SELECT COUNT(*) FROM restore_logs WHERE restore_id = ?`, running); rows != len(logs) {
-		t.Fatalf("restore logs: API %d SQLite %d", len(logs), rows)
+	if rows := f.postgresCount(t, `SELECT COUNT(*) FROM restore_logs WHERE restore_id = $1`, running); rows != len(logs) {
+		t.Fatalf("restore logs: API %d PostgreSQL %d", len(logs), rows)
 	}
 	f.assertNoSecret(t, w5RawJSON(t, logs))
 	completed := f.w5List(t, "status=completed&limit=200")
 	// The documented list order is judged against creation order and stored
 	// created_at, not against the id sort the query already guarantees.
 	f.w5RequireNewestFirst(t, f.w5List(t, "limit=200"))
-	t.Logf("W5-A5 state phase_seen=%s sources=ftp completed_restores=%d export_bytes=%d verify_status=%s side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite",
+	t.Logf("W5-A5 state phase_seen=%s sources=ftp completed_restores=%d export_bytes=%d verify_status=%s side_effects=explicit canceled_queued=true canceled_running=true logs_agree=postgres",
 		strings.Join(phaseSeen, ","), len(completed), w5ExportedBytes(t, completed), canceled.VerifyStatus)
 	w5Sigkill(t, f, publishedBefore)
 }
@@ -1860,9 +1856,9 @@ func (f *fixture) w5RequireInterrupted(t *testing.T, id string, published []stri
 	if phases := f.w5PhaseSeen(t, id); len(phases) == 0 || phases[len(phases)-1] != "preparing" {
 		t.Fatalf("the kill landed outside prepare: recorded phases = %s", strings.Join(phases, ","))
 	}
-	stored, class, code, effects, _ := f.w5SQLiteRestore(t, id)
+	stored, class, code, effects, _ := f.w5PostgreSQLRestore(t, id)
 	if stored != store.RestoreStatusFailed || class != store.RestoreErrorInterrupted {
-		t.Fatalf("SQLite row = %s class=%q code=%q", stored, class, code)
+		t.Fatalf("PostgreSQL row = %s class=%q code=%q", stored, class, code)
 	}
 	if !strings.Contains(effects, `"work_dir_removed":`) {
 		t.Fatalf("the interrupted row carries no explicit side effects: %s", effects)

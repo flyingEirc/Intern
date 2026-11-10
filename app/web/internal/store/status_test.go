@@ -1,60 +1,18 @@
 package store
 
 import (
-	"bytes"
-	"os"
-	"path/filepath"
+	"database/sql"
 	"testing"
+
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
-func TestStatusDoesNotCreateMetadata(t *testing.T) {
-	parent := t.TempDir()
-	dir := filepath.Join(parent, "metadata")
-	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, unmigratedStatus(t))
-	if _, err = os.Lstat(dir); !os.IsNotExist(err) {
-		t.Fatalf("status created directory: %v", err)
-	}
-	if err = os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	status, err = ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, unmigratedStatus(t))
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("status created files: %v, %v", entries, err)
-	}
-}
-
-func TestStatusDoesNotMigrate(t *testing.T) {
-	dir := privateTempDir(t)
-	path := filepath.Join(dir, "intern.db")
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := ReadStatus(t.Context(), dir)
-	assertStatus(t, status, err, unmigratedStatus(t))
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("status changed database: %v", err)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != "intern.db" {
-		t.Fatalf("status created lock or side files: %v, %v", entries, err)
-	}
-}
-
 func TestStatusDatabaseIsReadOnly(t *testing.T) {
-	dir := privateTempDir(t)
-	s := openTestStore(t, dir)
+	s, dsn := openTestStoreDSN(t)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openDatabase(t.Context(), filepath.Join(dir, "intern.db"), true)
+	db, err := sql.Open("pgx", dsn+"&default_transaction_read_only=on")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,37 +22,19 @@ func TestStatusDatabaseIsReadOnly(t *testing.T) {
 	}
 }
 
-// unmigratedStatus is the status of a metadata directory with no applied
-// migration set: every embedded latest, nothing applied. Both latests come from
-// their embedded sets, so a new web or replication migration does not leave this
-// expectation stale.
-func unmigratedStatus(t *testing.T) Status {
-	t.Helper()
-	latest := replicationLatest(t)
-	web := webLatest(t)
-	return Status{
-		LatestVersion: web, PendingMigrations: int(web),
-		PhysicalLatestVersion: 1, PhysicalPendingMigrations: 1,
-		ReplicationLatestVersion: latest, ReplicationPending: int(latest),
+func TestStatusDoesNotMigrate(t *testing.T) {
+	dsn := pgtest.New(t)
+	status, err := ReadStatus(t.Context(), dsn)
+	if err != nil || status.CurrentVersion != 0 || status.PendingMigrations == 0 {
+		t.Fatalf("unmigrated status: %+v, %v", status, err)
 	}
 }
 
-// webLatest is the newest embedded web migration version.
 func webLatest(t *testing.T) int64 {
 	t.Helper()
-	versions, err := embeddedVersions()
+	latest, err := LatestVersion()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return latestVersion(versions)
-}
-
-func assertStatus(t *testing.T, got Status, err error, want Status) {
-	t.Helper()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != want {
-		t.Fatalf("status = %+v; want %+v", got, want)
-	}
+	return latest
 }

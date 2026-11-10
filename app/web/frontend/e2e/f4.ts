@@ -109,28 +109,37 @@ async function exportSnapshot(
   }
 }
 
-/** Walks the wizard to one backup point: source, chain, point. */
-function choosePoint(
-  sourceName: string,
-  chainId: string,
-  pointLabel: string,
-): void {
+/** Walks the wizard to one backup point of the source. */
+function choosePoint(sourceName: string, backupId: string): void {
   b.waitText("新建恢复");
   b.ab("find", "role", "combobox", "click", "--name", "数据源");
   b.waitText(sourceName);
   b.ab("find", "role", "option", "click", "--name", sourceName);
-  // Chains and points load after the previous choice.
-  for (const label of [chainId, pointLabel]) {
-    b.ab(
-      "wait",
-      "--fn",
-      `document.querySelector(${JSON.stringify(`[aria-label="${label}"]`)}) !== null`,
-    );
-    b.ab("find", "role", "radio", "click", "--name", label);
-  }
+  // A single chain is selected automatically; wait for its members to load.
+  b.waitText("备份组：自");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.querySelector(${JSON.stringify(`input[type="radio"][value="${backupId}"]`)}) !== null`,
+  );
+  // Points of one kind share their completion minute, so choose by id.
+  // Base UI renders the value on a hidden input next to the visible radio.
+  const clicked = b.ab(
+    "eval",
+    `(() => { const input = document.querySelector(${JSON.stringify(`input[type="radio"][value="${backupId}"]`)}); const target = input?.previousElementSibling; if (target?.getAttribute("role") !== "radio") return false; target.click(); return true; })()`,
+  );
+  expect(
+    clicked === "true",
+    `missing point ${backupId}; page says: ${b.text().slice(0, 2000)}`,
+  );
+  b.ab(
+    "wait",
+    "--fn",
+    `document.querySelector(${JSON.stringify(`input[type="radio"][value="${backupId}"]`)})?.previousElementSibling?.getAttribute("aria-checked") === "true"`,
+  );
   b.click("生成计划");
-  // The plan card renders before the plan arrives; wait for its digest.
-  b.waitText("计划摘要");
+  // The plan card renders before the plan arrives; wait for its capacity lines.
+  b.waitText("导出空间");
 }
 
 function confirmAndExecute(password: string): void {
@@ -206,11 +215,6 @@ async function main(): Promise<void> {
         full_cron: "0 3 1 1 *",
         incremental_cron: "30 4 1 * *",
         timezone: "UTC",
-        max_chain_length: 7,
-        parallel: 1,
-        throttle: 0,
-        zstd_level: 3,
-        page_tracking: false,
         enabled: false,
       }),
     );
@@ -250,7 +254,6 @@ async function main(): Promise<void> {
     const chains = zListSourceChainsResponse.parse(
       (await api("GET", `/api/v1/sources/${sourceId}/chains`, admin)).json,
     );
-    const chainId = chains.items[0]?.id ?? "";
     expect(
       chains.items.length === 1 && chains.items[0]?.members.length === 3,
       "expected one 3-member chain",
@@ -262,22 +265,22 @@ async function main(): Promise<void> {
     // --- F4-A5: PITR is visibly unavailable ---
     b.signIn(stack.origin, stack.admin.username, stack.admin.password);
     b.open(`${stack.origin}/restores/new`);
-    b.waitText("任意时间点恢复（PITR）暂不可用");
+    b.waitText("任意时间点恢复（暂不支持）");
     const pitrDisabled = b.ab(
       "eval",
-      `document.querySelector('[aria-label="任意时间点恢复（PITR）暂不可用"]')?.hasAttribute("data-disabled") || document.querySelector('[aria-label="任意时间点恢复（PITR）暂不可用"]')?.getAttribute("aria-disabled") === "true" || document.querySelector('[aria-label="任意时间点恢复（PITR）暂不可用"]')?.hasAttribute("disabled")`,
+      `document.querySelector('[aria-label="任意时间点恢复（暂不支持）"]')?.hasAttribute("data-disabled") || document.querySelector('[aria-label="任意时间点恢复（暂不支持）"]')?.getAttribute("aria-disabled") === "true" || document.querySelector('[aria-label="任意时间点恢复（暂不支持）"]')?.hasAttribute("disabled")`,
     );
     expect(pitrDisabled === "true", "the PITR option is not disabled");
     b.record({
       id: "01-pitr-unavailable",
       acceptance: "F4-A5",
       description:
-        "the wizard offers checkpoint restore only; PITR is a disabled option with the N1 reason",
+        "the wizard offers completed-backup restore only and explains that arbitrary point-in-time recovery is unavailable",
       screenshot: b.shot("01-pitr-unavailable"),
     });
 
     // --- F4-A1 (local) + F4-A2 (wrong password): restore incremental 1 ---
-    choosePoint("f4-source", chainId, "物理增量 2");
+    choosePoint("f4-source", inc1Id);
     const plan1 = zPlanRestoreResponse.parse(
       (await api("POST", "/api/v1/restores/plan", admin, { backup_id: inc1Id }))
         .json,
@@ -337,7 +340,7 @@ async function main(): Promise<void> {
 
     // --- F4-A2 (plan_changed) + F4-A1 (FTP only): restore incremental 2 ---
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 3");
+    choosePoint("f4-source", inc2Id);
     // The catalog changes under the confirmed plan: every local payload goes.
     for (const id of [fullId, inc1Id, inc2Id]) {
       const backup = zGetBackupResponse.parse(
@@ -355,7 +358,7 @@ async function main(): Promise<void> {
       screenshot: b.shot("05-plan-changed"),
     });
     b.click("重新生成计划");
-    b.waitText("计划摘要");
+    b.waitText("导出空间");
     const plan2 = zPlanRestoreResponse.parse(
       (await api("POST", "/api/v1/restores/plan", admin, { backup_id: inc2Id }))
         .json,
@@ -391,12 +394,9 @@ async function main(): Promise<void> {
 
     // --- F4-A4: rehearsal, passing and failing verify_sql ---
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 2");
+    choosePoint("f4-source", inc1Id);
     b.click("执行演练", "switch");
-    b.fill(
-      "校验语句（verify_sql）",
-      Array.from({ length: 17 }, () => "SELECT 1").join("\n"),
-    );
+    b.fill("校验语句", Array.from({ length: 17 }, () => "SELECT 1").join("\n"));
     confirmAndExecute(stack.admin.password);
     b.waitText("校验语句最多 16 条");
     const stillTwo = z
@@ -406,10 +406,7 @@ async function main(): Promise<void> {
       stillTwo.items.length === 2,
       "17 verify statements reached the server",
     );
-    b.fill(
-      "校验语句（verify_sql）",
-      "SELECT COUNT(*) FROM f4.t\nSELECT MAX(v) FROM f4.t",
-    );
+    b.fill("校验语句", "SELECT COUNT(*) FROM f4.t\nSELECT MAX(v) FROM f4.t");
     confirmAndExecute(stack.admin.password);
     b.ab("wait", "--url", "**/restores/detail?id=*");
     const rehearsedId = new URL(b.url()).searchParams.get("id") ?? "";
@@ -428,9 +425,9 @@ async function main(): Promise<void> {
     });
 
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 2");
+    choosePoint("f4-source", inc1Id);
     b.click("执行演练", "switch");
-    b.fill("校验语句（verify_sql）", "SELECT COUNT(*) FROM f4.missing_table");
+    b.fill("校验语句", "SELECT COUNT(*) FROM f4.missing_table");
     confirmAndExecute(stack.admin.password);
     b.ab("wait", "--url", "**/restores/detail?id=*");
     const failedVerifyId = new URL(b.url()).searchParams.get("id") ?? "";
@@ -450,7 +447,7 @@ async function main(): Promise<void> {
 
     // --- F4-A3: cancel while running; side effects match the export root ---
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 3");
+    choosePoint("f4-source", inc2Id);
     b.click("执行演练", "switch");
     confirmAndExecute(stack.admin.password);
     b.ab("wait", "--url", "**/restores/detail?id=*");
@@ -512,7 +509,7 @@ async function main(): Promise<void> {
     b.signOut();
     b.signIn(stack.origin, operator.username, operator.password);
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 2");
+    choosePoint("f4-source", inc1Id);
     b.waitText("只有管理员可以执行恢复");
     const operatorCookie = await apiLogin(
       api,
@@ -559,7 +556,7 @@ async function main(): Promise<void> {
     b.signOut();
     b.signIn(stack.origin, stack.admin.username, stack.admin.password);
     b.open(`${stack.origin}/restores/new`);
-    choosePoint("f4-source", chainId, "物理增量 2");
+    choosePoint("f4-source", inc1Id);
     const freshAdmin = await apiLogin(
       api,
       stack.admin.username,

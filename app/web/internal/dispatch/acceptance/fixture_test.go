@@ -39,7 +39,6 @@ import (
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
-	_ "modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/app/web/internal/auth"
 	"github.com/flyingEirc/Intern/app/web/internal/dispatch"
@@ -49,6 +48,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/store"
 	"github.com/flyingEirc/Intern/internal/artifact"
 	"github.com/flyingEirc/Intern/internal/credential"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/storage/ftp"
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
@@ -78,6 +78,7 @@ type fixture struct {
 	layout     layout
 	secret     secrets
 	database   *store.Store
+	dsn        string
 	sealer     *credential.Sealer
 	auth       *auth.Service
 	stopAuth   func()
@@ -143,7 +144,8 @@ func newFixture(t *testing.T) *fixture {
 	paths := newLayout(t)
 	secret := loadSecrets(t)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	database := openStore(t, paths.metadata)
+	dsn := pgtest.New(t)
+	database := openStore(t, dsn)
 	must(t, artifact.GenerateKey(paths.kek))
 	sealer, err := credential.Open(paths.kek, paths.metadata, paths.work)
 	must(t, err)
@@ -157,7 +159,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	svc := &resources.Service{Store: database, Settings: settings}
 	f := &fixture{
-		t: t, layout: paths, secret: secret, database: database,
+		t: t, layout: paths, secret: secret, database: database, dsn: dsn,
 		sealer: sealer, auth: authn, settings: settings, service: svc,
 		instanceID: database.InstanceID(), log: new(lockedBuffer),
 	}
@@ -247,13 +249,9 @@ func openStore(t *testing.T, dir string) *store.Store {
 	return database
 }
 
-// analysisPool opens one SQLite pool over the control-plane database. The pool
-// is a view, never a handle that outlives a serve child: the child owns the
-// database while it runs, and a pool this process kept across the child's exit
-// is the stale view that once hid every later write.
-func analysisPool(dir string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", filepath.Join(dir, "intern.db"))
-	return sql.Open("sqlite", dsn)
+// analysisPool reads committed PostgreSQL state through an independent session.
+func analysisPool(dsn string) (*sql.DB, error) {
+	return sql.Open("pgx", dsn)
 }
 
 // analysisView returns the worker's view of the control-plane database,
@@ -265,7 +263,7 @@ func (f *fixture) analysisView() (*sql.DB, error) {
 	if f.analysis != nil {
 		return f.analysis, nil
 	}
-	db, err := analysisPool(f.layout.metadata)
+	db, err := analysisPool(f.dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +327,7 @@ func seedUsers(t *testing.T, f *fixture) {
 	t.Helper()
 	adminHash, err := f.auth.Passwords.Hash(f.secret.admin)
 	must(t, err)
-	_, err = f.database.CreateAdmin(t.Context(), "admin", adminHash)
+	_, err = f.database.SetupAdmin(t.Context(), "admin", adminHash, store.SystemAudit("auth.setup", store.AuditDetail{Role: "admin"}))
 	must(t, err)
 	operatorHash, err := f.auth.Passwords.Hash(f.secret.operator)
 	must(t, err)
@@ -424,7 +422,7 @@ func (f *fixture) topology(t *testing.T) {
 	f.localID = f.createLocal(t)
 	f.ftpID = f.createFTP(t)
 	f.sourceID = f.createSource(t)
-	f.e2ePolicy = f.createPolicy(t, "w4-e2e", 3)
+	f.e2ePolicy = f.createPolicy(t, "w4-e2e")
 	f.enable(t, f.e2ePolicy)
 }
 
@@ -454,13 +452,12 @@ func (f *fixture) createSource(t *testing.T) string {
 	return f.decodeID(t, f.admin.request(t, http.MethodPost, "/api/v1/sources", body, http.StatusCreated))
 }
 
-func (f *fixture) createPolicy(t *testing.T, name string, maxChain int) string {
+func (f *fixture) createPolicy(t *testing.T, name string) string {
 	t.Helper()
 	body := fmt.Sprintf(
 		`{"name":%q,"source_id":%q,"local_repository_id":%q,"replica_repository_id":%q,`+
-			`"full_cron":%q,"incremental_cron":%q,"timezone":"UTC","max_chain_length":%d,`+
-			`"parallel":1,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`,
-		name, f.sourceID, f.localID, f.ftpID, cronFull, cronInc, maxChain)
+			`"full_cron":%q,"incremental_cron":%q,"timezone":"UTC","enabled":false}`,
+		name, f.sourceID, f.localID, f.ftpID, cronFull, cronInc)
 	return f.decodeID(t, f.admin.request(t, http.MethodPost, "/api/v1/policies", body, http.StatusCreated))
 }
 
@@ -550,12 +547,12 @@ func (f *fixture) allLogs(t *testing.T, runID string) []store.RunLog {
 	}
 }
 
-// sqliteLogs reads one run's stored log rows in sequence order, decoding the
+// postgresLogs reads one run's stored log rows in sequence order, decoding the
 // data column exactly as the store does when it serves the same rows.
-func (f *fixture) sqliteLogs(t *testing.T, runID string) []store.RunLog {
+func (f *fixture) postgresLogs(t *testing.T, runID string) []store.RunLog {
 	t.Helper()
 	rows, err := f.view(t).QueryContext(t.Context(),
-		`SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? ORDER BY seq`, runID)
+		`SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = $1 ORDER BY seq`, runID)
 	must(t, err)
 	defer func() { must(t, rows.Close()) }()
 	var out []store.RunLog
@@ -780,6 +777,7 @@ func (f *fixture) startServeChild(t *testing.T) {
 	command.Env = append(os.Environ(),
 		"INTERN_W4_SERVE=1",
 		"INTERN_W4_METADATA_DIR="+f.layout.metadata,
+		"INTERN_DATABASE_URL="+f.dsn,
 		"INTERN_W4_LISTEN="+listen,
 		"INTERN_W4_TLS_CERT="+f.layout.cert,
 		"INTERN_W4_TLS_KEY="+f.layout.key,
@@ -872,14 +870,14 @@ func (f *fixture) workDirs() []string {
 	return matches
 }
 
-func (f *fixture) sqliteCount(t *testing.T, query string, args ...any) int {
+func (f *fixture) postgresCount(t *testing.T, query string, args ...any) int {
 	t.Helper()
 	var n int
 	must(t, f.view(t).QueryRowContext(t.Context(), query, args...).Scan(&n))
 	return n
 }
 
-func (f *fixture) sqliteString(t *testing.T, query string, args ...any) string {
+func (f *fixture) postgresString(t *testing.T, query string, args ...any) string {
 	t.Helper()
 	var value string
 	must(t, f.view(t).QueryRowContext(t.Context(), query, args...).Scan(&value))
@@ -891,8 +889,8 @@ func (f *fixture) sqliteString(t *testing.T, query string, args ...any) string {
 // the join goes through runs.backup_id, the published backup of the run.
 func (f *fixture) completedBackupsForRun(t *testing.T, runID string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups WHERE status = 'completed'
-AND id IN (SELECT backup_id FROM runs WHERE id = ? AND backup_id IS NOT NULL)`, runID)
+	return f.postgresCount(t, `SELECT COUNT(*) FROM backups WHERE status = 'completed'
+AND id IN (SELECT backup_id FROM runs WHERE id = $1 AND backup_id IS NOT NULL)`, runID)
 }
 
 // completedBackupsForPolicy counts one policy's completed backups, read before
@@ -900,8 +898,8 @@ AND id IN (SELECT backup_id FROM runs WHERE id = ? AND backup_id IS NOT NULL)`, 
 // successful run.
 func (f *fixture) completedBackupsForPolicy(t *testing.T, policyID string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups b JOIN runs r ON r.backup_id = b.id
-WHERE r.policy_id = ? AND b.status = 'completed'`, policyID)
+	return f.postgresCount(t, `SELECT COUNT(*) FROM backups b JOIN runs r ON r.backup_id = b.id
+WHERE r.policy_id = $1 AND b.status = 'completed'`, policyID)
 }
 
 // completedBackupsSinceFault counts the completed backups created at or after
@@ -911,8 +909,8 @@ WHERE r.policy_id = ? AND b.status = 'completed'`, policyID)
 // multiply each row by the number of runs that name it and inflate the count.
 func (f *fixture) completedBackupsSinceFault(t *testing.T, runID string) int {
 	t.Helper()
-	return f.sqliteCount(t, `SELECT COUNT(*) FROM backups
-WHERE status = 'completed' AND created_at >= (SELECT started_at FROM runs WHERE id = ?)`, runID)
+	return f.postgresCount(t, `SELECT COUNT(*) FROM backups
+WHERE status = 'completed' AND created_at >= (SELECT started_at FROM runs WHERE id = $1)`, runID)
 }
 
 // childExitCode reports the serve child's exit status after waitChild. A
@@ -971,35 +969,59 @@ func (f *fixture) listLocalObjects(t *testing.T) []string {
 // control-plane database file, its WAL and SHM companions, the in-process
 // dispatcher log, the caller's extra payload and the serve child's captured
 // stdout/stderr.
-//
-// The database files are read by a re-execed helper, never by this process.
-// Under POSIX rules, closing any descriptor on one of them here releases every
-// fcntl lock this process holds on that file, including the shared lock SQLite
-// keeps on the -shm companion. Without that lock the serving child treats
-// itself as the last connection, checkpoints and unlinks the WAL, and this
-// process is left reading a detached inode: every write of every later child
-// becomes invisible, which is exactly the stale view that once made a SIGKILL
-// recovery cross-check report "no rows". TestW4ReadFileChild holds the other
-// half of that contract.
-//
-// The child log is read from its own handle so a scan during the run sees what
-// has been written so far; it is a plain log, not a database companion.
+// PostgreSQL rows and every public diagnostic are scanned independently; sealed
+// bytea values are checked as bytes so text encoding cannot hide plaintext.
 func (f *fixture) assertNoSecret(t *testing.T, extra []byte) {
 	t.Helper()
-	needles := make([][]byte, 0, 4)
-	for _, secret := range []string{f.secret.source, f.secret.ftp, f.secret.admin, f.secret.operator} {
-		needles = append(needles, []byte(secret))
-	}
+	needles := f.secretNeedles()
 	for _, payload := range [][]byte{f.log.bytes(), extra, f.childOutput(t)} {
 		if containsAny(payload, needles) {
 			t.Fatal("secret appeared in the clear")
 		}
 	}
-	for _, name := range []string{"intern.db", "intern.db-wal", "intern.db-shm"} {
-		if f.scanFileInChild(t, filepath.Join(f.layout.metadata, name), needles) {
-			t.Fatalf("secret appeared in the clear in %s", name)
+	f.scanPostgresRows(t, needles)
+	f.scanSealedColumns(t, needles)
+}
+
+func (f *fixture) secretNeedles() [][]byte {
+	needles := make([][]byte, 0, 4)
+	for _, secret := range []string{f.secret.source, f.secret.ftp, f.secret.admin, f.secret.operator} {
+		needles = append(needles, []byte(secret))
+	}
+	return needles
+}
+
+func (f *fixture) scanPostgresRows(t *testing.T, needles [][]byte) {
+	t.Helper()
+	for _, table := range []string{
+		"instance", "users", "sessions", "session_tombstones", "audit_logs",
+		"repositories", "sources", "policies", "runs", "run_logs", "restores", "restore_logs",
+		"chains", "backups", "cleanup_ledger", "replicas", "replica_members", "replica_parts",
+	} {
+		f.scanColumn(t, "SELECT row_to_json(record)::text FROM "+table+" record", table, needles)
+	}
+}
+
+func (f *fixture) scanSealedColumns(t *testing.T, needles [][]byte) {
+	t.Helper()
+	for _, table := range []string{"sources", "repositories"} {
+		f.scanColumn(t, "SELECT secret_ciphertext FROM "+table, table, needles)
+	}
+}
+
+func (f *fixture) scanColumn(t *testing.T, query, table string, needles [][]byte) {
+	t.Helper()
+	rows, err := f.view(t).QueryContext(t.Context(), query)
+	must(t, err)
+	for rows.Next() {
+		var payload []byte
+		must(t, rows.Scan(&payload))
+		if containsAny(payload, needles) {
+			t.Fatalf("secret appeared in PostgreSQL table %s", table)
 		}
 	}
+	must(t, rows.Err())
+	must(t, rows.Close())
 }
 
 // containsAny reports whether any needle occurs in one payload. An empty needle
@@ -1104,7 +1126,7 @@ func (f *fixture) diagnosticReplicas() []string {
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT backup_id, repository_id, local_repository_id, status, attempts, permanent,
 COALESCE(last_error_code, ''), next_attempt_at FROM replicas
-ORDER BY local_repository_id, repository_id, backup_id LIMIT ?`, diagnosticReplicaRows)
+ORDER BY local_repository_id, repository_id, backup_id LIMIT $1`, diagnosticReplicaRows)
 	if err != nil {
 		return []string{fmt.Sprintf("W4 diagnostics: replica rows unavailable: %v", err)}
 	}
@@ -1143,9 +1165,9 @@ func (f *fixture) diagnosticRuns() []string {
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT id, policy_id, kind, "trigger", status, COALESCE(error_class, ''), COALESCE(error_code, ''),
 COALESCE(backup_id, ''), cancel_requested, scheduled_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
-FROM runs WHERE source_id = ?
+FROM runs WHERE source_id = $1
 ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
-         created_at DESC LIMIT ?`, f.sourceID, diagnosticRunRows)
+         created_at DESC LIMIT $2`, f.sourceID, diagnosticRunRows)
 	if err != nil {
 		return []string{fmt.Sprintf("W4 diagnostics: runs unavailable: %v", err)}
 	}
@@ -1179,8 +1201,8 @@ func (f *fixture) diagnosticLogs(runID string) []string {
 		return []string{fmt.Sprintf("W4 diagnostics: run_logs of %s unavailable: %v", runID, err)}
 	}
 	rows, err := db.QueryContext(context.Background(),
-		`SELECT seq, ts, level, event, substr(COALESCE(message, ''), 1, ?) FROM run_logs
-WHERE run_id = ? ORDER BY seq DESC LIMIT ?`, diagnosticMessageWidth, runID, diagnosticRunLogLines)
+		`SELECT seq, ts, level, event, substr(COALESCE(message, ''), 1, $1) FROM run_logs
+WHERE run_id = $2 ORDER BY seq DESC LIMIT $3`, diagnosticMessageWidth, runID, diagnosticRunLogLines)
 	if err != nil {
 		return []string{fmt.Sprintf("W4 diagnostics: run_logs of %s unavailable: %v", runID, err)}
 	}
@@ -1309,14 +1331,14 @@ func (f *fixture) redact(lines []string) ([]string, int) {
 	return out, leaks
 }
 
-// sqliteRunOutcome reads the stored status, failure class and failure code of
+// postgresRunOutcome reads the stored status, failure class and failure code of
 // one run. The marker of a fault quotes all three from the row, so the class
 // and code a fault recorded are state, not a claim.
-func (f *fixture) sqliteRunOutcome(t *testing.T, runID string) (string, string, string) {
+func (f *fixture) postgresRunOutcome(t *testing.T, runID string) (string, string, string) {
 	t.Helper()
 	var status, class, code string
 	must(t, f.view(t).QueryRowContext(t.Context(),
-		`SELECT status, COALESCE(error_class, ''), COALESCE(error_code, '') FROM runs WHERE id = ?`, runID,
+		`SELECT status, COALESCE(error_class, ''), COALESCE(error_code, '') FROM runs WHERE id = $1`, runID,
 	).Scan(&status, &class, &code))
 	return status, class, code
 }
@@ -1334,7 +1356,7 @@ func (f *fixture) requireViewRun(t *testing.T, runID, wantStatus string) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var status string
-		err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = ?`, runID).Scan(&status)
+		err := view.QueryRowContext(t.Context(), `SELECT status FROM runs WHERE id = $1`, runID).Scan(&status)
 		if err == nil {
 			if wantStatus != "" && status != wantStatus {
 				t.Fatalf("analysis view: run %s is %s, want %s", runID, status, wantStatus)
@@ -1447,6 +1469,7 @@ func (c *client) stream(t *testing.T, path string) (*http.Response, io.ReadClose
 
 func requireNative(t *testing.T) {
 	t.Helper()
+	pgtest.RequireDSN(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("W4 worker requires linux/amd64")
 	}
@@ -1783,12 +1806,12 @@ func parseStamp(t *testing.T, value string) time.Time {
 
 // replicationWatch samples the protection points and the replica rows while
 // replication is in progress. Every sample reads the protection API first and
-// the replica statuses from SQLite immediately after: a status can only move
+// the replica statuses from PostgreSQL immediately after: a status can only move
 // forward to verified, so a verify that lands between the two reads can hide a
 // violation but can never invent one.
 //
 // The uploaded-but-unverified window is therefore observed, never inferred: a
-// sample counts it only when a replica row is exactly `uploaded` in SQLite and
+// sample counts it only when a replica row is exactly `uploaded` in PostgreSQL and
 // the remote protection point does not include that backup. `pending` and
 // `uploading` are not the window: nothing is committed yet in those states. The
 // sampler runs on its own goroutine with no test helpers, so a broken client
@@ -1953,7 +1976,7 @@ func unverifiedRemotePoint(protection dispatch.Protection, statuses map[string]s
 }
 
 // uploadedBehindRemote reports the backups of one real uploaded-but-unverified
-// sample: each is exactly `uploaded` in SQLite while the remote protection point
+// sample: each is exactly `uploaded` in PostgreSQL while the remote protection point
 // still does not include it. `pending` and `uploading` mean the copy is not
 // committed yet, so they say nothing about whether uploaded is treated as
 // verified, and a failed or exhausted row is a different state again. A replica
@@ -1990,7 +2013,7 @@ func (f *fixture) replicaStatuses() (map[string]string, error) {
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT r.backup_id, r.status FROM replicas r
 JOIN backups b ON b.id = r.backup_id JOIN chains c ON c.id = b.chain_id
-WHERE c.source_id = ? AND r.repository_id = ?`, f.sourceID, f.ftpID)
+WHERE c.source_id = $1 AND r.repository_id = $2`, f.sourceID, f.ftpID)
 	if err != nil {
 		return nil, err
 	}
@@ -2116,7 +2139,7 @@ func (f *fixture) diagnosticRestores() []string {
 		`SELECT id, backup_id, status, COALESCE(phase, ''), rehearse, verify_status,
 COALESCE(error_class, ''), COALESCE(error_code, ''), COALESCE(export_bytes, -1),
 COALESCE(side_effects_json, ''), created_at, COALESCE(started_at, ''), COALESCE(finished_at, '')
-FROM restores ORDER BY created_at, id LIMIT ?`, diagnosticRestoreRows)
+FROM restores ORDER BY created_at, id LIMIT $1`, diagnosticRestoreRows)
 	if err != nil {
 		return []string{fmt.Sprintf("W4 diagnostics: restore rows unavailable: %v", err)}
 	}
@@ -2149,7 +2172,7 @@ func (f *fixture) diagnosticRestoreLogs() []string {
 	}
 	rows, err := db.QueryContext(context.Background(),
 		`SELECT restore_id, seq, ts, level, message FROM restore_logs
-ORDER BY ts DESC, seq DESC LIMIT ?`, diagnosticRestoreLogRows)
+ORDER BY ts DESC, seq DESC LIMIT $1`, diagnosticRestoreLogRows)
 	if err != nil {
 		return []string{fmt.Sprintf("W4 diagnostics: restore logs unavailable: %v", err)}
 	}

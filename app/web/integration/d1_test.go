@@ -38,6 +38,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 )
 
@@ -92,7 +93,7 @@ const (
 	d1KeyPins      = "D1-A1 compose_pins="
 	d1KeyIdentity  = "D1-A2 identity "
 	d1KeyStack     = "D1-A2 stack="
-	d1KeyAdmin     = "D1-A2 create_admin="
+	d1KeyAdmin     = "D1-A2 setup="
 	d1KeyTLS       = "D1-A2 https="
 	d1KeyDataDir   = "D1-A2 datadir_ro="
 	d1KeyKEK       = "D1-A2 kek "
@@ -164,57 +165,77 @@ var (
 // export fixtures it mounts, the image tags it builds, and the identities the
 // acceptance drives through the public HTTPS API.
 type d1Fixture struct {
-	t             *testing.T
-	root          string
-	dir           string
-	hostDir       string
-	kekDigest     string
-	secrets       string
-	probes        string
-	exports       string
-	override      string
-	project       string
-	composeFile   string
-	env           []string
-	credential    []string
-	source        string
-	dirty         bool
-	candidate     string
-	upgrade       string
-	candidateID   string
-	upgradeID     string
-	webDigest     string
-	caPEM         []byte
-	rootPass      string
-	sourcePass    string
-	adminPass     string
-	mark          []string
-	saw           map[string]bool
-	containers    map[string]string
-	layers        []string
-	http          *http.Client
-	apiBase       string
-	mysqlPort     int
-	instanceID    string
-	serverUUID    string
-	repositoryID  string
-	sourceID      string
-	policyID      string
-	slowPolicyID  string
-	fullBackup    string
-	incBackup     string
-	restoreID     string
-	restoreExport string
-	snapshot      string
+	t              *testing.T
+	root           string
+	dir            string
+	hostDir        string
+	kekDigest      string
+	secrets        string
+	probes         string
+	exports        string
+	override       string
+	project        string
+	composeFile    string
+	env            []string
+	credential     []string
+	source         string
+	dirty          bool
+	candidate      string
+	upgrade        string
+	candidateID    string
+	upgradeID      string
+	webDigest      string
+	caPEM          []byte
+	rootPass       string
+	sourcePass     string
+	adminPass      string
+	databaseDigest string
+	postgresPass   string
+	mark           []string
+	saw            map[string]bool
+	containers     map[string]string
+	layers         []string
+	http           *http.Client
+	apiBase        string
+	mysqlPort      int
+	instanceID     string
+	serverUUID     string
+	repositoryID   string
+	sourceID       string
+	policyID       string
+	slowPolicyID   string
+	fullBackup     string
+	incBackup      string
+	restoreID      string
+	restoreExport  string
+	snapshot       string
 }
 
 // TestD1NativeContainers is the D1 deployment acceptance. It builds the
 // repository's Intern Web image from the pinned compatibility matrix, brings the
 // repository's Compose file up with real `docker compose`, and proves the locked
 // deployment facts through the public HTTPS API, through `docker compose exec`,
-// and through the volumes the stack itself created. Emulation is refused: the
-// pinned MySQL and XtraBackup images are linux/amd64, and an emulated run is not
-// deployment evidence.
+// and through the volumes the stack itself created. The pinned MySQL and
+// XtraBackup images are linux/amd64; an emulated run is development evidence
+// only and can never satisfy the native CI gate. The opt-in below is ignored in
+// GitHub Actions.
+
+func d1DevelopmentEmulation() bool {
+	return os.Getenv("INTERN_D1_DEVELOPMENT_EMULATION") == "true" && os.Getenv("GITHUB_ACTIONS") != "true"
+}
+
+func d1RequirePlatform(t *testing.T, osType, architecture string) {
+	t.Helper()
+	if d1DevelopmentEmulation() {
+		if osType != "linux" {
+			t.Fatal("D1 development evidence requires a Linux Docker daemon")
+		}
+		t.Log("D1 DEVELOPMENT ONLY: amd64 emulation permitted; this run cannot satisfy the native CI evidence gate")
+		return
+	}
+	requireNativeDaemon(t, osType, architecture)
+}
+
 func TestD1NativeContainers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 55*time.Minute)
 	defer cancel()
@@ -227,7 +248,7 @@ func TestD1NativeContainers(t *testing.T) {
 	defer func() { require(t, docker.Close()) }()
 	info, err := docker.Info(ctx, client.InfoOptions{})
 	require(t, err)
-	requireNativeDaemon(t, info.Info.OSType, info.Info.Architecture)
+	d1RequirePlatform(t, info.Info.OSType, info.Info.Architecture)
 	root, err := filepath.Abs("../../..")
 	require(t, err)
 	source, dirty := physicalSourceIdentity(t, ctx, root)
@@ -295,7 +316,11 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 	fixture.rootPass = randomSecret(t)
 	fixture.sourcePass = randomSecret(t)
 	fixture.adminPass = randomSecret(t)
-	fixture.credential = []string{fixture.rootPass, fixture.sourcePass, fixture.adminPass}
+	fixture.postgresPass = randomSecret(t)
+	fixture.credential = []string{fixture.rootPass, fixture.sourcePass, fixture.adminPass, fixture.postgresPass}
+	require(t, os.WriteFile(filepath.Join(fixture.secrets, "intern_postgres_password"), []byte(fixture.postgresPass), 0o600))
+	require(t, os.WriteFile(filepath.Join(fixture.secrets, "intern_database_url"), []byte("postgres://intern:"+fixture.postgresPass+"@postgres:5432/intern?sslmode=disable"), 0o600))
+	require(t, os.WriteFile(filepath.Join(fixture.probes, "intern_probe_database_url"), []byte("postgres://intern:"+fixture.postgresPass+"@postgres:5432/d1_refusal?sslmode=disable"), 0o600))
 	fixture.caPEM = d1Certificate(t, fixture.secrets)
 	require(t, artifact.GenerateKey(filepath.Join(fixture.secrets, "intern_kek")))
 	require(t, os.Chmod(filepath.Join(fixture.secrets, "intern_kek"), 0o600))
@@ -305,6 +330,9 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 	kekDigest, err := d1FileDigest(filepath.Join(fixture.secrets, "intern_kek"))
 	require(t, err)
 	fixture.kekDigest = kekDigest
+	databaseDigest, err := d1FileDigest(filepath.Join(fixture.secrets, "intern_database_url"))
+	require(t, err)
+	fixture.databaseDigest = databaseDigest
 	require(t, os.Chmod(filepath.Join(fixture.secrets, "intern_tls_key"), 0o600))
 	require(t, os.WriteFile(filepath.Join(fixture.probes, "intern_kek_0644"), []byte("not-a-keyset\n"), 0o644))
 	require(t, fixture.writeOverride())
@@ -318,6 +346,8 @@ func newD1Fixture(t *testing.T, root, source string, dirty bool) *d1Fixture {
 		d1Assign("INTERN_HOST_PORT", "0"),
 		d1Assign("INTERN_KEK_FILE_HOST", filepath.Join(fixture.secrets, "intern_kek")),
 		d1Assign("INTERN_TLS_CERT_HOST", filepath.Join(fixture.secrets, "intern_tls_cert")),
+		d1Assign("INTERN_POSTGRES_PASSWORD_FILE", filepath.Join(fixture.secrets, "intern_postgres_password")),
+		d1Assign("INTERN_DATABASE_URL_FILE", filepath.Join(fixture.secrets, "intern_database_url")),
 		d1Assign("INTERN_TLS_KEY_HOST", filepath.Join(fixture.secrets, "intern_tls_key")),
 		d1Assign("INTERN_EXPORT_HOST_DIR", fixture.exports),
 		d1Assign("INTERN_MIN_WORK_BYTES", "268435456"),
@@ -394,7 +424,7 @@ func (f *d1Fixture) writeOverride() error {
 }
 
 // teardown removes the stack, its one-off containers and every named volume it
-// created, so a failed run never leaves a locked metadata volume behind. A run
+// created, so a failed run never leaves a lock held on its PostgreSQL database. A run
 // that is killed never gets here; the job runs .github/scripts/d1-compose-clean.sh
 // before and after the test for that case.
 func (f *d1Fixture) teardown(ctx context.Context) {
@@ -509,24 +539,6 @@ func (f *d1Fixture) composeOK(ctx context.Context, args ...string) string {
 		f.fatal("docker compose %s exit=%d: %s", strings.Join(args, " "), code, out)
 	}
 	return strings.TrimSpace(out)
-}
-
-// composeStdin runs one `docker compose` command with stdin and requires a zero
-// exit. It is how `user create-admin --password-stdin` is exercised exactly as
-// the deployment documentation states it.
-func (f *d1Fixture) composeStdin(ctx context.Context, stdin string, args ...string) string {
-	f.t.Helper()
-	command := f.command(ctx, "docker", f.composeArgs(args...)...)
-	command.Stdin = strings.NewReader(stdin)
-	var stdout, stderr strings.Builder
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	err := command.Run()
-	text := f.withhold(stdout.String() + stderr.String())
-	if err != nil {
-		f.fatal("docker compose %s: %v\n%s", strings.Join(args, " "), err, text)
-	}
-	return text
 }
 
 // execIn runs one command inside a service container and returns its combined
@@ -665,7 +677,7 @@ func (f *d1Fixture) prepareOwnership(ctx context.Context) {
 		// never lock the test process out of its own files.
 		"chown -R 999:999 /d1/secrets /d1/probes /d1/exports &&",
 		"chmod 0700 /d1/secrets /d1/probes &&",
-		"chmod 0600 /d1/secrets/intern_kek /d1/secrets/intern_tls_key &&",
+		"chmod 0600 /d1/secrets/intern_kek /d1/secrets/intern_tls_key /d1/secrets/intern_database_url /d1/secrets/intern_postgres_password /d1/probes/intern_probe_database_url &&",
 		"chmod 0644 /d1/secrets/intern_tls_cert /d1/secrets/d1-ca.pem &&",
 		"chmod 0644 /d1/probes/intern_kek_0644 &&",
 		"chmod 0750 /d1/exports",
@@ -731,6 +743,11 @@ func (f *d1Fixture) buildImage(ctx context.Context, tag, sourceLabel string, noC
 		"--build-arg", d1Assign("SOURCE_SHA", sourceLabel),
 		"--build-arg", d1Assign("MYSQL_IMAGE", mysqlImage),
 		"--build-arg", d1Assign("PXB_IMAGE", pxbImage),
+	}
+	if d1DevelopmentEmulation() {
+		// The development host's container network cannot reach the module proxy;
+		// this changes only the build-time transport, never the CI or runtime path.
+		args = append(args, "--network", "host")
 	}
 	if noCache {
 		args = append(args, "--no-cache")
@@ -1037,10 +1054,15 @@ func (f *d1Fixture) checkComposePins(mysqlImage, pxbImage string) {
 			f.fatal("%s does not pin %s", d1EnvExamplePath, pin)
 		}
 	}
+	for _, required := range []string{pgtest.Image, "intern-postgres:", "intern_database_url:", "intern_postgres_password:", "INTERN_DATABASE_URL_FILE"} {
+		if !strings.Contains(compose, required) {
+			f.fatal("%s lost the PostgreSQL deployment contract %s", d1ComposePath, required)
+		}
+	}
 	if !strings.Contains(compose, "stop_grace_period") || !strings.Contains(compose, "blkio_config") {
 		f.fatal("%s lost the stop window or the I/O isolation the design requires", d1ComposePath)
 	}
-	f.report(d1KeyPins+"true compose=%s env_example=%s dockerfile=%s matrix_images=2",
+	f.report(d1KeyPins+"true compose=%s env_example=%s dockerfile=%s matrix_images=2 postgres_pin=true",
 		d1ComposePath, d1EnvExamplePath, d1DockerfilePath)
 }
 
@@ -1330,9 +1352,9 @@ func d1Certificate(t *testing.T, directory string) []byte {
 // --------------------------------------------------------------- compose (A2)
 
 // caseCompose brings the repository Compose file up with real `docker compose`
-// and proves the stack itself: readiness, the deployment health entry point,
-// create-admin through `compose exec`, a verified HTTPS API, the read-only
-// datadir, the shared socket, and the file-secret KEK that is actually read.
+// and proves the stack itself: readiness of PostgreSQL, MySQL and the deployment,
+// the one-time setup over HTTPS, a verified session, the read-only datadir, the
+// shared socket, and the file secrets that are actually read.
 func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
@@ -1340,6 +1362,7 @@ func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	f.prepareOwnership(ctx)
 	f.composeOK(ctx, "up", "--detach")
 	mysqlID := f.waitHealthy(ctx, "mysql", 4*time.Minute)
+	postgresID := f.waitHealthy(ctx, "postgres", 4*time.Minute)
 	internID := f.waitHealthy(ctx, "intern", 4*time.Minute)
 	// `docker compose port` takes the bare private port; the protocol defaults to tcp.
 	mysqlPort := f.publishedPort(ctx, "mysql", "3306")
@@ -1349,20 +1372,20 @@ func (f *d1Fixture) caseCompose(t *testing.T, ctx context.Context) {
 	f.newAPIClient()
 	f.requireHealth(t)
 	f.seedDatabase(ctx)
-	f.createUser(t, ctx)
+	f.createUser(t)
 	f.requireTransportFacts(t)
 	f.requireReadOnlyDataDir(t, ctx)
 	f.requireSecretsRead(t, ctx, mysqlID, internID)
 	f.requireSocketAndKEK(t, ctx)
 	f.report(d1KeyIdentity+"daemon=%s platform=linux/amd64 compose=%s project=%s",
 		f.daemonPlatform(ctx), f.composeVersion(ctx), f.project)
-	f.report(d1KeyStack+"healthy compose_file=%s project=%s mysql=%s intern=%s api=%s mysql_port=%d healthcheck=intern-web",
-		d1ComposePath, f.project, mysqlID, internID, f.apiBase, f.mysqlPort)
+	f.report(d1KeyStack+"healthy compose_file=%s project=%s mysql=%s intern=%s api=%s mysql_port=%d healthcheck=intern-web postgres=%s",
+		d1ComposePath, f.project, mysqlID, internID, f.apiBase, f.mysqlPort, postgresID)
 }
 
 // requireHealth proves both unauthenticated routes answer over the deployed
-// listener. /readyz is the migration gate: it answers 503 until the metadata
-// volume is at the exact migration version.
+// listener. /readyz is the migration gate: it answers 503 until the PostgreSQL
+// control plane is at the exact migration version.
 func (f *d1Fixture) requireHealth(t *testing.T) {
 	t.Helper()
 	code, body, _ := f.apiIssue(http.MethodGet, "/healthz", "", "")
@@ -1379,20 +1402,31 @@ func (f *d1Fixture) requireHealth(t *testing.T) {
 	f.fatal("/readyz never became ready, last answer %d: %s", code, body)
 }
 
-// createUser runs the documented administrator bootstrap inside the deployed
-// container, with the password on stdin and never on a command line.
-func (f *d1Fixture) createUser(t *testing.T, ctx context.Context) {
+// createUser bootstraps the first administrator through the public setup API.
+func (f *d1Fixture) createUser(t *testing.T) {
 	t.Helper()
-	out := f.composeStdin(ctx, f.adminPass+"\n", "exec", "-T", "intern", "intern-web", "user", "create-admin",
-		"--username", d1AdminUsername, "--password-stdin")
-	if !strings.Contains(out, `"id"`) {
-		f.fatal("create-admin returned no user identity: %s", out)
+	body, err := json.Marshal(map[string]string{"username": d1AdminUsername, "password": f.adminPass})
+	require(t, err)
+	code, raw, version := f.apiIssue(http.MethodPost, "/api/v1/auth/setup", string(body), "")
+	var result struct {
+		User struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+		} `json:"user"`
 	}
-	version := f.login(d1AdminUsername, f.adminPass)
+	f.decode(raw, &result)
+	if code != http.StatusCreated || !d1UUID.MatchString(result.User.ID) || result.User.Username != d1AdminUsername || result.User.Role != "admin" {
+		f.fatal("setup returned no first administrator: status=%d body=%s", code, raw)
+	}
+	f.api(http.MethodGet, "/api/v1/auth/session", "", "", http.StatusOK)
+	if code, _, _ := f.apiIssue(http.MethodPost, "/api/v1/auth/setup", string(body), ""); code != http.StatusConflict {
+		f.fatal("completed setup accepted a second bootstrap: status=%d", code)
+	}
 	if version != "1.3" && version != "1.2" {
 		f.fatal("the administrator session did not negotiate TLS: %q", version)
 	}
-	f.report(d1KeyAdmin+"created user=%s login=200 negotiated=%s stdin=true", d1AdminUsername, version)
+	f.report(d1KeyAdmin+"created user=%s status=201 session=200 negotiated=%s once=true", d1AdminUsername, version)
 }
 
 // requireTransportFacts proves the listener really terminates TLS: a client that
@@ -1435,15 +1469,16 @@ func (f *d1Fixture) requireReadOnlyDataDir(t *testing.T, ctx context.Context) {
 	}
 	out, code = f.execIn(ctx, "intern", "stat", "-c", "%a %u %g", d1MetadataPath)
 	if code != 0 || !strings.HasPrefix(strings.TrimSpace(out), "700 999 999") {
-		f.fatal("the metadata volume is not a private directory owned by the deployment user: %s", out)
+		f.fatal("the metadata directory is not a private directory owned by the deployment user: %s", out)
 	}
 	f.report(d1KeyDataDir + "refused metadata_dir=0700 owner=999:999")
 }
 
 // requireSecretsRead proves the Compose file secrets really are the files the
-// harness wrote: the KEK is read inside the container and digested there, and
-// the digest equals the host file. The mode is read back from the container too,
-// because the KEK reader refuses anything world-readable.
+// harness wrote: the KEK and PostgreSQL URL are read inside the container and
+// digested there, and each digest equals its host file. The modes are read back
+// from the container too, because the KEK and DSN readers refuse a world-readable
+// file.
 func (f *d1Fixture) requireSecretsRead(t *testing.T, ctx context.Context, mysqlID, internID string) {
 	t.Helper()
 	out, code := f.execIn(ctx, "intern", "stat", "-c", "%a %u %g", d1SecretKEK)
@@ -1459,6 +1494,7 @@ func (f *d1Fixture) requireSecretsRead(t *testing.T, ctx context.Context, mysqlI
 	if container != host {
 		f.fatal("the KEK in the container is %s, the host secret is %s", container, host)
 	}
+	f.requireDatabaseURLSecret(t, ctx)
 	out, code = f.execIn(ctx, "intern", "ls", d1LicenseDirectory)
 	if code != 0 {
 		f.fatal("the running container cannot see the GPL materials: %s", out)
@@ -1467,8 +1503,22 @@ func (f *d1Fixture) requireSecretsRead(t *testing.T, ctx context.Context, mysqlI
 	if user != "999:999" {
 		f.fatal("the deployed container runs as %q, want 999:999", user)
 	}
-	f.report(d1KeyKEK+"secret=%s mode=0600 owner=999:999 digest_bound=true container_user=%s mysql=%s",
+	f.report(d1KeyKEK+"secret=%s mode=0600 owner=999:999 digest_bound=true database_url_secret=0600 database_url_digest_bound=true container_user=%s mysql=%s",
 		d1SecretKEK, user, mysqlID)
+}
+
+// requireDatabaseURLSecret proves the mounted PostgreSQL DSN is the host's
+// private file and that its digest reaches the container unchanged.
+func (f *d1Fixture) requireDatabaseURLSecret(t *testing.T, ctx context.Context) {
+	t.Helper()
+	out, code := f.execIn(ctx, "intern", "stat", "-c", "%a %u %g", "/run/secrets/intern_database_url")
+	if code != 0 || !strings.HasPrefix(strings.TrimSpace(out), "600 999 999") {
+		f.fatal("the PostgreSQL URL secret is not private: %s", out)
+	}
+	out, code = f.execIn(ctx, "intern", "sha256sum", "/run/secrets/intern_database_url")
+	if code != 0 || strings.Fields(out)[0] != f.databaseDigest {
+		f.fatal("the deployed PostgreSQL URL secret differs from the host secret: %s", out)
+	}
 }
 
 // requireSocketAndKEK performs the two operations that need both: a source row
@@ -1538,7 +1588,7 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 	t.Helper()
 	f.t = t
 	defer func() { f.report(d1KeyCase+"%s", d1Cases[2]) }()
-	f.policyID = f.createPolicy(t, "d1-policy", 0)
+	f.policyID = f.createPolicy(t, "d1-policy")
 	f.report(d1KeyTopo+"compose-mysql->intern-web->local-repository policy=%s source=%s repository=%s replica=none",
 		f.policyID, f.sourceID, f.repositoryID)
 	f.fullBackup = f.backup(t, ctx, "full", "d1-a3-full")
@@ -1556,20 +1606,42 @@ func (f *d1Fixture) caseBusiness(t *testing.T, ctx context.Context) {
 		f.snapshot, actual)
 }
 
-// createPolicy installs one policy exactly as the API contract requires it, and
-// returns its id. throttle is the xtrabackup chunk budget, so a positive value
-// is how the SIGTERM case keeps a real run in flight.
-func (f *d1Fixture) createPolicy(t *testing.T, name string, throttle int64) string {
+// createPolicy installs one policy through the public API and returns its id.
+// The body is only the business fields the contract accepts. max_chain_length,
+// parallel, throttle, zstd_level and page_tracking stay server defaults; the
+// API rejects them. The SIGTERM case pins throttle afterwards with
+// pinSIGTERMThrottle, a test-fixture write, not this request.
+func (f *d1Fixture) createPolicy(t *testing.T, name string) string {
 	t.Helper()
 	// Both schedules sit half a day away from now, so the in-process scheduler can
 	// never fire a run of its own during the acceptance and every run, parent and
 	// counter the cases assert is one the harness triggered itself.
 	quiet := (time.Now().UTC().Hour() + 12) % 24
 	body := fmt.Sprintf(`{"name":%q,"source_id":%q,"local_repository_id":%q,`+
-		`"full_cron":"0 %d * * *","incremental_cron":"30 %d * * *","timezone":"UTC",`+
-		`"max_chain_length":5,"parallel":1,"throttle":%d,"zstd_level":3,"page_tracking":false,"enabled":false}`,
-		name, f.sourceID, f.repositoryID, quiet, quiet, throttle)
+		`"full_cron":"0 %d * * *","incremental_cron":"30 %d * * *","timezone":"UTC","enabled":false}`,
+		name, f.sourceID, f.repositoryID, quiet, quiet)
 	return f.createdID(f.api(http.MethodPost, "/api/v1/policies", body, "", http.StatusCreated))
+}
+
+// pinSIGTERMThrottle is a D1 test fixture, not a product path, and only the
+// SIGTERM case may call it. The policy API refuses throttle, so after create
+// this writes throttle=1 on that one d1-throttled row. xtrabackup then receives
+// --throttle=1 and the full backup stays in flight until the stop lands.
+func (f *d1Fixture) pinSIGTERMThrottle(ctx context.Context, policyID string) {
+	f.t.Helper()
+	if !d1UUID.MatchString(policyID) {
+		f.fatal("refusing to pin throttle on policy id %q", policyID)
+	}
+	statement := `UPDATE policies SET throttle = 1 WHERE id = '` + policyID +
+		`' AND name = 'd1-throttled' RETURNING throttle`
+	out, code := f.execIn(ctx, "postgres", "psql", "-U", "intern", "-d", "intern",
+		"-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", statement)
+	// psql prints the RETURNING value and then the command tag, so only the
+	// first line is the pinned value.
+	pinned := strings.TrimSpace(strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+	if code != 0 || pinned != "1" {
+		f.fatal("the SIGTERM fixture could not pin throttle=1 on %s: exit=%d %s", policyID, code, out)
+	}
 }
 
 // enablePolicy turns one policy on through the API, which runs the policy
@@ -1857,7 +1929,7 @@ func (f *d1Fixture) caseLifecycle(t *testing.T, ctx context.Context) {
 func (f *d1Fixture) volumeNames(ctx context.Context) []string {
 	f.t.Helper()
 	names := f.dockerAllowLines(ctx, "volume", "ls", "--filter", "name="+f.project, "--format", "{{.Name}}")
-	wanted := []string{"intern-metadata", "intern-backups", "intern-work", "mysql-data", "mysql-run"}
+	wanted := []string{"intern-postgres", "intern-metadata", "intern-backups", "intern-work", "mysql-data", "mysql-run"}
 	for _, want := range wanted {
 		found := false
 		for _, name := range names {
@@ -1945,7 +2017,7 @@ func (f *d1Fixture) triggerOn(t *testing.T, policyID, kind, key string) string {
 }
 
 // migrateStatus asks the deployed container itself, so the answer is the
-// migration state of the mounted metadata volume.
+// migration state of the PostgreSQL control plane.
 func (f *d1Fixture) migrateStatus(ctx context.Context) d1Migrate {
 	f.t.Helper()
 	out, code := f.execIn(ctx, "intern", d1WebBinary, "migrate", "status")
@@ -1957,19 +2029,19 @@ func (f *d1Fixture) migrateStatus(ctx context.Context) d1Migrate {
 	return status
 }
 
-// requireMigrationReady proves every migration family in the mounted metadata
-// volume is at its latest version, which is the Ready state the deployment
+// requireMigrationReady proves every migration family in the PostgreSQL control
+// plane is at its latest version, which is the Ready state the deployment
 // contract names.
 func (f *d1Fixture) requireMigrationReady(t *testing.T, status d1Migrate, label string) {
 	t.Helper()
 	if status.PendingMigrations != 0 || status.PhysicalPendingMigrations != 0 || status.ReplicationPending != 0 {
-		f.fatal("after %s the metadata volume still has pending migrations: %+v", label, status)
+		f.fatal("after %s the PostgreSQL control plane still has pending migrations: %+v", label, status)
 	}
 	if status.CurrentVersion != status.LatestVersion || status.InstanceID == "" {
 		f.fatal("after %s the migration state is not Ready: %+v", label, status)
 	}
 	if f.instanceID != "" && f.instanceID != status.InstanceID {
-		f.fatal("after %s the metadata volume is a different instance: %s then %s",
+		f.fatal("after %s the PostgreSQL control plane is a different instance: %s then %s",
 			label, f.instanceID, status.InstanceID)
 	}
 	f.instanceID = status.InstanceID
@@ -2028,13 +2100,13 @@ func (f *d1Fixture) upgradeImage(t *testing.T, ctx context.Context) {
 	f.requireRetained(t, ctx, "upgrade", volumes)
 	f.report(d1KeyUpgrade+"from=%s to=%s source_label=%s previous_label=%s labels_differ=true container=%s",
 		f.candidate, f.upgrade, label, f.source, after)
-	f.report(d1KeyKEKKeep+"preserved volumes=metadata,backups,work instance_id=%s", f.instanceID)
+	f.report(d1KeyKEKKeep+"preserved volumes=postgres,metadata,backups,work instance_id=%s", f.instanceID)
 }
 
 // ------------------------------------------------------------- guardrails (A5)
 
 // caseGuardrails proves the three deployment invariants that a single-owner
-// control plane depends on: one container per metadata volume, a KEK that must
+// control plane depends on: one process per PostgreSQL database, a KEK that must
 // be present and private, and a stop that finishes inside the declared grace
 // period without ever writing a false completed row.
 func (f *d1Fixture) caseGuardrails(t *testing.T, ctx context.Context) {
@@ -2046,16 +2118,15 @@ func (f *d1Fixture) caseGuardrails(t *testing.T, ctx context.Context) {
 	f.requireGracefulStop(t, ctx)
 }
 
-// requireSingleOwner starts a second container of the same service, mounting the
-// same metadata volume, and requires the flock refusal while the deployed one
-// keeps serving.
+// requireSingleOwner uses a different local metadata directory against the same
+// PostgreSQL database and requires the database owner lock to refuse it.
 func (f *d1Fixture) requireSingleOwner(t *testing.T, ctx context.Context) {
 	t.Helper()
-	out, code := f.composeAllow(ctx, "run", "--rm", "intern")
+	out, code := f.composeAllow(ctx, "run", "--rm", "-e", d1Assign("INTERN_METADATA_DIR", d1ProbeMetadata), "intern")
 	if code == 0 {
-		f.fatal("a second container accepted the same metadata volume:\n%s", out)
+		f.fatal("a second container accepted the same PostgreSQL database:\n%s", out)
 	}
-	if !strings.Contains(out, "metadata directory is already in use by another intern process") {
+	if !strings.Contains(out, "PostgreSQL control plane is already owned by another process") {
 		f.fatal("the second container refused for a different reason:\n%s", out)
 	}
 	id := f.waitHealthy(ctx, "intern", 2*time.Minute)
@@ -2065,7 +2136,7 @@ func (f *d1Fixture) requireSingleOwner(t *testing.T, ctx context.Context) {
 	if healthStatus, _, _ := f.apiIssue(http.MethodGet, "/healthz", "", ""); healthStatus != http.StatusOK {
 		f.fatal("the deployed API stopped answering after the refusal")
 	}
-	f.report(d1KeyFlock+"refused flock_text=true exit=%d primary_healthy=true primary_api=200", code)
+	f.report(d1KeyFlock+"refused pg_owner_lock=true different_metadata_dir=true exit=%d primary_healthy=true primary_api=200", code)
 }
 
 // requireKEKRefusals proves the file secret is really the key the deployment
@@ -2073,6 +2144,9 @@ func (f *d1Fixture) requireSingleOwner(t *testing.T, ctx context.Context) {
 // the fixed sentences, and neither leaves the deployed container affected.
 func (f *d1Fixture) requireKEKRefusals(t *testing.T, ctx context.Context) {
 	t.Helper()
+	if out, code := f.execIn(ctx, "postgres", "psql", "-U", "intern", "-d", "intern", "-v", "ON_ERROR_STOP=1", "-c", "CREATE DATABASE d1_refusal"); code != 0 {
+		f.fatal("create isolated PostgreSQL database for KEK refusal probes: %s", out)
+	}
 	missing := f.refuseServe(ctx, d1Assign("INTERN_KEK_FILE", d1AbsentKEK))
 	if !strings.Contains(missing, "cannot read key file") {
 		f.fatal("a missing KEK was not refused with the fixed text:\n%s", missing)
@@ -2094,21 +2168,24 @@ func (f *d1Fixture) requireKEKRefusals(t *testing.T, ctx context.Context) {
 func (f *d1Fixture) refuseServe(ctx context.Context, override string) string {
 	f.t.Helper()
 	out, code := f.composeAllow(ctx, "run", "--rm", "-e", override,
-		"-e", d1Assign("INTERN_METADATA_DIR", d1ProbeMetadata), "intern")
+		"-e", d1Assign("INTERN_METADATA_DIR", d1ProbeMetadata), "-e", d1Assign("INTERN_DATABASE_URL_FILE", "/d1-secrets/intern_probe_database_url"), "intern")
 	if code == 0 {
 		f.fatal("serve accepted an unusable KEK (%s):\n%s", override, out)
 	}
 	return out
 }
 
-// requireGracefulStop is the SIGTERM case. It keeps a real backup in flight with
-// a throttled policy, stops within the declared grace period, and after the
-// restart proves the interrupted run is recorded as interrupted or canceled and
-// never as a completed backup.
+// requireGracefulStop is the SIGTERM case. The policy is created with business
+// fields only; pinSIGTERMThrottle then sets throttle=1 so a real xtrabackup
+// stays in flight. The stop is issued only after that run is observed running,
+// must finish inside the declared grace period, and after the restart the run
+// is failed/backup_failed rather than a completed backup. The evidence lines
+// keep observed_running=true, grace_seconds, stop_seconds and no_false_completed.
 func (f *d1Fixture) requireGracefulStop(t *testing.T, ctx context.Context) {
 	t.Helper()
 	before := f.completedRuns(t)
-	f.slowPolicyID = f.createPolicy(t, "d1-throttled", 1)
+	f.slowPolicyID = f.createPolicy(t, "d1-throttled")
+	f.pinSIGTERMThrottle(ctx, f.slowPolicyID)
 	f.enablePolicy(t, f.slowPolicyID)
 	f.seedRows(t, ctx, 64)
 	// The throttled full copies about 10 MB per second. A few hundred megabytes of

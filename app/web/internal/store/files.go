@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/gofrs/flock"
-
-	"github.com/flyingEirc/Intern/internal/fsutil"
 )
 
 func checkDirectory(dir string) error {
@@ -66,15 +64,4 @@ func lockDirectory(dir string) (*flock.Flock, error) {
 		return nil, errors.Join(errors.New("metadata directory is already in use by another intern process"), lock.Close())
 	}
 	return lock, nil
-}
-
-func prepareDatabaseFile(path string) error {
-	if err := checkFileIfExists(path); err != nil {
-		return err
-	}
-	f, err := fsutil.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	return errors.Join(f.Close(), checkFile(path))
 }

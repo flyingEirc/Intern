@@ -34,11 +34,11 @@ func Version(ctx context.Context, db *sql.DB) (current, latest int64, err error)
 		return 0, latest, nil
 	}
 	var exists bool
-	if err = db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'physical_goose_db_version')").Scan(&exists); err != nil || !exists {
+	if err = db.QueryRowContext(ctx, "SELECT to_regclass('physical_goose_db_version') IS NOT NULL").Scan(&exists); err != nil || !exists {
 		return 0, latest, err
 	}
 	err = db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version_id), 0) FROM physical_goose_db_version v
-WHERE is_applied = 1 AND id = (SELECT MAX(id) FROM physical_goose_db_version WHERE version_id = v.version_id)`).Scan(&current)
+WHERE is_applied AND id = (SELECT MAX(id) FROM physical_goose_db_version WHERE version_id = v.version_id)`).Scan(&current)
 	return current, latest, err
 }
 
@@ -56,7 +56,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	provider, err := goose.NewProvider(goose.DialectSQLite3, db, fsys,
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, fsys,
 		goose.WithDisableGlobalRegistry(true), goose.WithTableName("physical_goose_db_version"))
 	if err != nil {
 		return err

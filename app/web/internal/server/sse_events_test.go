@@ -546,7 +546,7 @@ func TestEventStreamNeverLeaksSecrets(t *testing.T) {
 	// The stored ciphertext must not be echoed either.
 	var ciphertext string
 	if err := h.fixture.database.DB().QueryRowContext(t.Context(),
-		`SELECT COALESCE(group_concat(hex(secret_ciphertext), ''), '') FROM sources`).Scan(&ciphertext); err != nil {
+		`SELECT COALESCE(string_agg(encode(secret_ciphertext, 'hex'), ''), '') FROM sources`).Scan(&ciphertext); err != nil {
 		t.Fatal(err)
 	}
 	if ciphertext != "" && strings.Contains(body, ciphertext) {

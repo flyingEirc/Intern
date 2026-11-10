@@ -43,12 +43,12 @@ var w5ResultMarkers = []string{
 var w5StateMarkers = []string{
 	"links=ftp:3", "rehearsal=true", "risks=no_auto_replace_production,server_uuid_duplicate,pitr_unavailable",
 	"export_path=/export/{restore_id}", "ftp_writes=0",
-	"chain=seq:1,2,3", "replicas_verified=3", "local_payloads=removed", "logs_agree=sqlite",
+	"chain=seq:1,2,3", "replicas_verified=3", "local_payloads=removed", "logs_agree=postgres",
 	"phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing",
 	"admin_only=true", "cross_origin=cross_origin_rejected", "confirm=403,confirmation_failed", "no_row=true",
 	"limiter=429", "retry_after=", "digest_changed=409,plan_changed", "replay_same_id=true",
 	"conflict=409", "audit_atomic=true",
-	"run_blocked_by_restore=true", "restore_blocked_by_run=true", "running_max=1", "sqlite_intervals=disjoint",
+	"run_blocked_by_restore=true", "restore_blocked_by_run=true", "running_max=1", "postgres_intervals=disjoint",
 	"canceled_queued=true", "canceled_running=true", "side_effects=explicit",
 	"sigkill=failed/interrupted", "published_intact=true", "cleanup=exact", "refused=source_unavailable:409",
 	"recovery_repeated=true", "verify_status=passed", "verify_status=not_requested",
@@ -98,6 +98,7 @@ func TestW5NativeContainers(t *testing.T) {
 	require(t, err)
 	digest := sha256.Sum256(data)
 	mysqlImage, pxbImage := candidateImages(t)
+	legacyProgram, candidateProgram := buildMigrationPrograms(t, ctx, root)
 	secrets := distinctSecrets(t, 6)
 	rootPassword, backupPassword := secrets[0], secrets[1]
 	ftpPassword, ftpQuotaPassword := secrets[2], secrets[3]
@@ -126,6 +127,7 @@ func TestW5NativeContainers(t *testing.T) {
 			"INTERN_W5_MYSQLD": "/usr/sbin/mysqld",
 			"HOME":             "/tmp", "TMPDIR": "/tmp",
 		})
+	copyMigrationPrograms(t, ctx, worker, legacyProgram, candidateProgram)
 	workerInfo, err := worker.Inspect(ctx)
 	require(t, err)
 	serverInfo, err := server.Inspect(ctx)
@@ -165,6 +167,7 @@ func TestW5NativeContainers(t *testing.T) {
 	}
 	verifyW5HarnessEvidence(t, started, len(restores), mysqlImage)
 	t.Logf("W5-A6 exports_started=%d snapshots_match=true new_mysql=%s", started, mysqlImage)
+	verifyMigrationExports(t, ctx, text, mysqlImage, rootPassword, exportVolume)
 }
 
 // startW5Worker builds the W5 worker from the P4 restore image: the pinned MySQL
@@ -177,6 +180,7 @@ func startW5Worker(t *testing.T, ctx context.Context, root string, nw *tc.Docker
 	uid, gid int, env map[string]string,
 ) tc.Container {
 	t.Helper()
+	env = workerPostgres(t, ctx, nw, env)
 	mounts = append(mounts, tc.VolumeMount(exportVolume, "/export"))
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		FromDockerfile: restoreImage.build(t, root, "amd64", map[string]string{"MYSQL_IMAGE": mysqlImage, "PXB_IMAGE": pxbImage}),

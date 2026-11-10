@@ -47,8 +47,8 @@ export function PolicyFormPage() {
         title={editing ? `编辑策略：${editing.name}` : "新建策略"}
         description={
           editing
-            ? "已启用策略保存时会重新预检；预检失败则保留原设置与原启用状态。"
-            : "选择数据源、本地仓库与可选 FTP 副本；启用前会运行真实预检。"
+            ? "更新保护安排，启用中的策略会检查连接与备份环境。"
+            : "选择保护目标并安排自动备份。"
         }
       />
       <PolicyForm policy={editing} />

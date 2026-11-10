@@ -145,38 +145,26 @@ func runLogFromRow(row storesql.RunLog) RunLog {
 	}
 }
 
-func decodeRunLogData(value any) any {
-	if value == nil {
-		return nil
-	}
-	var raw []byte
-	switch typed := value.(type) {
-	case string:
-		raw = []byte(typed)
-	case []byte:
-		raw = typed
-	default:
-		return nil
-	}
-	if len(raw) == 0 {
+func decodeRunLogData(value sql.NullString) any {
+	if !value.Valid || value.String == "" {
 		return nil
 	}
 	var data any
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := json.Unmarshal([]byte(value.String), &data); err != nil {
 		return nil
 	}
 	return data
 }
 
-func encodeRunLogData(data any) any {
+func encodeRunLogData(data any) sql.NullString {
 	if data == nil {
-		return nil
+		return sql.NullString{}
 	}
 	encoded, err := json.Marshal(data)
 	if err != nil {
-		return nil
+		return sql.NullString{}
 	}
-	return string(encoded)
+	return sql.NullString{String: string(encoded), Valid: true}
 }
 
 // DB exposes the single control-plane connection so the dispatcher, the
@@ -509,7 +497,7 @@ func truncateRunLog(ctx context.Context, q *storesql.Queries, runID, event strin
 	}
 	_, err = q.ReplaceRunLog(ctx, storesql.ReplaceRunLogParams{
 		RunID: runID, Seq: MaxRunLogRows, Ts: timestamp(), Level: "warn", Event: TruncatedEvent,
-		Message: "run log reached its cap; later events were dropped", Data: nil,
+		Message: "run log reached its cap; later events were dropped", Data: sql.NullString{},
 	})
 	return err
 }
@@ -574,12 +562,12 @@ func (s *Store) ChainPredecessorsForPair(ctx context.Context, backupID, localRep
 SELECT b.id
 FROM backups b
 JOIN runs producer ON producer.backup_id = b.id
-WHERE b.chain_id = (SELECT chain_id FROM backups WHERE id = ?1)
-  AND b.seq < (SELECT seq FROM backups WHERE id = ?1)
+WHERE b.chain_id = (SELECT chain_id FROM backups WHERE id = $1)
+  AND b.seq < (SELECT seq FROM backups WHERE id = $1)
   AND b.status = 'completed' AND b.local_present = 1
-  AND producer.local_repository_id = ?2
+  AND producer.local_repository_id = $2
   AND NOT EXISTS (
-      SELECT 1 FROM replicas r WHERE r.backup_id = b.id AND r.repository_id = ?3
+      SELECT 1 FROM replicas r WHERE r.backup_id = b.id AND r.repository_id = $3
   )
 ORDER BY b.seq`, backupID, localRepositoryID, replicaRepositoryID)
 	if err != nil {
@@ -613,7 +601,7 @@ ORDER BY b.seq`, backupID, localRepositoryID, replicaRepositoryID)
 func (s *Store) ReplicaLocalRepository(ctx context.Context, backupID, replicaRepositoryID string) (string, error) {
 	var localID string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT local_repository_id FROM replicas WHERE backup_id = ? AND repository_id = ?`,
+		`SELECT local_repository_id FROM replicas WHERE backup_id = $1 AND repository_id = $2`,
 		backupID, replicaRepositoryID).Scan(&localID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
@@ -645,7 +633,7 @@ func (s *Store) ReplicaLocalRepository(ctx context.Context, backupID, replicaRep
 func (s *Store) ReplicaLocalRepositories(ctx context.Context, backupID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT local_repository_id FROM replicas
-WHERE backup_id = ? AND local_repository_id <> '' ORDER BY local_repository_id`, backupID)
+WHERE backup_id = $1 AND local_repository_id <> '' ORDER BY local_repository_id`, backupID)
 	if err != nil {
 		return nil, err
 	}
@@ -737,7 +725,7 @@ func (s *Store) RunLog(ctx context.Context, runID string, seq int64) (RunLog, er
 // in ascending order. after = 0 replays from the first event.
 func (s *Store) RunLogsAfter(ctx context.Context, runID string, after, limit int64) ([]RunLog, error) {
 	rows, err := storesql.New(s.db).RunLogsAfter(ctx, storesql.RunLogsAfterParams{
-		RunID: runID, Seq: after, Limit: limit,
+		RunID: runID, Seq: after, RowLimit: limit,
 	})
 	if err != nil {
 		return nil, err

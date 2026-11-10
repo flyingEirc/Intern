@@ -29,6 +29,8 @@ Intern 是一个正在开发的数据库备份与恢复工具，帮助你建立�
 | 隔离恢复、导出与演练 | 只读恢复计划 + `plan_digest` 与管理员密码二次确认执行、按链 prepare、导出到宿主机目录并由新 MySQL 8.4.11 容器启动核对独立快照（含**仅从 FTP 副本**分别恢复增量 1 与增量 2）；拒绝全部发生在 prepare 与写导出之前；取消、SIGKILL 与 ENOSPC 精确回收；备份与恢复全局互斥。 |
 | Web 界面 | Next.js 静态导出由 `webui` 构建的 `intern-web` 同源提供，页面只调用同一组 `/api/v1`，服务端逐请求鉴权：登录与改密、仓库/数据源/策略与预检、调度预览/运行/实时日志/取消与副本队列、备份链与本地/异地保护点、恢复向导（管理员二次确认、演练、终态副作用）、用户与审计（仅 admin）。原生 linux/amd64 runner 上以真实 MySQL 8.4.11 + PXB 8.4.0-7 + Pure-FTPd 1.0.54 经界面完成备份 → 复制 → 恢复 → 演练（[run 42550256352](https://github.com/flyingEirc/Intern/actions/runs/42550256352)）。 |
 
+**下一阶段（工作区已实现，待独立验收）**：Web 控制面已切到 PostgreSQL，覆盖用户、策略、运行、物理链、副本与恢复索引；备份载荷、工作文件与 KEK 仍独立保存。首次管理员改为浏览器 setup，业务策略以目标、数据源、存储与时间安排为主，低层调优值由服务端统一默认。旧 SQLite 可一次性受控升级。针对性 race 已有证据，但完整检查、原生部署、真实链满/owner-loss 与 CI 尚未完成，当前不能宣布下一阶段通过。
+
 Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。阶段 D 的证据覆盖上述组件组合本身，**版本矩阵仍是 `candidate`（`verified: false`）**，不外推到所有版本、平台或生产环境；阶段 E 的镜像与 Compose 部署（D1 [#41](https://github.com/flyingEirc/Intern/issues/41)）、FTPS（S2 [#42](https://github.com/flyingEirc/Intern/issues/42)）与候选制品/契约门禁（G [#44](https://github.com/flyingEirc/Intern/issues/44)）已在候选 `9489f6c` 的 [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449) 原生验收（14 个 job 全绿）。V1 内网实测（[#43](https://github.com/flyingEirc/Intern/issues/43)）于 2026-11-05 取消，FTP/FTPS 改由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI 以固定 Pure-FTPd 1.0.54 夹具覆盖；截至 2026-11-05 最近一次整套 main 运行为 merge `7355766` 的 [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492)（14/14 job 全绿），非夹具服务器无证据。
 
 ## 目录与当前路线
@@ -40,7 +42,7 @@ Web 阶段的候选提交、流水线与限制见 [总路线第 5 节](docs/road
 | `app/site/` | 产品站点目录，后续独立安排。 |
 | `internal/` | 各应用共享的备份恢复、制品、密钥、元数据和调度能力。 |
 
-总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。`mise run build` 同时构建 CLI 与 Web 后端；Web 的部署、首次管理员、TLS、KEK、备份与恢复操作、升级与排障见 [运维使用说明](docs/guide/operations.md)，开发命令见 [开发入口](docs/guide/development.md#常用开发入口)，接口定义见 [OpenAPI 契约](app/web/api/openapi.yaml)。以下备份恢复示例仍用于现有 CLI 基线；Web 的操作在界面或经 `/api/v1` 完成，两者调用同一组接口。
+总路线与阶段验收见 [Web 优先与多应用架构](docs/roadmap/Web优先与多应用架构-2026-10-17.md)。`mise run build` 同时构建 CLI 与 Web 后端；Web 的部署、浏览器首次管理员、TLS、KEK、备份与恢复操作、升级与排障见 [运维使用说明](docs/guide/operations.md)，开发命令见 [开发入口](docs/guide/development.md#常用开发入口)，接口定义见 [OpenAPI 契约](app/web/api/openapi.yaml)。日常首管只走浏览器 setup；`intern-web user create-admin` 已删除，`app/cli` 逻辑备份兼容不受影响。PG 与界面实现待独立验收（见[总路线第 3.2 节](docs/roadmap/Web优先与多应用架构-2026-10-17.md)）。以下备份恢复示例仍用于现有 CLI 基线；Web 的操作在界面或经 `/api/v1` 完成，两者调用同一组接口。
 
 ## 从源码开始
 

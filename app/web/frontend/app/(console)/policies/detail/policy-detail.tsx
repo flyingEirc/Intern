@@ -51,6 +51,7 @@ import {
   useRepositoryChoices,
   useSourceChoices,
 } from "@/lib/resources/queries";
+import { readableSchedule } from "@/lib/resources/schedule";
 import { PolicySchedule } from "./policy-schedule";
 
 export function PolicyDetail() {
@@ -113,7 +114,7 @@ export function PolicyDetail() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title={data.name}
-        description="策略配置、启用状态与最近一次预检；启用前会运行真实预检。"
+        description="查看保护安排、启用状态与备份环境检查结果。"
       >
         {canManage ? (
           <>
@@ -212,7 +213,7 @@ export function PolicyDetail() {
             <CircleAlertIcon />
             <AlertTitle>启用失败：预检未通过</AlertTitle>
             <AlertDescription>
-              策略保持未启用，服务端没有写入启用状态。
+              连接与备份环境检查未通过，策略保持未启用。
             </AlertDescription>
           </Alert>
           <PreflightResultView result={enablePreflight} title="启用预检结果" />
@@ -250,7 +251,7 @@ export function PolicyDetail() {
               {data.enabled ? "已启用" : "未启用"}
             </Badge>
           </CardTitle>
-          <CardDescription>策略 {data.id}</CardDescription>
+          <CardDescription>保护目标、存储与时间安排</CardDescription>
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
@@ -258,24 +259,14 @@ export function PolicyDetail() {
             <dd>{sourceName}</dd>
             <dt className="text-muted-foreground">本地仓库</dt>
             <dd>{repositoryName(data.local_repository_id)}</dd>
-            <dt className="text-muted-foreground">副本仓库</dt>
+            <dt className="text-muted-foreground">异地副本</dt>
             <dd>{repositoryName(data.replica_repository_id)}</dd>
-            <dt className="text-muted-foreground">全量 cron</dt>
-            <dd className="font-mono">{data.full_cron}</dd>
-            <dt className="text-muted-foreground">增量 cron</dt>
-            <dd className="font-mono">{data.incremental_cron}</dd>
+            <dt className="text-muted-foreground">全量保护</dt>
+            <dd>{readableSchedule("full", data.full_cron)}</dd>
+            <dt className="text-muted-foreground">增量保护</dt>
+            <dd>{readableSchedule("incremental", data.incremental_cron)}</dd>
             <dt className="text-muted-foreground">时区</dt>
-            <dd className="font-mono">{data.timezone}</dd>
-            <dt className="text-muted-foreground">最大链长</dt>
-            <dd>{data.max_chain_length}</dd>
-            <dt className="text-muted-foreground">并行度</dt>
-            <dd>{data.parallel}</dd>
-            <dt className="text-muted-foreground">限速</dt>
-            <dd>{data.throttle} 字节/秒</dd>
-            <dt className="text-muted-foreground">zstd 级别</dt>
-            <dd>{data.zstd_level}</dd>
-            <dt className="text-muted-foreground">page tracking</dt>
-            <dd>{data.page_tracking ? "启用" : "关闭"}</dd>
+            <dd>{data.timezone}</dd>
             <dt className="text-muted-foreground">创建时间</dt>
             <dd>{formatDateTime(data.created_at)}</dd>
             <dt className="text-muted-foreground">更新时间</dt>

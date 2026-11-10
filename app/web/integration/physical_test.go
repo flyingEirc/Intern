@@ -26,6 +26,7 @@ import (
 	tc "github.com/testcontainers/testcontainers-go"
 	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
+	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/flyingEirc/Intern/internal/physical"
@@ -105,9 +106,18 @@ func TestP2NativeContainers(t *testing.T) {
 	require(t, err)
 	loginTools := startLoginToolCarrier(t, ctx, root, mysqlImage, mounts, uid, gid)
 	installPoisonedLoginFile(t, ctx, loginTools, uid)
+	nw, err := network.New(ctx)
+	require(t, err)
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		require(t, nw.Remove(cleanup))
+	})
+	pgEnv := workerPostgres(t, ctx, nw, map[string]string{"INTERN_P2_PASSWORD": backupPassword, "INTERN_P2_DENIED_PASSWORD": deniedPassword, "INTERN_P3_FULL_DISK": "/p3-full", "HOME": poisonedLoginHome, "TMPDIR": "/tmp"})
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: pxbImage, ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"}, Mounts: mounts,
-		Env: map[string]string{"INTERN_P2_PASSWORD": backupPassword, "INTERN_P2_DENIED_PASSWORD": deniedPassword, "INTERN_P3_FULL_DISK": "/p3-full", "HOME": poisonedLoginHome, "TMPDIR": "/tmp"}, Files: []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/physical-worker.test", FileMode: 0o755}},
+		Networks: []string{nw.Name}, Env: pgEnv,
+		Files:          []tc.ContainerFile{{HostFilePath: binary, ContainerFilePath: "/tmp/physical-worker.test", FileMode: 0o755}},
 		Tmpfs:          map[string]string{"/p3-full": fmt.Sprintf("rw,size=1048576,mode=0700,uid=%d,gid=%d", uid, gid)},
 		ConfigModifier: func(config *container.Config) { config.User = fmt.Sprintf("%d:%d", uid, gid) },
 		WaitingFor:     wait.ForExec([]string{"/usr/bin/test", "-x", "/tmp/physical-worker.test"}).WithStartupTimeout(30 * time.Second),
@@ -161,6 +171,9 @@ func execExec(t *testing.T, ctx context.Context, c tc.Container, user string, ar
 func withholdSecrets(t *testing.T, output []byte, secrets ...string) string {
 	t.Helper()
 	text := string(output)
+	if postgresURLPresent(text) {
+		t.Fatal("withheld container output containing a PostgreSQL connection URL")
+	}
 	for _, secret := range secrets {
 		if secret != "" && strings.Contains(text, secret) {
 			t.Fatal("container diagnostic contained a credential; output withheld")

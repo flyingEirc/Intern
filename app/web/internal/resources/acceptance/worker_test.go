@@ -5,9 +5,7 @@ package acceptance
 import (
 	"bytes"
 	"database/sql"
-	"errors"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,11 +83,6 @@ type policyWrite struct {
 	FullCron            string  `json:"full_cron"`
 	IncrementalCron     string  `json:"incremental_cron"`
 	Timezone            string  `json:"timezone"`
-	MaxChainLength      int64   `json:"max_chain_length"`
-	Parallel            int64   `json:"parallel"`
-	Throttle            int64   `json:"throttle"`
-	ZstdLevel           int64   `json:"zstd_level"`
-	PageTracking        bool    `json:"page_tracking"`
 	Enabled             bool    `json:"enabled"`
 }
 
@@ -205,7 +198,7 @@ func (f *fixture) passPolicy(t *testing.T, persisted store.Source) {
 	policy := f.createPolicy(t, policyWrite{
 		Name: "w3-policy", SourceID: f.source.ID, LocalRepositoryID: f.local.ID,
 		ReplicaRepositoryID: &f.replica.ID, FullCron: "0 2 * * *", IncrementalCron: "0 * * * *",
-		Timezone: "UTC", MaxChainLength: 3, Parallel: 2, Throttle: 0, ZstdLevel: 3,
+		Timezone: "UTC",
 	})
 	if policy.Enabled || policy.LastPreflight != nil {
 		t.Fatalf("new policy = %+v", policy)
@@ -230,7 +223,7 @@ func (f *fixture) atomicEnable(t *testing.T) {
 	policy := f.createPolicy(t, policyWrite{
 		Name: "w3-atomic", SourceID: f.source.ID, LocalRepositoryID: f.local.ID,
 		ReplicaRepositoryID: &f.replica.ID, FullCron: "0 3 * * *", IncrementalCron: "15 * * * *",
-		Timezone: "UTC", MaxChainLength: 2, Parallel: 1, Throttle: 0, ZstdLevel: 1,
+		Timezone: "UTC",
 	})
 	f.setSuccessAuditAbort(t, "policies.enable")
 	aborted := f.operator.requestWithID(t, http.MethodPost, "/api/v1/policies/"+policy.ID+"/enable", "", "w3-atomic-abort", 0)
@@ -410,7 +403,6 @@ func (f *fixture) refusalPolicy(name, sourceID string, replica *string) policyWr
 	return policyWrite{
 		Name: name, SourceID: sourceID, LocalRepositoryID: f.local.ID, ReplicaRepositoryID: replica,
 		FullCron: "0 1 * * *", IncrementalCron: "45 * * * *", Timezone: "UTC",
-		MaxChainLength: 2, Parallel: 1, Throttle: 0, ZstdLevel: 2,
 	}
 }
 
@@ -435,7 +427,7 @@ func (f *fixture) enable(t *testing.T, c *client, policyID, requestID string) st
 }
 
 // refuse enables one policy that the preflight must refuse, then reads the
-// refusal back through the API, SQLite and the audit table.
+// refusal back through the API, PostgreSQL and the audit table.
 func (f *fixture) refuse(t *testing.T, c *client, policyID, wantCode, requestID, wantCheck string) {
 	t.Helper()
 	refused := c.requestWithID(t, http.MethodPost, "/api/v1/policies/"+policyID+"/enable", "", requestID, http.StatusConflict)
@@ -477,7 +469,7 @@ func failureCheck(code string) string {
 }
 
 // requireRefusalState reads the refusal back: enabled stays 0, no preflight
-// record is stored, and the API agrees with SQLite.
+// record is stored, and the API agrees with PostgreSQL.
 func (f *fixture) requireRefusalState(t *testing.T, policyID string) {
 	t.Helper()
 	f.requireEnabledRow(t, policyID, 0)
@@ -540,7 +532,7 @@ func (f *fixture) enableAudit(t *testing.T, requestID string) auditEntryRow {
 	var row auditEntryRow
 	var resource sql.NullString
 	query := `SELECT COALESCE(status, 0), result, resource_id FROM audit_logs
-WHERE action = 'policies.enable' AND request_id = ? ORDER BY id DESC LIMIT 1`
+WHERE action = 'policies.enable' AND request_id = $1 ORDER BY id DESC LIMIT 1`
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		err := f.analysis.QueryRowContext(t.Context(), query, requestID).Scan(&row.status, &row.result, &resource)
@@ -564,7 +556,7 @@ func (f *fixture) requireFailureAudit(t *testing.T, requestID string) {
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		var count int
-		query := `SELECT COUNT(*) FROM audit_logs WHERE action = 'policies.enable' AND request_id = ? AND result = 'failed'`
+		query := `SELECT COUNT(*) FROM audit_logs WHERE action = 'policies.enable' AND request_id = $1 AND result = 'failed'`
 		if err := f.analysis.QueryRowContext(t.Context(), query, requestID).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
@@ -584,7 +576,7 @@ func (f *fixture) requireFailureAudit(t *testing.T, requestID string) {
 func (f *fixture) audit(t *testing.T, action, result string) int {
 	t.Helper()
 	var count int
-	query := `SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ?`
+	query := `SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND result = $2`
 	if err := f.analysis.QueryRowContext(t.Context(), query, action, result).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +586,7 @@ func (f *fixture) audit(t *testing.T, action, result string) int {
 func (f *fixture) auditDetails(t *testing.T, action, resourceID string) string {
 	t.Helper()
 	var detail sql.NullString
-	query := `SELECT detail_json FROM audit_logs WHERE action = ? AND resource_id = ? ORDER BY id DESC LIMIT 1`
+	query := `SELECT detail_json FROM audit_logs WHERE action = $1 AND resource_id = $2 ORDER BY id DESC LIMIT 1`
 	if err := f.analysis.QueryRowContext(t.Context(), query, action, resourceID).Scan(&detail); err != nil {
 		t.Fatal(err)
 	}
@@ -604,18 +596,18 @@ func (f *fixture) auditDetails(t *testing.T, action, resourceID string) string {
 func (f *fixture) auditText(t *testing.T) string {
 	t.Helper()
 	var text string
-	query := `SELECT COALESCE(group_concat(action || resource_type || resource_id || detail_json, ''), '') FROM audit_logs`
+	query := `SELECT COALESCE(string_agg(action || resource_type || resource_id || detail_json, ''), '') FROM audit_logs`
 	if err := f.analysis.QueryRowContext(t.Context(), query).Scan(&text); err != nil {
 		t.Fatal(err)
 	}
 	return text
 }
 
-// requireEnabledRow reads the persisted enable flag straight from SQLite.
+// requireEnabledRow reads the persisted enable flag straight from PostgreSQL.
 func (f *fixture) requireEnabledRow(t *testing.T, id string, want int) {
 	t.Helper()
 	var enabled int
-	if err := f.analysis.QueryRowContext(t.Context(), `SELECT enabled FROM policies WHERE id = ?`, id).Scan(&enabled); err != nil {
+	if err := f.analysis.QueryRowContext(t.Context(), `SELECT enabled FROM policies WHERE id = $1`, id).Scan(&enabled); err != nil {
 		t.Fatal(err)
 	}
 	if enabled != want {
@@ -626,7 +618,7 @@ func (f *fixture) requireEnabledRow(t *testing.T, id string, want int) {
 func (f *fixture) storedPreflight(t *testing.T, table, id string) string {
 	t.Helper()
 	var stored sql.NullString
-	query := `SELECT last_preflight_json FROM ` + table + ` WHERE id = ?`
+	query := `SELECT last_preflight_json FROM ` + table + ` WHERE id = $1`
 	if err := f.analysis.QueryRowContext(t.Context(), query, id).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +628,7 @@ func (f *fixture) storedPreflight(t *testing.T, table, id string) string {
 func (f *fixture) storedCiphertext(t *testing.T, table, id string) []byte {
 	t.Helper()
 	var ciphertext []byte
-	query := `SELECT secret_ciphertext FROM ` + table + ` WHERE id = ?`
+	query := `SELECT secret_ciphertext FROM ` + table + ` WHERE id = $1`
 	if err := f.analysis.QueryRowContext(t.Context(), query, id).Scan(&ciphertext); err != nil {
 		t.Fatal(err)
 	}
@@ -647,25 +639,33 @@ func (f *fixture) storedCiphertext(t *testing.T, table, id string) []byte {
 func (f *fixture) byName(t *testing.T, table, name string) string {
 	t.Helper()
 	var id string
-	if err := f.analysis.QueryRowContext(t.Context(), `SELECT id FROM `+table+` WHERE name = ?`, name).Scan(&id); err != nil {
+	if err := f.analysis.QueryRowContext(t.Context(), `SELECT id FROM `+table+` WHERE name = $1`, name).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id
 }
 
-// databaseBytes reads the database and its WAL, which is where a leaked
-// plaintext would persist.
+// databaseBytes scans every persisted resource, user, policy and audit column,
+// plus raw bytea values so an unsealed credential cannot hide as hex JSON.
 func (f *fixture) databaseBytes(t *testing.T) string {
 	t.Helper()
+	query := `SELECT to_jsonb(r)::text, secret_ciphertext FROM repositories r
+	UNION ALL SELECT to_jsonb(s)::text, secret_ciphertext FROM sources s
+	UNION ALL SELECT to_jsonb(a)::text, NULL::bytea FROM audit_logs a
+	UNION ALL SELECT to_jsonb(u)::text, NULL::bytea FROM users u
+	UNION ALL SELECT to_jsonb(p)::text, NULL::bytea FROM policies p`
+	rows, err := f.analysis.QueryContext(t.Context(), query)
+	must(t, err)
+	defer func() { must(t, rows.Close()) }()
 	var combined bytes.Buffer
-	for _, name := range []string{"intern.db", "intern.db-wal"} {
-		data, err := os.ReadFile(filepath.Join(f.layout.metadata, name))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		must(t, err)
-		combined.Write(data)
+	for rows.Next() {
+		var text string
+		var raw []byte
+		must(t, rows.Scan(&text, &raw))
+		combined.WriteString(text)
+		combined.Write(raw)
 	}
+	must(t, rows.Err())
 	if combined.Len() == 0 {
 		t.Fatal("the control-plane database is empty")
 	}
@@ -676,16 +676,24 @@ func (f *fixture) databaseBytes(t *testing.T) string {
 // audit, which is the only way to observe the transaction boundary from outside.
 func (f *fixture) setSuccessAuditAbort(t *testing.T, action string) {
 	t.Helper()
-	if _, err := f.analysis.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS abort_success_audit`); err != nil {
+	if strings.ContainsAny(action, "'\\") {
+		t.Fatal("unsafe audit trigger action")
+	}
+	if _, err := f.analysis.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS abort_success_audit ON audit_logs`); err != nil {
 		t.Fatal(err)
 	}
 	if action == "" {
 		return
 	}
-	query := `CREATE TRIGGER abort_success_audit BEFORE INSERT ON audit_logs
-WHEN NEW.result = 'success' AND NEW.action = '` + action + `'
-BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`
-	if _, err := f.analysis.ExecContext(t.Context(), query); err != nil {
+	function := `CREATE OR REPLACE FUNCTION abort_success_audit_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN RAISE EXCEPTION 'injected audit failure'; END $$`
+	if _, err := f.analysis.ExecContext(t.Context(), function); err != nil {
+		t.Fatal(err)
+	}
+	trigger := `CREATE TRIGGER abort_success_audit BEFORE INSERT ON audit_logs
+	FOR EACH ROW WHEN (NEW.result = 'success' AND NEW.action = '` + action + `')
+	EXECUTE FUNCTION abort_success_audit_fn()`
+	if _, err := f.analysis.ExecContext(t.Context(), trigger); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -24,6 +24,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { isUnauthorized } from "@/lib/api/errors";
 import {
   currentSessionOptions,
+  getSetupOptions,
   loginMutation,
 } from "@/lib/api/generated/@tanstack/react-query.gen";
 import { describeError } from "@/lib/api/messages";
@@ -59,6 +60,16 @@ export function LoginForm() {
       router.replace(next);
     }
   }, [session.data, router, next]);
+  const setup = useQuery({
+    ...getSetupOptions(),
+    retry: false,
+    meta: { handlesUnauthorized: true },
+  });
+  useEffect(() => {
+    if (setup.data?.required) {
+      router.replace("/setup");
+    }
+  }, [setup.data, router]);
 
   const login = useMutation({
     ...loginMutation(),

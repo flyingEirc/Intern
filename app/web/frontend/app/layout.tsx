@@ -4,8 +4,8 @@ import { Providers } from "@/components/providers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: { default: "Intern", template: "%s · Intern" },
-  description: "Intern 数据库备份与恢复控制台",
+  title: { default: "Intern 数据保护控制台", template: "%s · Intern" },
+  description: "Intern 数据保护控制台：保护策略、备份仓库、运行与恢复",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -20,7 +20,7 @@ export function Providers({ children }: { children: ReactNode }) {
   // reaches the handler, and only the first one still knows whether a session
   // had been loaded before the cache is cleared.
   useEffect(() => {
-    if (pathname === "/login") {
+    if (pathname === "/login" || pathname === "/setup") {
       redirecting.current = false;
     }
   }, [pathname]);
@@ -41,7 +41,10 @@ export function Providers({ children }: { children: ReactNode }) {
 
   const [queryClient] = useState(() => {
     const client = createQueryClient(() => {
-      if (redirecting.current || window.location.pathname === "/login") {
+      const publicPath =
+        window.location.pathname === "/login" ||
+        window.location.pathname === "/setup";
+      if (redirecting.current || publicPath) {
         return;
       }
       redirecting.current = true;

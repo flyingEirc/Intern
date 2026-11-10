@@ -10,12 +10,20 @@
 // On an arm64 Mac the stack runs under amd64 emulation: development evidence
 // only; binding acceptance is native linux/amd64.
 
+import path from "node:path";
 import { z } from "zod";
 import {
   zErrorResponse,
+  zGetPolicyResponse,
+  zPolicySchedule,
   zPreflightResult,
   zSource,
 } from "../lib/api/generated/zod.gen";
+import {
+  checkLabel,
+  preflightCheckLabel,
+  preflightUnknownCheckLabel,
+} from "../lib/resources/preflight";
 import {
   apiLogin,
   Browser,
@@ -30,6 +38,43 @@ import { startStack } from "./stack";
 
 const run = runContext("f2");
 const b = new Browser(`intern-f2-e2e-${process.pid}`, run.evidence, run.headed);
+
+// Match the journey's keyboard selection against the actual rendered options.
+function choose(label: string, option: string): void {
+  const id = JSON.parse(
+    b.ab(
+      "eval",
+      `Array.from(document.querySelectorAll('label')).find((element) => element.textContent.trim() === ${JSON.stringify(label)})?.htmlFor`,
+    ),
+  ) as string;
+  expect(Boolean(id), `missing control label ${label}`);
+  b.ab("focus", `#${id}`);
+  b.ab("press", "Space");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'true'`,
+  );
+  const popupId = b.ab("get", "attr", `#${id}`, "aria-controls");
+  const popup = `[id=${JSON.stringify(popupId)}]`;
+  b.ab("wait", `${popup} [role="option"]`);
+  const labels = JSON.parse(
+    b.ab(
+      "eval",
+      `Array.from(document.querySelectorAll(${JSON.stringify(`${popup} [role="option"]`)}), (element) => element.textContent.trim())`,
+    ),
+  ) as string[];
+  const index = labels.indexOf(option);
+  expect(index >= 0, `missing option ${option}`);
+  b.ab("press", "Home");
+  for (let cursor = 0; cursor < index; cursor += 1) b.ab("press", "ArrowDown");
+  b.ab("press", "Enter");
+  b.ab(
+    "wait",
+    "--fn",
+    `document.getElementById(${JSON.stringify(id)})?.getAttribute('aria-expanded') === 'false' && (document.getElementById(${JSON.stringify(popupId)})?.getBoundingClientRect().height ?? 0) === 0`,
+  );
+}
 
 async function main(): Promise<void> {
   const stack = await startStack(
@@ -70,7 +115,7 @@ async function main(): Promise<void> {
     b.fill("用户名", stack.admin.username);
     b.fill("密码", stack.admin.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
 
     b.open(`${stack.origin}/repositories/new`);
     b.ab("wait", "--text", "新建仓库");
@@ -157,8 +202,8 @@ async function main(): Promise<void> {
     b.open(`${stack.origin}/sources/new`);
     b.ab("wait", "--text", "新建数据源");
     b.fill("名称", "f2-source");
-    b.fill("Socket", stack.mysql.socket);
-    b.fill("Datadir", stack.mysql.datadir);
+    b.fill("连接路径（Unix socket）", stack.mysql.socket);
+    b.fill("数据目录", stack.mysql.datadir);
     b.fill("用户名", stack.mysql.username);
     b.fill("密码", stack.mysql.password);
     b.click("创建数据源");
@@ -182,7 +227,7 @@ async function main(): Promise<void> {
     b.ab("wait", "--text", "本次预检结果");
     b.ab("wait", "--text", "检查项");
     const preflightText = b.text();
-    for (const check of [
+    for (const code of [
       "identity",
       "compatibility",
       "volume",
@@ -190,9 +235,10 @@ async function main(): Promise<void> {
       "privileges",
       "capacity",
     ]) {
+      const label = checkLabel(code);
       expect(
-        preflightText.includes(check),
-        `preflight output lacks the ${check} check`,
+        label !== preflightUnknownCheckLabel && preflightText.includes(label),
+        `preflight output lacks the ${code} check (${label})`,
       );
     }
     expect(
@@ -209,7 +255,7 @@ async function main(): Promise<void> {
 
     b.open(`${stack.origin}/sources/detail?id=${source.id}`);
     b.ab("wait", "--text", "编辑");
-    b.click("编辑");
+    b.click("编辑", "link");
     b.ab("wait", "--text", "保存修改");
     const passwordValue = b.ab("get", "attr", "#source-password", "value");
     expect(
@@ -281,23 +327,33 @@ async function main(): Promise<void> {
     b.click("运行预检");
     b.ab("wait", "--text", "本次预检结果");
     b.ab("wait", "--text", "未通过");
-    // The page must render what the backend reported: the failing check or
-    // error code, not just a generic failure.
-    const failing = [
-      failedResult.error?.check,
-      failedResult.error?.code,
-    ].filter(
-      (value): value is string => typeof value === "string" && value !== "",
-    );
-    const failureText = b.text();
+    // The main view names the failing check in business words; machine codes
+    // stay in the diagnostics fold. A code the table lacks keeps the generic
+    // name, so there the raw code must still be reachable after expanding it.
+    const failure = failedResult.error;
     expect(
-      failing.length > 0,
+      failure !== undefined,
       `the backend reported no failing check: ${JSON.stringify(failedResult)}`,
     );
-    for (const name of failing) {
+    const failureText = b.text();
+    const failingCheck = failure?.check ?? "";
+    if (preflightCheckLabel[failingCheck] !== undefined) {
+      const label = checkLabel(failingCheck);
       expect(
-        failureText.includes(name),
-        `the page does not show the failing check ${name}; backend ${JSON.stringify(failedResult)}; page: ${failureText.slice(0, 1200)}`,
+        failureText.includes(label),
+        `the page does not show the failing check ${failingCheck} as ${label}; backend ${JSON.stringify(failedResult)}; page: ${failureText.slice(0, 1200)}`,
+      );
+    } else {
+      b.click("预检诊断");
+      const expanded = b.text();
+      expect(
+        failingCheck !== "" && expanded.includes(failingCheck),
+        `the page does not show the unknown failing check ${failingCheck}; backend ${JSON.stringify(failedResult)}; page: ${expanded.slice(0, 1200)}`,
+      );
+      const failingCode = failure?.code ?? "";
+      expect(
+        failingCode !== "" && expanded.includes(failingCode),
+        `the page does not show the unknown failure code ${failingCode}; backend ${JSON.stringify(failedResult)}; page: ${expanded.slice(0, 1200)}`,
       );
     }
     b.record({
@@ -318,11 +374,6 @@ async function main(): Promise<void> {
       full_cron: "0 2 * * *",
       incremental_cron: "0 * * * *",
       timezone: "Asia/Shanghai",
-      max_chain_length: 7,
-      parallel: 1,
-      throttle: 0,
-      zstd_level: 3,
-      page_tracking: false,
       enabled: false,
     };
     const badPolicy = await api(
@@ -372,12 +423,13 @@ async function main(): Promise<void> {
     expect(enabled.status === 200, `enable good policy = ${enabled.status}`);
     b.open(`${stack.origin}/policies/detail?id=${goodPolicyId}`);
     b.ab("wait", "--text", "已启用");
-    b.click("编辑");
+    b.click("编辑", "link");
     b.ab("wait", "--text", "保存修改");
     b.ab("find", "role", "combobox", "click", "--name", "数据源");
     b.ab("wait", "--text", "f2-bad-source");
     b.ab("find", "role", "option", "click", "--name", "f2-bad-source");
-    b.fill("全量 cron", "5 3 * * *");
+    b.click("自定义全量");
+    b.fill("全量安排", "5 3 * * *");
     b.click("保存修改");
     b.ab("wait", "--text", "保存被预检拒绝");
     const afterFailedUpdate = await api(
@@ -404,12 +456,350 @@ async function main(): Promise<void> {
       screenshot: b.shot("07-update-refused"),
     });
 
+    const tuningFields = [
+      "max_chain_length",
+      "parallel",
+      "throttle",
+      "zstd_level",
+      "page_tracking",
+    ] as const;
+    const readPolicy = async (id: string) => {
+      const response = await api("GET", `/api/v1/policies/${id}`, adminCookie);
+      expect(response.status === 200, `read policy ${id} = ${response.status}`);
+      return zGetPolicyResponse.parse(response.json);
+    };
+    const readStoredPolicy = (id: string) => {
+      expect(/^[0-9a-f-]+$/.test(id), `unexpected policy id ${id}`);
+      return zGetPolicyResponse.parse(
+        JSON.parse(
+          stack.postgresFixtureQuery(
+            `SELECT row_to_json(p)::jsonb || jsonb_build_object('page_tracking', p.page_tracking <> 0, 'enabled', p.enabled <> 0, 'last_preflight', p.last_preflight_json::jsonb) FROM policies AS p WHERE id = '${id}'`,
+          ),
+        ),
+      );
+    };
+
+    // B1: compare browser creation with the server's direct API creation;
+    // the frontend submits business fields and owns no tuning defaults.
+    const apiCreated = zGetPolicyResponse.parse(goodPolicy.json);
+    b.open(`${stack.origin}/policies/new`);
+    b.ab("wait", "--text", "创建策略");
+    b.fill("名称", "f2-policy-browser-defaults");
+    for (const [label, option] of [
+      ["数据源", "f2-source-renamed"],
+      ["本地仓库", "f2-local"],
+    ] as const) {
+      choose(label, option);
+    }
+    b.click("自定义全量");
+    b.fill("全量安排", policyBody.full_cron);
+    b.click("自定义增量");
+    b.fill("增量安排", policyBody.incremental_cron);
+    b.fill("时区", policyBody.timezone);
+    b.record({
+      id: "U2-policy-create-filled",
+      acceptance: "U2",
+      description: "populated policy creation at 375, 768 and 1440 pixels",
+      screenshots: b.responsive("U2-policy-create-filled"),
+    });
+    b.click("创建策略");
+    b.ab("wait", "--url", "**/policies/detail?id=*");
+    b.ab("wait", "--text", "未启用");
+    const browserPolicyId = new URL(b.url()).searchParams.get("id");
+    expect(browserPolicyId !== null, "browser creation did not open a policy");
+    const browserCreated = await readPolicy(browserPolicyId as string);
+    const creationEvidence = {
+      api: apiCreated,
+      apiPostgres: readStoredPolicy(goodPolicyId),
+      browser: browserCreated,
+      browserPostgres: readStoredPolicy(browserCreated.id),
+    };
+    for (const field of tuningFields) {
+      for (const [origin, stored] of Object.entries(creationEvidence)) {
+        expect(
+          stored[field] === apiCreated[field],
+          `B1 ${origin}.${field} = ${stored[field]}, server returned ${apiCreated[field]}`,
+        );
+      }
+    }
+    await Bun.write(
+      path.join(run.evidence, "B1-server-defaults.json"),
+      `${JSON.stringify(creationEvidence, null, 2)}\n`,
+    );
+    b.record({
+      id: "07a-browser-api-defaults",
+      acceptance: "B1",
+      description:
+        "business-only browser/API creates agree in all five columns, independently read from PostgreSQL and API; values in B1-server-defaults.json",
+      screenshot: b.shot("07a-browser-api-defaults"),
+    });
+
+    // B2: SQL is a test fixture for an existing historical row, never a product
+    // API. Keep this policy disabled: page tracking needs a MySQL component
+    // absent from this fixture and must not affect the real backup policies.
+    const historyCreated = await api("POST", "/api/v1/policies", adminCookie, {
+      ...policyBody,
+      name: "f2-policy-history",
+      source_id: source.id,
+      full_cron: "7,37 1-5 * * 1-5",
+      incremental_cron: "11,41 6-20/2 * * 1-5",
+      timezone: "Asia/Kathmandu",
+    });
+    expect(
+      historyCreated.status === 201,
+      `create history = ${historyCreated.status}`,
+    );
+    const historical = zGetPolicyResponse.parse(historyCreated.json);
+    const fixtureTuning = {
+      max_chain_length: 11,
+      parallel: 2,
+      throttle: 256,
+      zstd_level: 5,
+      page_tracking: true,
+    };
+    stack.postgresFixtureQuery(
+      `UPDATE policies SET max_chain_length = 11, parallel = 2, throttle = 256, zstd_level = 5, page_tracking = 1 WHERE id = '${historical.id}' AND enabled = 0`,
+    );
+    const before = readStoredPolicy(historical.id);
+    for (const field of tuningFields) {
+      expect(
+        before[field] === fixtureTuning[field],
+        `fixture PG ${field} = ${before[field]}`,
+      );
+      expect(
+        before[field] !== apiCreated[field],
+        `fixture ${field} is still the server default`,
+      );
+    }
+    const historyEvidence: Array<{
+      stage: string;
+      postgres: typeof before;
+      api: typeof before;
+    }> = [];
+    const verifyHistory = async (stage: string, expected: typeof before) => {
+      const postgres = readStoredPolicy(historical.id);
+      const response = await readPolicy(historical.id);
+      for (const [origin, observed] of [
+        ["PG", postgres],
+        ["API", response],
+      ] as const) {
+        for (const field of tuningFields) {
+          expect(
+            observed[field] === before[field],
+            `${stage} ${origin}.${field}: ${before[field]} -> ${observed[field]}`,
+          );
+          console.log(
+            `B2 ${stage} ${origin}.${field}: ${before[field]} -> ${observed[field]}`,
+          );
+        }
+        for (const field of [
+          "name",
+          "full_cron",
+          "incremental_cron",
+          "timezone",
+          "source_id",
+          "local_repository_id",
+          "replica_repository_id",
+          "enabled",
+        ] as const) {
+          expect(
+            observed[field] === expected[field],
+            `${stage} ${origin}.${field}: expected ${expected[field]}, received ${observed[field]}`,
+          );
+        }
+      }
+      historyEvidence.push({ stage, postgres, api: response });
+      await Bun.write(
+        path.join(run.evidence, "B2-historical-values.json"),
+        `${JSON.stringify({ fixtureTuning, stages: historyEvidence }, null, 2)}\n`,
+      );
+    };
+    await verifyHistory("fixture-before", before);
+    const expectedHistory = { ...before, name: "f2-policy-history-renamed" };
+    for (const stage of ["name", "time", "repository"] as const) {
+      b.open(`${stack.origin}/policies/new?id=${historical.id}`);
+      b.ab("wait", "--text", "保存修改");
+      expect(
+        b.ab("get", "value", "#policy-timezone") === expectedHistory.timezone,
+        "the edit form did not preserve the IANA timezone",
+      );
+      expect(
+        b.ab("get", "value", "#full-cron") === expectedHistory.full_cron,
+        "the edit form rewrote custom full cron",
+      );
+      expect(
+        b.ab("get", "value", "#incremental-cron") ===
+          expectedHistory.incremental_cron,
+        "the edit form rewrote custom incremental cron",
+      );
+      if (stage === "name") {
+        b.fill("名称", expectedHistory.name);
+      } else if (stage === "time") {
+        expectedHistory.full_cron = "13,43 2-6 * * 1-5";
+        b.fill("全量安排", expectedHistory.full_cron);
+      } else {
+        expectedHistory.replica_repository_id = plainRepository.id;
+        choose("副本仓库（可选）", "f2-plain-ftp");
+        b.record({
+          id: "U2-policy-edit-filled",
+          acceptance: "U2",
+          description:
+            "populated historical policy edit at 375, 768 and 1440 pixels",
+          screenshots: b.responsive("U2-policy-edit-filled"),
+        });
+      }
+      b.click("保存修改");
+      b.ab("wait", "--url", "**/policies/detail?id=*");
+      b.ab("wait", "--text", "未启用");
+      await verifyHistory(stage, expectedHistory);
+    }
+    expect(
+      !b.text().includes("系统管理的备份参数"),
+      "policy detail exposes engine tuning",
+    );
+    b.record({
+      id: "07b-history-keeps-tuning",
+      acceptance: "B2",
+      description:
+        "disabled historical policy keeps five nondefault SQL fixture values after separate name/time/repository browser edits; PG/API evidence in B2-historical-values.json, including IANA timezone and custom cron",
+      screenshot: b.shot("07b-history-keeps-tuning"),
+    });
+    // B4: set business schedules through their actual controls. Only the
+    // server computes fire instants; compare every displayed row with its API.
+    const scheduleEvidence = [];
+    for (const scenario of [
+      {
+        frequency: "daily",
+        time: "02:17",
+        interval: "每 6 小时",
+        minute: "第 23 分钟",
+        fullCron: "17 2 * * *",
+        incrementalCron: "23 */6 * * *",
+        timezone: "Europe/Berlin",
+      },
+      {
+        frequency: "weekly",
+        time: "04:19",
+        interval: "每 12 小时",
+        minute: "第 31 分钟",
+        fullCron: "19 4 * * 3",
+        incrementalCron: "31 */12 * * *",
+        timezone: "America/New_York",
+      },
+    ] as const) {
+      b.open(`${stack.origin}/policies/new?id=${browserCreated.id}`);
+      b.ab("wait", "--text", "保存修改");
+      b.ab(
+        "click",
+        `[aria-label="全量保护频率"] button:nth-child(${scenario.frequency === "daily" ? 1 : 2})`,
+      );
+      if (scenario.frequency === "weekly") {
+        choose("星期", "周三");
+      }
+      // Native time inputs expose separate hour/minute keyboard segments.
+      b.ab("focus", "#full-time");
+      b.ab("press", "ArrowLeft");
+      for (const digit of scenario.time.slice(0, 2)) b.ab("press", digit);
+      b.ab("press", "ArrowRight");
+      for (const digit of scenario.time.slice(3)) b.ab("press", digit);
+      b.ab("press", "Tab");
+      expect(
+        b.ab("get", "value", "#full-time") === scenario.time,
+        "B4 native time control rejected keyboard entry",
+      );
+      b.click("每小时");
+      for (const [label, option] of [
+        ["间隔", scenario.interval],
+        ["在第几分钟", scenario.minute],
+      ] as const) {
+        choose(label, option);
+      }
+      b.fill("时区", scenario.timezone);
+      b.click("保存修改");
+      b.ab("wait", "--url", "**/policies/detail?id=*");
+      b.ab("wait", "--text", "UTC");
+      const saved = await readPolicy(browserCreated.id);
+      const stored = readStoredPolicy(browserCreated.id);
+      for (const observed of [saved, stored]) {
+        expect(
+          observed.full_cron === scenario.fullCron &&
+            observed.incremental_cron === scenario.incrementalCron &&
+            observed.timezone === scenario.timezone &&
+            !observed.enabled,
+          `B4 ${scenario.frequency} business schedule persisted as ${JSON.stringify(observed)}`,
+        );
+      }
+      const response = await api(
+        "GET",
+        `/api/v1/policies/${browserCreated.id}/schedule?count=10`,
+        adminCookie,
+      );
+      expect(response.status === 200, `schedule preview = ${response.status}`);
+      const preview = zPolicySchedule.parse(response.json);
+      expect(
+        preview.timezone === scenario.timezone &&
+          !preview.enabled &&
+          preview.fires.length === 10,
+        `B4 schedule preview = ${JSON.stringify(preview)}`,
+      );
+      const rows = JSON.parse(
+        b.ab(
+          "eval",
+          "Array.from(document.querySelectorAll('tbody tr'), row => Array.from(row.querySelectorAll('td'), cell => cell.textContent.trim()))",
+        ),
+      ) as string[][];
+      expect(
+        rows.length === preview.fires.length,
+        "B4 preview row count differs from API",
+      );
+      for (const [index, fire] of preview.fires.entries()) {
+        const row = rows[index];
+        expect(row !== undefined, `B4 missing preview row ${index}`);
+        expect(
+          row?.[0] === (fire.kind === "full" ? "全量" : "增量"),
+          `B4 row ${index} kind differs from API`,
+        );
+        for (const timezone of [scenario.timezone, "UTC"]) {
+          const rendered = new Intl.DateTimeFormat("zh-CN", {
+            dateStyle: "medium",
+            timeStyle: "medium",
+            timeZone: timezone,
+          }).format(new Date(fire.at));
+          expect(
+            row?.[1]?.includes(`${rendered}（${timezone}）`) === true,
+            `B4 row ${index} lacks API fire ${fire.at} in ${timezone}`,
+          );
+        }
+        expect(
+          row?.[2] === "按计划" && !fire.missed,
+          `B4 disabled preview row ${index} claims a missed fire`,
+        );
+      }
+      scheduleEvidence.push({
+        scenario,
+        api: saved,
+        postgres: stored,
+        preview,
+        rows,
+      });
+      await Bun.write(
+        path.join(run.evidence, "B4-business-schedules.json"),
+        `${JSON.stringify(scheduleEvidence, null, 2)}\n`,
+      );
+      b.record({
+        id: `07c-${scenario.frequency}-schedule`,
+        acceptance: "B4",
+        description: `${scenario.frequency} full and ${scenario.interval} incremental set in the UI in ${scenario.timezone}; exact crons read from PG/API and all 10 displayed local/UTC fires match schedule API`,
+        screenshot: b.shot(`07c-${scenario.frequency}-schedule`),
+      });
+    }
+
     // --- F2-A5: role-based visibility ---
     b.signOut();
     b.fill("用户名", viewer.username);
     b.fill("密码", viewer.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.origin}/repositories`);
     b.ab("wait", "--text", "备份仓库");
     expect(
@@ -445,7 +835,7 @@ async function main(): Promise<void> {
     b.fill("用户名", operator.username);
     b.fill("密码", operator.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.origin}/repositories/new`);
     b.ab("wait", "--text", "没有权限");
     b.open(`${stack.origin}/sources/new`);
@@ -490,12 +880,12 @@ async function main(): Promise<void> {
     b.fill("用户名", stack.noKek.admin.username);
     b.fill("密码", stack.noKek.admin.password);
     b.click("登录");
-    b.ab("wait", "--text", "有效权限");
+    b.ab("wait", "--text", "数据保护概览");
     b.open(`${stack.noKek.origin}/sources/new`);
     b.ab("wait", "--text", "新建数据源");
     b.fill("名称", "no-kek-source");
-    b.fill("Socket", stack.mysql.socket);
-    b.fill("Datadir", stack.mysql.datadir);
+    b.fill("连接路径（Unix socket）", stack.mysql.socket);
+    b.fill("数据目录", stack.mysql.datadir);
     b.fill("用户名", stack.mysql.username);
     b.fill("密码", stack.mysql.password);
     b.click("创建数据源");
@@ -538,6 +928,16 @@ async function main(): Promise<void> {
       acceptance: "F2-A2",
       description: "no page errors or CSP violations",
     });
+  } catch (error) {
+    b.record({
+      id: "failure",
+      acceptance: "diagnostic",
+      description:
+        "the first failed step; see the process error for its assertion",
+      screenshot: b.shot("failure"),
+    });
+    b.writeManifest(run.commit, run.dirty);
+    throw error;
   } finally {
     b.close();
     await stack.stop();

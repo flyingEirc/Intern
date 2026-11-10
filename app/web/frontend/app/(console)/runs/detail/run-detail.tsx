@@ -5,11 +5,16 @@ import { BanIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useRef, useState } from "react";
+import { Diagnostics } from "@/components/resources/diagnostics";
 import {
   DetailSkeleton,
   PageHeader,
   ResourceError,
 } from "@/components/resources/states";
+import {
+  runStatusTone,
+  StatusBadge,
+} from "@/components/resources/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,8 +50,10 @@ import {
 } from "@/lib/resources/queries";
 import {
   isTerminalRun,
-  runErrorClassLabel,
+  runEventText,
+  runFailureReason,
   runKindLabel,
+  runLevelLabel,
   runStatusLabel,
   runTriggerLabel,
 } from "@/lib/resources/runs";
@@ -148,8 +155,8 @@ export function RunDetail() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
-        title={`${runKindLabel[data.kind]}运行`}
-        description="状态、触发、错误与有界日志。运行中时日志实时更新，断线后从最后一条续传。"
+        title={`${runKindLabel[data.kind]}备份 · ${formatDateTime(data.started_at ?? data.created_at)}`}
+        description="查看本次备份的状态、数据量与日志。"
       >
         {canCancel && !isTerminalRun(data.status) ? (
           <Button
@@ -186,9 +193,7 @@ export function RunDetail() {
           <Alert>
             <BanIcon />
             <AlertTitle>运行已经结束</AlertTitle>
-            <AlertDescription>
-              终态运行不能再取消，状态以服务端为准。
-            </AlertDescription>
+            <AlertDescription>运行已经结束，无法再取消。</AlertDescription>
           </Alert>
         ) : (
           <ResourceError title="取消失败" error={cancel.error} />
@@ -198,16 +203,13 @@ export function RunDetail() {
       <Card>
         <CardHeader>
           <CardTitle className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-sm">{data.id}</span>
-            <Badge
-              variant={data.status === "failed" ? "destructive" : "secondary"}
-            >
+            <StatusBadge tone={runStatusTone(data.status)}>
               {runStatusLabel[data.status]}
-            </Badge>
+            </StatusBadge>
             {streaming ? <Badge variant="outline">实时更新中</Badge> : null}
           </CardTitle>
           <CardDescription>
-            {runKindLabel[data.kind]} · {runTriggerLabel[data.trigger]}触发
+            {runKindLabel[data.kind]}备份 · {runTriggerLabel[data.trigger]}触发
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -230,50 +232,59 @@ export function RunDetail() {
                 {sourceName}
               </Link>
             </dd>
-            <dt className="text-muted-foreground">计划时间</dt>
-            <dd>{formatDateTime(data.scheduled_at)}</dd>
-            <dt className="text-muted-foreground">创建时间</dt>
-            <dd>{formatDateTime(data.created_at)}</dd>
             <dt className="text-muted-foreground">开始时间</dt>
             <dd>{formatDateTime(data.started_at)}</dd>
             <dt className="text-muted-foreground">结束时间</dt>
             <dd>{formatDateTime(data.finished_at)}</dd>
-            <dt className="text-muted-foreground">备份</dt>
-            <dd>
-              {data.backup_id ? (
-                <Link
-                  className="font-mono text-xs underline-offset-4 hover:underline"
-                  href={`/backups/detail?id=${data.backup_id}`}
-                >
-                  {data.backup_id}
-                </Link>
-              ) : (
-                "—"
-              )}
-            </dd>
-            <dt className="text-muted-foreground">备份链</dt>
-            <dd className="font-mono text-xs">{data.chain_id ?? "—"}</dd>
+            <dt className="text-muted-foreground">耗时</dt>
+            <dd>{durationText(data.started_at, data.finished_at)}</dd>
             <dt className="text-muted-foreground">数据量</dt>
             <dd>{formatBytes(data.payload_size)}</dd>
-            <dt className="text-muted-foreground">错误类</dt>
-            <dd>
-              {data.error_class ? runErrorClassLabel[data.error_class] : "—"}
-            </dd>
-            <dt className="text-muted-foreground">错误码</dt>
-            <dd className="font-mono text-xs">{data.error_code ?? "—"}</dd>
-            <dt className="text-muted-foreground">取消请求</dt>
-            <dd>{data.cancel_requested ? "已请求" : "未请求"}</dd>
           </dl>
         </CardContent>
       </Card>
 
+      {data.status === "failed" ? (
+        <Alert variant="destructive">
+          <BanIcon />
+          <AlertTitle>备份失败</AlertTitle>
+          <AlertDescription>
+            {runFailureReason(data.error_class, data.error_code)}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <Diagnostics title="技术诊断" description="排查问题或联系支持时展开。">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+          <dt className="text-muted-foreground">运行标识</dt>
+          <dd className="font-mono text-xs break-all">{data.id}</dd>
+          <dt className="text-muted-foreground">备份标识</dt>
+          <dd className="font-mono text-xs break-all">
+            {data.backup_id ?? "—"}
+          </dd>
+          <dt className="text-muted-foreground">备份链</dt>
+          <dd className="font-mono text-xs break-all">
+            {data.chain_id ?? "—"}
+          </dd>
+          <dt className="text-muted-foreground">错误类</dt>
+          <dd className="font-mono text-xs">{data.error_class ?? "—"}</dd>
+          <dt className="text-muted-foreground">错误码</dt>
+          <dd className="font-mono text-xs">{data.error_code ?? "—"}</dd>
+          <dt className="text-muted-foreground">取消请求</dt>
+          <dd>{data.cancel_requested ? "已请求" : "未请求"}</dd>
+          <dt className="text-muted-foreground">计划时间</dt>
+          <dd>
+            {data.trigger === "manual"
+              ? "—"
+              : formatDateTime(data.scheduled_at)}
+          </dd>
+        </dl>
+      </Diagnostics>
+
       <Card>
         <CardHeader>
           <CardTitle>日志</CardTitle>
-          <CardDescription>
-            每个运行最多保留 1000
-            条，按序号升序。复制相关的记录在运行结束后写入，终态后请重新打开本页查看。
-          </CardDescription>
+          <CardDescription>按时间顺序记录本次备份的进度。</CardDescription>
         </CardHeader>
         <CardContent>
           {log.isPending ? <DetailSkeleton /> : null}
@@ -288,17 +299,27 @@ export function RunDetail() {
             <p className="text-sm text-muted-foreground">还没有日志。</p>
           ) : null}
           {rows.length > 0 ? (
-            <ol className="flex max-h-96 flex-col gap-1 overflow-y-auto font-mono text-xs">
+            <ol className="flex max-h-96 flex-col gap-2 overflow-y-auto text-xs">
               {rows.map((row) => (
-                <li key={row.seq} className="flex gap-3">
-                  <span className="w-10 shrink-0 text-right text-muted-foreground">
+                <li key={row.seq} className="flex flex-wrap items-center gap-2">
+                  <span className="w-8 shrink-0 text-right text-muted-foreground">
                     {row.seq}
                   </span>
-                  <span className="w-14 shrink-0 text-muted-foreground">
-                    {row.level}
+                  <StatusBadge
+                    tone={
+                      row.level === "error" || row.level === "warn"
+                        ? "danger"
+                        : "neutral"
+                    }
+                  >
+                    {runLevelLabel[row.level] ?? row.level}
+                  </StatusBadge>
+                  <span className="font-medium" title={row.event}>
+                    {runEventText(row.event)}
                   </span>
-                  <span className="w-40 shrink-0">{row.event}</span>
-                  <span className="whitespace-pre-wrap">{row.message}</span>
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-muted-foreground">
+                    {row.message}
+                  </span>
                 </li>
               ))}
             </ol>
@@ -312,4 +333,16 @@ export function RunDetail() {
       </Card>
     </div>
   );
+}
+
+function durationText(start: string | null, end: string | null): string {
+  if (start === null || end === null) return "—";
+  const seconds = Math.max(
+    0,
+    Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000),
+  );
+  if (Number.isNaN(seconds)) return "—";
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
 }

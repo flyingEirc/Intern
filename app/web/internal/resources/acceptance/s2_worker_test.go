@@ -730,7 +730,7 @@ func (f *fixture) requireNoCredential(t *testing.T, session s2fixture.Audit, fac
 func (f *fixture) requireProbeAudit(t *testing.T, id string) {
 	t.Helper()
 	var result string
-	query := `SELECT result FROM audit_logs WHERE action = 'repositories.probe' AND resource_id = ? ORDER BY id DESC LIMIT 1`
+	query := `SELECT result FROM audit_logs WHERE action = 'repositories.probe' AND resource_id = $1 ORDER BY id DESC LIMIT 1`
 	if err := f.analysis.QueryRowContext(t.Context(), query, id).Scan(&result); err != nil {
 		t.Fatalf("the refused probe of %s left no audit row: %v", id, err)
 	}
@@ -764,7 +764,7 @@ func (f *fixture) storedConfig(t *testing.T, id string) string {
 	t.Helper()
 	var stored string
 	if err := f.analysis.QueryRowContext(t.Context(),
-		`SELECT config_json FROM repositories WHERE id = ?`, id).Scan(&stored); err != nil {
+		`SELECT config_json FROM repositories WHERE id = $1`, id).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	return stored
@@ -774,7 +774,7 @@ func (f *fixture) storedConfig(t *testing.T, id string) string {
 func (f *fixture) repositoryByName(t *testing.T, name string) (string, bool) {
 	t.Helper()
 	var id string
-	err := f.analysis.QueryRowContext(t.Context(), `SELECT id FROM repositories WHERE name = ?`, name).Scan(&id)
+	err := f.analysis.QueryRowContext(t.Context(), `SELECT id FROM repositories WHERE name = $1`, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
 	}

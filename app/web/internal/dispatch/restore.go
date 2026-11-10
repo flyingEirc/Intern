@@ -441,7 +441,7 @@ func (d *Dispatcher) progressRestore(parent context.Context, restoreID, phase st
 // Everything else is dropped: the engine's map is not a trusted wire format.
 var progressKeys = map[string]bool{
 	"backup_id": true, "bytes": true, "count": true, "link": true, "phase": true,
-	"repository_id": true, "seq": true, "source": true, "status": true,
+	"repository_id": true, "seq": true, "source": true,
 }
 
 // sanitizeProgressData keeps only allowlisted scalar values of bounded size.

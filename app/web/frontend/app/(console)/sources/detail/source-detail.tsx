@@ -120,7 +120,7 @@ export function SourceDetail() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title={data.name}
-        description="数据源配置、服务器身份与真实预检；已保存的密码不会显示。"
+        description="查看连接设置、备份环境与保护状态。"
       >
         {canManage ? (
           <>
@@ -179,9 +179,9 @@ export function SourceDetail() {
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt className="text-muted-foreground">Socket</dt>
+            <dt className="text-muted-foreground">连接路径（Unix socket）</dt>
             <dd className="font-mono">{data.socket}</dd>
-            <dt className="text-muted-foreground">Datadir</dt>
+            <dt className="text-muted-foreground">数据目录</dt>
             <dd className="font-mono">{data.datadir}</dd>
             <dt className="text-muted-foreground">用户名</dt>
             <dd>{data.username}</dd>

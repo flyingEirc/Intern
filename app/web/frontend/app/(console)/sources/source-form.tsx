@@ -5,6 +5,7 @@ import { CircleAlertIcon } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useState } from "react";
+import { FormActions, FormSection } from "@/components/resources/form-section";
 import { PreflightResultView } from "@/components/resources/preflight-result";
 import { UnavailableAlert } from "@/components/resources/states";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -118,7 +119,11 @@ export function SourceForm({ source }: { source?: Source }) {
         : "未设置";
 
   return (
-    <form noValidate onSubmit={onSubmit} className="flex flex-col gap-6">
+    <form
+      noValidate
+      onSubmit={onSubmit}
+      className="flex w-full max-w-4xl flex-col gap-6"
+    >
       {preflight ? (
         <PreflightResultView result={preflight} title="保存被预检拒绝" />
       ) : null}
@@ -136,85 +141,95 @@ export function SourceForm({ source }: { source?: Source }) {
         )
       ) : null}
 
-      <FieldGroup>
-        <Field data-invalid={errors.name ? true : undefined}>
-          <FieldLabel htmlFor="source-name">名称</FieldLabel>
-          <Input
-            id="source-name"
-            value={values.name}
-            onChange={(event) => updateValue("name", event.target.value)}
-            aria-invalid={errors.name ? true : undefined}
-            autoComplete="off"
-          />
-          <FieldDescription>1–64 个字符。</FieldDescription>
-          <FieldError>{errors.name}</FieldError>
-        </Field>
+      <FormSection title="连接信息">
+        <FieldGroup>
+          <Field data-invalid={errors.name ? true : undefined}>
+            <FieldLabel htmlFor="source-name">名称</FieldLabel>
+            <Input
+              id="source-name"
+              value={values.name}
+              onChange={(event) => updateValue("name", event.target.value)}
+              aria-invalid={errors.name ? true : undefined}
+              autoComplete="off"
+            />
+            <FieldDescription>1–64 个字符。</FieldDescription>
+            <FieldError>{errors.name}</FieldError>
+          </Field>
 
-        <Field data-invalid={errors.socket ? true : undefined}>
-          <FieldLabel htmlFor="source-socket">Socket</FieldLabel>
-          <Input
-            id="source-socket"
-            value={values.socket}
-            onChange={(event) => updateValue("socket", event.target.value)}
-            aria-invalid={errors.socket ? true : undefined}
-            placeholder="/run/mysqld/mysqld.sock"
-            className="font-mono"
-            autoComplete="off"
-          />
-          <FieldDescription>
-            intern 容器内可见的 MySQL unix socket 绝对路径。
-          </FieldDescription>
-          <FieldError>{errors.socket}</FieldError>
-        </Field>
+          <Field data-invalid={errors.socket ? true : undefined}>
+            <FieldLabel htmlFor="source-socket">
+              连接路径（Unix socket）
+            </FieldLabel>
+            <Input
+              id="source-socket"
+              value={values.socket}
+              onChange={(event) => updateValue("socket", event.target.value)}
+              aria-invalid={errors.socket ? true : undefined}
+              placeholder="/run/mysqld/mysqld.sock"
+              className="font-mono"
+              autoComplete="off"
+            />
+            <FieldDescription>
+              intern 容器内可见的 MySQL unix socket 绝对路径。
+            </FieldDescription>
+            <FieldError>{errors.socket}</FieldError>
+          </Field>
 
-        <Field data-invalid={errors.datadir ? true : undefined}>
-          <FieldLabel htmlFor="source-datadir">Datadir</FieldLabel>
-          <Input
-            id="source-datadir"
-            value={values.datadir}
-            onChange={(event) => updateValue("datadir", event.target.value)}
-            aria-invalid={errors.datadir ? true : undefined}
-            placeholder="/var/lib/mysql"
-            className="font-mono"
-            autoComplete="off"
-          />
-          <FieldDescription>
-            只读挂载的 MySQL 数据目录绝对路径。
-          </FieldDescription>
-          <FieldError>{errors.datadir}</FieldError>
-        </Field>
+          <Field data-invalid={errors.datadir ? true : undefined}>
+            <FieldLabel htmlFor="source-datadir">数据目录</FieldLabel>
+            <Input
+              id="source-datadir"
+              value={values.datadir}
+              onChange={(event) => updateValue("datadir", event.target.value)}
+              aria-invalid={errors.datadir ? true : undefined}
+              placeholder="/var/lib/mysql"
+              className="font-mono"
+              autoComplete="off"
+            />
+            <FieldDescription>
+              只读挂载的 MySQL 数据目录绝对路径。
+            </FieldDescription>
+            <FieldError>{errors.datadir}</FieldError>
+          </Field>
 
-        <Field data-invalid={errors.username ? true : undefined}>
-          <FieldLabel htmlFor="source-username">用户名</FieldLabel>
-          <Input
-            id="source-username"
-            value={values.username}
-            onChange={(event) => updateValue("username", event.target.value)}
-            aria-invalid={errors.username ? true : undefined}
-            autoComplete="off"
-          />
-          <FieldError>{errors.username}</FieldError>
-        </Field>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Field data-invalid={errors.username ? true : undefined}>
+              <FieldLabel htmlFor="source-username">用户名</FieldLabel>
+              <Input
+                id="source-username"
+                value={values.username}
+                onChange={(event) =>
+                  updateValue("username", event.target.value)
+                }
+                aria-invalid={errors.username ? true : undefined}
+                autoComplete="off"
+              />
+              <FieldError>{errors.username}</FieldError>
+            </Field>
 
-        <Field data-invalid={errors.password ? true : undefined}>
-          <FieldLabel htmlFor="source-password">密码</FieldLabel>
-          <Input
-            id="source-password"
-            type="password"
-            value={values.password}
-            onChange={(event) => updateValue("password", event.target.value)}
-            aria-invalid={errors.password ? true : undefined}
-            placeholder={passwordPlaceholder}
-            autoComplete="new-password"
-          />
-          <FieldDescription>
-            密码只写不读，服务端不会返回已保存的值；编辑时留空表示保留现有密码。
-          </FieldDescription>
-          <FieldError>{errors.password}</FieldError>
-        </Field>
-      </FieldGroup>
+            <Field data-invalid={errors.password ? true : undefined}>
+              <FieldLabel htmlFor="source-password">密码</FieldLabel>
+              <Input
+                id="source-password"
+                type="password"
+                value={values.password}
+                onChange={(event) =>
+                  updateValue("password", event.target.value)
+                }
+                aria-invalid={errors.password ? true : undefined}
+                placeholder={passwordPlaceholder}
+                autoComplete="new-password"
+              />
+              {creating ? null : (
+                <FieldDescription>留空保留现有密码。</FieldDescription>
+              )}
+              <FieldError>{errors.password}</FieldError>
+            </Field>
+          </div>
+        </FieldGroup>
+      </FormSection>
 
-      <div className="flex flex-wrap items-center gap-2">
+      <FormActions>
         <Button type="submit" disabled={mutation.isPending}>
           {mutation.isPending ? <Spinner data-icon="inline-start" /> : null}
           {creating ? "创建数据源" : "保存修改"}
@@ -234,7 +249,7 @@ export function SourceForm({ source }: { source?: Source }) {
         >
           取消
         </Button>
-      </div>
+      </FormActions>
     </form>
   );
 }

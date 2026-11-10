@@ -2,20 +2,16 @@ package middleware
 
 import (
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func TestAuditWriteFailureLogsErrorWithoutSecrets(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	database, err := store.Open(t.Context(), dir)
+	database, err := store.Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}

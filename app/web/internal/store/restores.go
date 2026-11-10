@@ -668,7 +668,7 @@ func (s *Store) RestoreLog(ctx context.Context, id string, seq int64) (RestoreLo
 // after, in ascending order. after = 0 replays from the first event.
 func (s *Store) RestoreLogsAfter(ctx context.Context, id string, after, limit int64) ([]RestoreLog, error) {
 	rows, err := storesql.New(s.db).RestoreLogsAfter(ctx, storesql.RestoreLogsAfterParams{
-		RestoreID: id, Seq: after, Limit: limit,
+		RestoreID: id, Seq: after, RowLimit: limit,
 	})
 	if err != nil {
 		return nil, err

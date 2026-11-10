@@ -191,7 +191,6 @@ func TestSchedulerTimeZoneIsHonoured(t *testing.T) {
 	policy, err := f.database.CreatePolicy(t.Context(), store.PolicyInput{
 		Name: "tz-policy", SourceID: source.ID, LocalRepositoryID: repository.ID,
 		FullCron: "0 2 * * *", IncrementalCron: "0 3 * * *", Timezone: "Asia/Shanghai",
-		MaxChainLength: 3, Parallel: 1, ZstdLevel: 3,
 	}, store.SystemAudit("policies.create", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)

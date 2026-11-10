@@ -21,7 +21,7 @@ func (s *Store) Begin(ctx context.Context, request BeginRequest) error {
 	if !plannedIdentityMatches(request) {
 		return admission("chain_broken")
 	}
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		if err := revalidatePlan(ctx, q, plan); err != nil {
 			return err
 		}
@@ -73,7 +73,7 @@ func (s *Store) Complete(ctx context.Context, completion Completion) error {
 	if err != nil {
 		return err
 	}
-	return s.withTx(ctx, func(q *storesql.Queries) error {
+	return s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		backup, err := q.GetBackup(ctx, completion.BackupID)
 		if err != nil {
 			return err

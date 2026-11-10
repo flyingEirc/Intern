@@ -15,9 +15,10 @@
 阶段 E 状态（父 Issue [#15](https://github.com/flyingEirc/Intern/issues/15)；子 Issue：[D1 #41](https://github.com/flyingEirc/Intern/issues/41) 镜像与部署验收、[S2 #42](https://github.com/flyingEirc/Intern/issues/42) FTPS、[V1 #43](https://github.com/flyingEirc/Intern/issues/43) 内网实测（已取消）、[G #44](https://github.com/flyingEirc/Intern/issues/44) 门禁与本文）：阶段 E 的候选提交 `9489f6c` 已在 `feat/web-stage-e` 上原生验收，GitHub Actions [run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)（2026-11-04，自托管 runner，14 个 job 全绿，约 48 分钟）同时覆盖 D1、S2 与 G。D1 先在 `9e05e52` 由 CircleCI 流水线 `71202872` 验收（历史记录），再在 `9489f6c` 重新确认，包含 `ed794d2` 的健康检查修复；S2 在 `container-ftps` 用真实 Pure-FTPd 1.0.54 TLS 夹具通过显式与隐式两种模式，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都发生在发送凭据之前，并从仅 FTPS 副本恢复增量 1、增量 2 到全新 `mysql:8.4.11`，独立快照一致；G 的候选制品门禁与 `contract-openapi` 契约制品（`info.version` 0.3.0，附 SHA-256）也在同一次运行产出。`9489f6c` 已随 [PR #45](https://github.com/flyingEirc/Intern/pull/45) 于 2026-11-04 合入 main（merge `2a2040d`），main 上的 [run 41871999890](https://github.com/flyingEirc/Intern/actions/runs/41871999890) 14 个 job 全绿；其后的 F3（FTPS 问候语归类）、范围判定用例、D1 Compose 清理与本文档同步在 `c68dee4` 的 [run 41876148900](https://github.com/flyingEirc/Intern/actions/runs/41876148900) 验收（14 个 job 全绿），经后续 PR 合入 main。V1（[#43](https://github.com/flyingEirc/Intern/issues/43)）于 2026-11-05 由用户取消，阶段 E [#15](https://github.com/flyingEirc/Intern/issues/15) 因此关闭；截至 2026-11-05 最近一次整套 main 运行为 merge `7355766` 的 push [run 41975617492](https://github.com/flyingEirc/Intern/actions/runs/41975617492)，14/14 job 全绿（含 `container-ftp`、`container-replication`、`container-restore`、`container-restore-api`、`container-ftps`、`container-deploy` 与 `quality-gate`；自托管 runner `JackVance`，linux/amd64）。**验收结论以对应候选提交的运行证据与 Issue 记录为准**，本文不代替它。凡引用 `app/web/integration/d1_test.go` 的行为，都是上述 D1 验收执行的用例断言；引用 S2 用例的行为同样已由 `9489f6c` 的运行执行；能直接对照代码或配置文件的部分另行标注。明确**未交付**：
 
 - V1 用户内网 FTP 实测：已于 2026-11-05 由用户取消，本项目不再获取第三方或内网服务器证据；FTP/FTPS 由每次涉及代码或配置的合并前手动运行、main 推送与每日定时运行的真实容器 CI（固定 Pure-FTPd 1.0.54 夹具）覆盖，运维须按第 12 节自测自有服务器。
-- 前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）：控制台由镜像中的 `intern-web`（`webui` 构建）在 API 的同一地址提供（例如 `https://<主机>:<端口>/login`），按登录账号的权限显示：登录、会话失效处理、注销与修改本人密码（F1 #54）；仓库、数据源（含真实预检）与策略（F2 #56）；调度预览、立即全量/增量、运行列表与实时日志、取消、副本队列与重试、备份链与本地/异地保护点（F3 #57）；恢复向导（只读计划、管理员二次输入密码、演练与 `verify_sql`）、恢复详情与终态副作用（F4 #58）；用户管理与审计日志（F5 #59，仅 admin）。页面只调用本文同一组 API，服务端逐请求鉴权；本文的操作步骤以命令行与 API 书写，界面上的同名操作结果相同。
+- 前端（阶段 F [#19](https://github.com/flyingEirc/Intern/issues/19)）：控制台由镜像中的 `intern-web`（`webui` 构建）在 API 的同一地址提供（例如 `https://<主机>:<端口>/login`），按登录账号的权限显示：登录、会话失效处理、注销与修改本人密码（F1 #54）；仓库、数据源（含真实预检）与策略（F2 #56）。策略创建、编辑与详情围绕保护目标、数据源、本地仓库、可选异地副本、时间安排、时区和启停状态；历史自定义 cron 与 IANA 时区原值在编辑时保留，修改名称、时间或仓库不会重置历史调优；调度预览、立即全量/增量、运行列表与实时日志、取消、副本队列与重试、备份链与本地/异地保护点（F3 #57）；恢复向导（只读计划、管理员二次输入密码、演练与 `verify_sql`）、恢复详情与终态副作用（F4 #58）；用户管理与审计日志（F5 #59，仅 admin）。页面只调用本文同一组 API，服务端逐请求鉴权；本文的操作步骤以命令行与 API 书写，界面上的同名操作结果相同。
 - binlog 归档与完整物理 PITR（N1）、镜像仓库公开发布、自动保留策略（N2）、K8s / Helm 与执行 agent（N3）。
 - 公开镜像发布：CI 只构建私有候选制品；镜像内 `/usr/share/licenses/intern/NOTICE-WEB.txt` 与 `GPL-SOURCE-OFFER.txt` 都明确：外部分发前必须完成对应源码提供安排，本仓库未宣称已完成。
+- **下一阶段（工作区已实现，待独立验收）**：Web 唯一业务元数据库改为 PostgreSQL，备份载荷、工作文件与 KEK 仍不入库；浏览器一次性创建首位管理员是唯一日常首管路径，Web 生产命令 `intern-web user create-admin` 与仅服务它的 `store.OpenCurrent` 已删除，避免并行引导、独立写连接或绕过一次性 setup；恢复账号走已认证用户管理或明确运维恢复流程，不新增后门。`app/cli` 的逻辑备份兼容照旧，不是 Web 首管入口。业务策略只填目标、数据源、存储与时间安排，低层参数由服务端默认。旧 SQLite 受控升级、PG DSN 与 secret 的实现契约见第 2.3 节；针对性 race 已有证据，但完整检查、原生部署与 CI 未完成。
 
 ## 1. 前置条件
 
@@ -40,24 +41,27 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `app/web/deploy/compose.yaml` | `mysql` + `intern` 两个服务、命名卷、file secrets、健康检查、资源上限。 |
+| `app/web/deploy/compose.yaml` | `postgres` + `mysql` + `intern` 三个服务、命名卷、file secrets、健康检查、资源上限。 |
 | `app/web/deploy/.env.example` | 运维必须填写的变量清单；不含任何真实凭据。 |
 | `app/web/deploy/Dockerfile` | 多阶段镜像：Go 1.27.0 构建 `intern-web`，运行层以钉定 `mysql:8.4.11` 为基座叠加 PXB 8.4.0-7 的 `xtrabackup`/`xbstream`/`/usr/lib/private`/`libprocps.so.8`。 |
 | `app/web/deploy/licenses/` | 镜像内 `/usr/share/licenses/intern` 的材料来源（GPL 源码提供说明等）。 |
 
-配置优先级与其他入口一致：**显式 flags > `INTERN_*` 环境变量 > YAML 配置文件 > flag 默认值**（`app/web/cmd/flags.go`）。YAML 用 `--config` 或 `INTERN_CONFIG` 指定，键名就是下面表里的设置名（`metadata_dir`、`work_root`、`export_root`、`kek_file`、`xtrabackup_path`、`xbstream_path`、`mysqld_path`、`min_work_bytes`、`min_backup_bytes`、`restore_expansion_factor`、`restore_use_memory`、`shutdown_timeout`、`trusted_proxies`、`tls_terminated_by_proxy`、`listen`、`log.level`、`tls.cert_file`、`tls.key_file`、`session.idle_timeout`、`session.lifetime`）；环境变量名是把点与短横换成下划线再加前缀，例如 `INTERN_MIN_WORK_BYTES`、`INTERN_TLS_CERT_FILE`。配置文件必须存在且是常规文件（缺失或目录都会被拒绝，不会静默当空配置）；`restore_expansion_factor` 默认 8，`restore_use_memory` 默认 0（0 表示不给 xtrabackup 传 `--use-memory`）。
+配置优先级与其他入口一致：**显式 flags > `INTERN_*` 环境变量 > YAML 配置文件 > flag 默认值**（`app/web/cmd/flags.go`）。YAML 用 `--config` 或 `INTERN_CONFIG` 指定，键名就是下面表里的设置名（`database_url`、`database_url_file`、`metadata_dir`、`work_root`、`export_root`、`kek_file`、`xtrabackup_path`、`xbstream_path`、`mysqld_path`、`min_work_bytes`、`min_backup_bytes`、`restore_expansion_factor`、`restore_use_memory`、`shutdown_timeout`、`trusted_proxies`、`tls_terminated_by_proxy`、`listen`、`log.level`、`tls.cert_file`、`tls.key_file`、`session.idle_timeout`、`session.lifetime`）；环境变量名是把点与短横换成下划线再加前缀，例如 `INTERN_DATABASE_URL_FILE`、`INTERN_MIN_WORK_BYTES`、`INTERN_TLS_CERT_FILE`。`database_url` 与 `database_url_file` 互斥且必须恰有一个。配置文件必须存在且是常规文件（缺失或目录都会被拒绝，不会静默当空配置）；`restore_expansion_factor` 默认 8，`restore_use_memory` 默认 0（0 表示不给 xtrabackup 传 `--use-memory`）。
 
 ### 2.1 容器内布局与默认路径
 
 | 容器内路径 | 来源 | 读写 | 用途 |
 | --- | --- | --- | --- |
-| `/var/lib/intern/metadata` | 命名卷 `intern-metadata` | 读写 | SQLite 单文件控制面 + catalog + 复制状态；`0700`，属主 `999:999` |
+| `/var/lib/intern/metadata` | 命名卷 `intern-metadata` | 读写 | 本机私有目录边界与旧 SQLite 升级源；`0700`，属主 `999:999`。工作区实现不再在这里创建或读取 `intern.db`；部署验收仍待完成 |
 | `/var/lib/intern/backups` | 命名卷 `intern-backups` | 读写 | 本地主仓库（先写这里再发布） |
 | `/var/lib/intern/work` | 命名卷 `intern-work` | 读写 | xtrabackup 临时目录、解包、prepare、演练 |
 | `/var/lib/intern/export` | 宿主机目录 bind mount（`INTERN_EXPORT_HOST_DIR`） | 读写 | 恢复导出，供新的 mysql 容器挂载；`0750` |
 | `/var/lib/mysql` | 与 mysql 服务同一个卷 | **只读 `:ro`** | xtrabackup 读取源 datadir；写入会被拒绝 |
 | `/var/run/mysqld` | 与 mysql 服务同一个卷 | 读写 | `mysqld.sock`；备份账号是 `@'localhost'`，因此每次连接都是本地 socket 连接 |
 | `/run/secrets/intern_kek` | Compose file secret | 只读 | KEK |
+| `/var/lib/postgresql/data` | 命名卷 `intern-postgres` | 读写 | PostgreSQL 17.11 业务元数据；载荷与 KEK 不进入此卷 |
+| `/run/secrets/intern_database_url` | Compose file secret | 只读 | PostgreSQL DSN；单行、最多 4096 字节、`0600` 常规文件 |
+| `/run/secrets/intern_postgres_password` | Compose file secret | 只读 | PostgreSQL 密码；只供数据库服务读取，不写入镜像 |
 | `/run/secrets/intern_tls_cert`、`/run/secrets/intern_tls_key` | Compose file secret | 只读 | HTTPS 证书与私钥 |
 | `/usr/bin/xtrabackup`、`/usr/bin/xbstream`、`/usr/sbin/mysqld` | 镜像内置 | 只读 | 备份、解包、恢复演练 |
 | `/usr/share/licenses/intern/` | 镜像内置 | 只读 | `NOTICE-WEB.txt`（本镜像的第三方声明）、`VERSIONS.txt`（构建期生成的来源与逐项摘要留痕）、`GPL-SOURCE-OFFER.txt`、MySQL 与 PXB 许可证文本、`procps-ng/` 两份文本、`go-internals/`（`GO-MODULES.txt` 清单与所链接模块的许可证文本） |
@@ -70,9 +74,14 @@
 
 ```sh
 cd app/web/deploy
-cp .env.example .env                      # 然后编辑 .env：MYSQL_ROOT_PASSWORD、INTERN_VERSION、INTERN_SOURCE_SHA、INTERN_EXPORT_HOST_DIR 等
+cp .env.example .env                      # 然后编辑 .env：MYSQL_ROOT_PASSWORD、INTERN_POSTGRES_PASSWORD、INTERN_VERSION、INTERN_SOURCE_SHA、INTERN_EXPORT_HOST_DIR 等
 mkdir -p secrets exports
 chown 999:999 exports && chmod 0750 exports
+# PostgreSQL secret 按 .env.example 生成，不把 DSN 或密码写入命令历史、日志或仓库。
+printf '%s\n' 'replace-me' > secrets/intern_postgres_password
+printf '%s\n' 'postgres://intern:replace-me@postgres:5432/intern?sslmode=disable' > secrets/intern_database_url
+chown 999:999 secrets/intern_postgres_password secrets/intern_database_url
+chmod 0600 secrets/intern_postgres_password secrets/intern_database_url
 ```
 
 KEK 用同一仓库构建的 CLI 生成（`intern-web` 二进制与镜像都**没有** keygen 子命令，见第 5 节）：
@@ -119,29 +128,31 @@ docker compose exec -T intern cat /usr/share/licenses/intern/VERSIONS.txt
 
 ```sh
 docker compose exec -T intern intern-web healthcheck   # 镜像不带 curl，二进制自己探测 /healthz
-docker compose exec -T intern intern-web migrate status # JSON 迁移状态
+docker compose exec -T intern intern-web migrate status # 只读 JSON 状态，不持 owner 锁
 ```
 
 `compose.yaml` 里 `intern` 服务的 healthcheck 就是 `/usr/local/bin/intern-web healthcheck`（`interval: 10s`、`timeout: 5s`、`retries: 6`、`start_period: 20s`）。`healthcheck` 用与 `serve` 相同的 `INTERN_LISTEN` 与 TLS 设置推导探测地址，绑定 `0.0.0.0` 时改用回环；**只有回环目标**才跳过证书校验（容器探测自己），任何其他目标都按系统根正常校验；探测不带凭据、响应最多读 16 KiB。可用 `--url` 指定地址、`--timeout` 设定整体时限（必须为正）。
 
-起栈之后、创建数据源之前，还要在源实例里建备份账号：`docker compose exec mysql mysql -uroot -p`（密码从 `.env` 的 `MYSQL_ROOT_PASSWORD` 取，不要写进命令行历史），授权模板见 [控制面方案第 3.2 节](../roadmap/Web备份控制面与流式管道-2026-10-17.md)；账号必须是 `'intern_bkp'@'localhost'` 而不是按容器 IP 授权的账号，因为参考部署的每次连接都走共享 socket 卷。若策略启用 `page_tracking`，还需要 `SELECT` on `mysql.component`（预检查询 `component_mysqlbackup`）。参考部署不创建业务库：第 6 节建数据源后先用 `…/preflight` 验证，再建策略。
+起栈之后、创建数据源之前，还要在源实例里建备份账号：`docker compose exec mysql mysql -uroot -p`（密码从 `.env` 的 `MYSQL_ROOT_PASSWORD` 取，不要写进命令行历史），授权模板见 [控制面方案第 3.2 节](../roadmap/Web备份控制面与流式管道-2026-10-17.md)；账号必须是 `'intern_bkp'@'localhost'` 而不是按容器 IP 授权的账号，因为参考部署的每次连接都走共享 socket 卷。若历史策略行的 `page_tracking` 为真（服务端默认 `false`，不能通过 API 设置），还需要 `SELECT` on `mysql.component`（预检查询 `component_mysqlbackup`）。参考部署不创建业务库：第 6 节建数据源后先用 `…/preflight` 验证，再建策略。
 
-停止：`docker compose stop intern`（默认宽限期来自 `stop_grace_period: 120s`，见第 9 节）。**不要用 `docker compose down -v`**：`-v` 会删除命名卷，metadata、backups 与 work 随之丢失；`docker compose down`（不带 `-v`）只删容器和网络。
+停止：`docker compose stop intern`（默认宽限期来自 `stop_grace_period: 120s`，见第 9 节）。**不要用 `docker compose down -v`**：`-v` 会删除命名卷，metadata、backups、work 与 `intern-postgres` 随之丢失；`docker compose down`（不带 `-v`）只删容器和网络。
 
-## 3. 首个管理员
+### 2.3 PostgreSQL 与旧库升级（工作区已实现，待独立验收）
 
-`serve` 启动时自动应用迁移，但不会创建用户。第一个管理员用容器内二进制创建，**不需要停服务**：
+以下入口已提交 PR #90；2026-11-10 原生开发基线 `b45a711` 的 [run 42763282901](https://github.com/flyingEirc/Intern/actions/runs/42763282901) 已通过 Compose/D1、W4 活工具 owner-loss、fast 与既有 CLI/Web 容器门禁（[详细证据](https://github.com/flyingEirc/Intern/issues/80#issuecomment-6760406034)）。完整旧库升级业务连续性与后续最终 head 的 full/UI、独立复验仍待完成，不能据此宣布 #81 通过；本节参考部署的完整交付验收状态以此边界为准。
 
-```sh
-# 密码来自受控文件（0600，用完即删）或你的 secret 管理器的输出，绝不放进命令行参数
-docker compose exec -T intern intern-web user create-admin \
-  --username ops --password-stdin < /run/secrets/ops_initial_password
-```
+- **DSN**：`--database-url` / `INTERN_DATABASE_URL` 直接给 DSN，或首选的 `--database-url-file` / `INTERN_DATABASE_URL_FILE` 指向权限 `0600` 的常规非符号链接文件；YAML 键为 `database_url` / `database_url_file`。两种来源互斥，文件必须只有一个非空行且不超过 4096 字节，Unix 读取使用 `O_NOFOLLOW` 与 `O_NONBLOCK`。日志、审计与错误不得打印 DSN。`--metadata-dir` 仍是绝对、`0700` 私有目录，只作本机目录安全边界与迁移源，不再创建或读取 `intern.db`。
+- **启动**：`./bin/intern-web serve --database-url-file /run/secrets/intern_database_url --metadata-dir /var/lib/intern/metadata`。`store.Open(ctx, dsn)` 迁移并持有 owner；`migrate status` 调 `store.ReadStatus(ctx, dsn)`，只读、不改库、不持 owner 锁；`migrate up` 复用 `store.Open` 并在同库 owner 锁下迁移。同一 PG 跨不同 metadata-dir 仍互斥，锁与数据共用唯一物理连接；断链后禁止驱动重连，Store 永久失败，serve 取消调度与运行工具，并以 `errors.Join(runErr, database.Err())` 非零退出，排空后才关闭数据库。
+- **参考部署**：工作区 `compose.yaml` 已有 `postgres` 服务，镜像为 `postgres:17.11-trixie@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f`，卷为 `intern-postgres`，secrets 为 `intern_postgres_password` 与 `intern_database_url`，健康检查为 `pg_isready -U intern -d intern`；空库不预置 admin。部署验收尚未完成。
+- **升级**：停机后执行 `./bin/intern-web migrate import-sqlite --sqlite-file /absolute/intern.db --database-url-file /run/secrets/intern_database_url --metadata-dir /var/lib/intern/metadata`，对应 `store.ImportSQLite(ctx, dsn, absoluteFile)`。源 SQLite 只读并加排他锁，目标 PG 取 owner 锁；要求源模式恰为 Web 9 / physical 1 / replication 2、无外键损坏，目标无业务行且 setup 未完成；全部业务表在同一事务复制并保留 instance identity、ID、密文、AAD、session、关系、历史状态、sequence 与完整 uint64 十进制文本 LSN，按 users 或历史创建审计置 setup 完成。错误版本、损坏源、非空目标拒绝；失败回滚，无业务半迁移；源文件不自动删除。迁移前仍须分别备份旧 SQLite、备份仓库与 KEK。
+## 3. 首位管理员（浏览器 setup；命令行入口已删除）
 
-- 密码只从 stdin（`--password-stdin`，读一行）或终端两次无回显输入读取，**永远不接受命令行参数密码**；非终端且没带 `--password-stdin` 会报 `stdin is not a terminal; use --password-stdin`。
-- `--username` 规则：`^[A-Za-z0-9._-]{3,64}$`。
-- 成功输出 JSON `{"id":"…"}`，用户角色固定为 `admin`，并与 `users.create_admin` 审计行同事务提交。
-- 该子命令本身不校验密码长度；12–256 字符是 **API 契约**（`Password` schema）对 `POST /api/v1/users` 的要求。给管理员请用符合该范围的密码，与其他入口保持一致。
+`serve` 启动时自动应用迁移，但不会创建用户。空库由浏览器访问 `/login` 进入 `/setup`；匿名 `GET /api/v1/auth/setup` 只返回 `{"required":true|false}`，不暴露用户名、凭据或用户数量。首次 `POST /api/v1/auth/setup` 使用登录请求体，用户名与密码分别遵守现有用户名规则和 12–256 字符密码规则。
+
+- 成功返回 `201`，响应体为创建的用户，并建立 `intern_session`；管理员、完成标记与成功审计在同一 PG 事务提交。会话建立失败时初始化仍保持完成，返回 `500` 并要求用新账号登录，不重复创建管理员。
+- 已有任何用户（包括禁用用户）、重启后再次请求，或并发中的后续请求，返回 `409 setup_completed`。进程内 gate 只减少重复哈希，跨进程唯一性由 PG `SELECT ... FOR UPDATE` 保证。
+- 匿名尝试沿用登录限流：每 IP 30 次/分钟（burst 30）、每 IP+用户名 5 次/分钟（burst 5），超限 `429 rate_limited` 并带 `Retry-After`。进程内 gate 等待超过 10 秒返回 `503` 与 `Retry-After`，不无界排队密码哈希。
+- 生产命令 `intern-web user create-admin` 与仅服务它的 `store.OpenCurrent` 已删除；`app/cli` 逻辑备份兼容不是 Web 首管入口。恢复账号走已认证用户管理或明确运维恢复流程，不新增后门。真实浏览器、并发、重启与禁用用户场景仍待独立验收。
 - 后续用户与角色（`admin` / `operator` / `viewer`）由管理员经 API 管理：`GET|POST /api/v1/users`（创建必须给 `role`）、`GET|PATCH /api/v1/users/{id}`（字段为 `role`、`disabled`、`password`，至少一个；会吊销该用户会话；最后一个启用的 `admin` 不能被禁用或降级）、`DELETE /api/v1/users/{id}/sessions`（只吊销会话）；权限矩阵与限速规则以 `app/web/api/openapi.yaml` 为准。自己的密码用 `PUT /api/v1/auth/password` 改（会撤销其他会话）。
 
 登录（会话 cookie）：
@@ -197,7 +208,7 @@ intern-web serve --listen 127.0.0.1:8080 --tls-terminated-by-proxy --trusted-pro
 | 用途 | 封存数据源密码与 FTP 仓库密码（AAD 绑定 `table:id:field`），并包装制品数据密钥。没有 KEK 时 `serve` 照常启动，涉及凭据的写操作与物理备份回答 503。 |
 | 覆盖 | 不可覆盖生成（`O_EXCL`）：已有文件时报错而不是替换。 |
 | 轮换 | 支持**由 Tink 管理的多键 keyset**：在同一 keyset 文件里保留旧键、把新键设为主键；新写入用主键，旧密文仍按内嵌 key id 用旧键解密，因此**轮换后旧备份与已封存的凭据依旧可读**。不自制轮换格式，没有独立的轮换命令，也没有 KMS 集成（决策见[详细方案第 14.1 节](../roadmap/数据库备份与恢复-2026-10-17.md)）。删除旧键等于让引用它的备份与凭据不可解密。**Web 侧凭据封存的轮换未单独验收（未验证）**；删除整个 KEK 会让所有已封存秘密与已加密链失效。 |
-| 灾备 | KEK 与卷分开备份。metadata/backups/work 卷 + KEK 三者齐全才可能继续增量与恢复。 |
+| 灾备 | KEK 与卷分开备份。`intern-postgres`、backups、work 与 KEK 齐全才可能继续增量与恢复；旧 SQLite 只在受控升级前另行保留。 |
 
 ## 6. 备份操作（API）
 
@@ -241,13 +252,13 @@ curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/sources/$SRC/preflight" \
 # 5) 仓库可写探测（仅 admin；FTP 按其 tls_mode 打开并带本实例命名空间标记，不发布对象）
 curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/repositories/$REPO/probe"
 
-# 6) 策略：字段全部必填，replica_repository_id 可为 null
+# 6) 策略：只提交业务字段。replica_repository_id 可省略或为 null。
+#    max_chain_length、parallel、throttle、zstd_level、page_tracking 是服务端默认，不能通过 API 设置。
 POLICY=$(curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies" \
   -H 'Content-Type: application/json' \
   -d "{\"name\":\"core\",\"source_id\":\"$SRC\",\"local_repository_id\":\"$REPO\",
        \"replica_repository_id\":null,\"full_cron\":\"0 2 * * *\",\"incremental_cron\":\"0 * * * *\",
-       \"timezone\":\"UTC\",\"max_chain_length\":5,\"parallel\":1,\"throttle\":0,
-       \"zstd_level\":3,\"page_tracking\":false,\"enabled\":false}" | jq -r .id)
+       \"timezone\":\"UTC\",\"enabled\":false}" | jq -r .id)
 
 # 7) 启用（服务端先跑真实预检与副本探测，全部成功才在同一事务里置 enabled=1）
 curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies/$POLICY/enable"
@@ -258,7 +269,7 @@ RUN=$(curl --cacert "$CA" -b "$JAR" -sS -X POST "$API/api/v1/policies/$POLICY/ru
   -d '{"kind":"full"}' | jq -r .run_id)
 ```
 
-`full_cron` / `incremental_cron` 是 5 字段标准 cron（`cron.ParseStandard`），`timezone` 必须是非空 IANA 名称（空串与 `Local` 被拒）。`throttle` 直接映射为 `xtrabackup --throttle=N`：`0` 表示不下传该参数（不限速），`>0` 表示每秒最多读 N 个块，**值越小越慢**（候选验收用例用 `throttle: 1` 拖住一次真实全量来覆盖 SIGTERM 窗口）。`parallel ≥ 1`（低于 1 按 1 传给 xtrabackup）、`max_chain_length ≥ 1`、`zstd_level` 1–22（编码端并发固定为 1）、`page_tracking` 给 xtrabackup 加 `--page-tracking`，依赖 `component_mysqlbackup`。创建或更新策略时直接把 `enabled` 置 `true` 与调用 `…/enable` 走同一条路径：先跑真实预检与副本探测，不过就整条请求拒绝（`409 preflight_failed`，预检输入不全则是 `503`），不落任何行。停用：`POST /api/v1/policies/{id}/disable`（不需要预检）。调度器在 `serve` 进程内常驻，容器停了调度就停。
+`full_cron` / `incremental_cron` 是 5 字段标准 cron（`cron.ParseStandard`），`timezone` 必须是非空 IANA 名称（空串与 `Local` 被拒）。`max_chain_length`、`parallel`、`throttle`、`zstd_level`、`page_tracking` 是服务端默认，不能通过 API 设置：创建时由 `store.DefaultPolicyTuning()` 写成 `7`、`1`、`0`、`3`、`false`，请求体带上任一字段直接 `400`；更新只改业务字段，不覆盖这五列的历史值。响应仍把它们当作只读诊断。`throttle` 直接映射为 `xtrabackup --throttle=N`：`0` 表示不下传该参数（不额外限速），`>0` 表示每秒最多读 N 个块，**值越小越慢**。`parallel` 默认 `1`，传给 xtrabackup 时低于 1 按 1。`max_chain_length` 默认 `7`，限制单条物理链深度，不是业务调度频率上限。`zstd_level` 默认 `3`，只是历史记录值，现有流编码器仍固定并发 1 且未应用该 level。`page_tracking` 默认 `false`，为真时才给 xtrabackup 加 `--page-tracking`，依赖 `component_mysqlbackup`。D1 的 SIGTERM 用例在 API 创建之后用测试夹具把该策略行写成 `throttle=1`，拖住一次真实全量；这不是产品路径。创建或更新策略时直接把 `enabled` 置 `true` 与调用 `…/enable` 走同一条路径：先跑真实预检与副本探测，不过就整条请求拒绝（`409 preflight_failed`，预检输入不全则是 `503`），不落任何行。停用：`POST /api/v1/policies/{id}/disable`（不需要预检）。调度器在 `serve` 进程内常驻，容器停了调度就停。
 
 ## 7. 状态查看
 
@@ -318,27 +329,27 @@ docker run --rm --platform linux/amd64 -u 999:999 \
 
 ## 9. SIGTERM、宽限期与中断语义
 
-`intern-web serve` 收到 SIGTERM/SIGINT 后按顺序：停止接收新请求 → 在 `--shutdown-timeout`（默认 30s）窗口内优雅关停 → 排干 dispatcher 的两个 worker。注意 flag 自己的说明：**这只是关闭窗口，不是进程退出的绝对死线**；窗口之后在途 handler 仍可能继续排干（分离审计预算 + SQLite busy 超时 + 少量余量，当前约 10.5s）。取消一个请求不会打断 SQLite 的 busy 等待或 fsync。
+`intern-web serve` 收到 SIGTERM/SIGINT 后按顺序：停止接收新请求 → 在 `--shutdown-timeout`（默认 30s）窗口内优雅关停 → 排干 dispatcher 的两个 worker。窗口之后在途 handler 仍可能继续排干：分离审计预算 + PostgreSQL `statement_timeout` 5 秒 + 500 毫秒余量。普通请求取消不释放 owner 连接；真实 PG 断链则停止调度与服务，并以非零状态退出。
 
-因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例的做法是保持一个被 `throttle=1` 拖住的真实全量在飞行中，再用 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码为 0、没有 OOMKilled。
+因此 `compose.yaml` 声明 `stop_grace_period: 120s`（候选用例要求 ≥ 90s），运行中的备份/恢复才有机会走上面的取消语义而不是被 SIGKILL。候选用例先经 API 创建只含业务字段的策略，再由测试夹具把该行 `throttle` 写成 `1`（`xtrabackup --throttle=1`，每秒一块，不是运维接口），保持真实全量在飞行中，观察到 `running` 后才 `docker compose stop -t <grace+30> intern`，断言停止在声明的宽限期内完成、容器退出码为 0、没有 OOMKilled，证据行保留 `observed_running=true`、`grace_seconds`、`stop_seconds` 与 `no_false_completed`。
 
 被中断的运行**永不记成 completed**，`backup_id` 为空，completed 计数不增长：在宽限期内完成的优雅 SIGTERM 会把仍在复制的运行记为 `failed`、`error_class=backup_failed`；进程被强杀（SIGKILL/崩溃）时，下一次启动的恢复流程把遗留的 `running` 行收敛为 `failed`、`error_class=interrupted`；只有显式取消才是 `canceled`。若 worker 活过了 bounded 排干窗口，`serve` 会返回错误（不吞掉），状态交给下次启动回收。已发布导出与已提交备份不受影响。
 
 ## 10. 升级、重建与回滚
 
-业务数据（仓库、数据源、策略、备份、恢复记录、用户）只存在 `intern-metadata` 卷的 SQLite 中，载荷只在 `intern-backups`，KEK 只在 file secret 里，**升级镜像不覆盖任何这些内容**。
+业务数据（仓库、数据源、策略、备份、恢复记录、用户）只存在 `intern-postgres` 卷的 PostgreSQL 中，载荷只在 `intern-backups`，KEK 只在 file secret 里，**升级镜像不覆盖任何这些内容**。旧 SQLite 按第 2.3 节一次性导入：停机、源只读持锁、空 PG 目标持 owner 锁、单事务复制并核验；不得覆盖已有 PG 数据、静默空库或删除源文件。导入实现已有针对性 race 证据，但完整部署与回滚验收尚未完成；回退数据库版本仍需独立验证。
 
 ```sh
 # 升级：只改标签指向的构建，再让同一个服务换新镜像
 # .env: INTERN_VERSION=<新版本或新提交>
 docker compose build
-docker compose up -d intern
-docker compose exec -T intern intern-web migrate status   # 三个 *_pending 都为 0、current==latest 即 Ready
+docker compose up -d
+docker compose exec -T intern intern-web migrate status   # 只读状态；Ready 的判定以 JSON 实际字段为准
 ```
 
-回滚是对称操作：把 `INTERN_VERSION` 改回旧标签（旧镜像仍在宿主机上时 `docker compose build` 可跳过），再 `docker compose up -d intern`。**回滚的证据边界**：升级方向已由 D1 验收覆盖（同 Dockerfile 构建第二个不同 `SOURCE_SHA` 标签、替换后 `migrate status` 为 Ready、用户/资源/备份/恢复记录与 KEK 均保留、可继续增量且 parent 指向上一次头；候选 `9e05e52`，`9489f6c` 的运行再次通过），但升级后没有再做一次载荷恢复；**降级到更早的迁移版本没有任何证据**——若新版本已经前推 metadata 迁移，回滚旧镜像可能读到更高的 `current_version`，回滚前请先备份 `intern-metadata` 卷。
+回滚是对称操作：把 `INTERN_VERSION` 改回旧标签（旧镜像仍在宿主机上时 `docker compose build` 可跳过），再 `docker compose up -d`。历史 D1 的镜像升级证据只覆盖当时的 SQLite 候选，不能外推为当前 PG 升级已通过；若新版本已经前推迁移，回滚旧镜像可能读到更高的 `current_version`，回滚前请先备份 `intern-postgres`。
 
-`docker compose restart intern` 与 `docker compose up --force-recreate intern` 保留卷与 KEK 已由 D1 验收断言（候选 `9e05e52`，`9489f6c` 再次通过）；数据只存在卷与 file secret 里、镜像层不含业务数据，这一点也可由 `compose.yaml` 的卷声明直接对照。同一 `intern-metadata` 卷上启动第二个容器会被独占锁拒绝：`metadata directory is already in use by another intern process`（`app/web/internal/store/files.go`），且不影响第一个容器（单实例 SQLite、单调度所有者）。
+`docker compose restart intern` 与 `docker compose up --force-recreate intern` 对当前 PG 卷、metadata 边界与 KEK 的保留仍待新的 D1 验收。镜像层不含业务数据可由 `compose.yaml` 的卷声明直接对照。第二个进程即使使用不同 metadata-dir，只要连接同一 PG，也会被数据库级 owner 锁拒绝；错误是 `PostgreSQL control plane is already owned by another process`，且不影响第一个进程。
 
 制品留痕（CI 的做法，运维需要自备候选制品时同样适用）：
 
@@ -358,7 +369,7 @@ sha256sum bin/intern-web
 | --- | --- | --- |
 | `serve` 起不来 | `cannot read key file` | KEK 文件不存在或不可读。检查 Compose file secret 的宿主路径与 `INTERN_KEK_FILE`。 |
 | `serve` 起不来 | `key file must be a regular private file (chmod 600), not a symlink` | KEK 权限带组/其他位或是符号链接。`chmod 0600` 并 `chown 999:999`。 |
-| `serve` 起不来 | `metadata directory is already in use by another intern process` | 同一 `intern-metadata` 卷已有容器（常见于 `docker compose run`）。一个卷只允许一个容器。 |
+| `serve` 起不来 | `PostgreSQL control plane is already owned by another process` | 同一 PostgreSQL 已有 owner，即使 metadata-dir 不同也拒绝。先停止现有进程，不要启动第二个消费者。 |
 | `serve` 起不来 | `non-loopback HTTP requires TLS certificates or tls_terminated_by_proxy` | 非回环监听既没有证书也没有声明代理终止。给 `--tls-cert-file`/`--tls-key-file`，或 `--tls-terminated-by-proxy` + `--trusted-proxies` 并防火墙隔离。 |
 | `serve` 起不来 | `tls.cert_file and tls.key_file must be supplied together` / `cannot load TLS certificate and private key: …` | 只给一个，或证书与私钥不匹配/不可解析。 |
 | `serve` 起不来 | `tls_terminated_by_proxy requires trusted_proxies and does not prove end-to-end TLS` | 声明了代理终止但没给可信代理列表。 |
@@ -406,7 +417,7 @@ sha256sum bin/intern-web
 - **支持矩阵**：`internal/physical/compat.json` 只有一条记录 —— `mysql-community` 8.4.11 + PXB 8.4.0-7 + `linux/amd64`，`status: "candidate"`、`verified: false`，证据 Issue 是 [#27](https://github.com/flyingEirc/Intern/issues/27)。矩阵外版本、其他 MySQL 版本、arm64、云平台、TLS/最小权限的其他组合都**未验证**，未验证前不得列入已支持范围（[质量规范](quality.md)）。阶段 D 已用上述组件在真实容器中完成恢复与 prepare（已原生验收），阶段 E 的部署形态由 `container-deploy` 在候选 `9e05e52`（CircleCI 历史记录）与 `9489f6c`（[run 41859225449](https://github.com/flyingEirc/Intern/actions/runs/41859225449)）验收；矩阵本身未改。
 - **PITR**：首版只有物理全量 + 页增量链的**检查点恢复**；binlog 归档与完整物理 PITR 属 N1，未交付，不得宣称。
 - **仓库后端**：只有本地仓库 + FTP/FTPS 副本；S3/SFTP 未实现。自动保留清理属 N2（未交付），当前保留是手动判定，未 verified 的副本不会被删除。
-- **单所有者**：单实例 SQLite + 单调度所有者；多个 Web 用户不等于多副本调度或高可用；MySQL 与 Intern 不同宿主机、K8s/Helm、跨主机 agent 属 N3，未实现。
+- **单所有者（工作区已实现，待独立验收）**：同一 PG 只允许一个 owner，锁与数据共用唯一物理连接，断链后禁止驱动自动重连，Store 永久失败并取消 serve/运行工具。多个 Web 用户不等于多副本调度或高可用；MySQL 与 Intern 不同宿主机、K8s/Helm、跨主机 agent 属 N3，未实现。
 - **FTPS（S2）**：`internal/storage/ftp/tls.go` 与 `tls_mode`（`explicit`/`implicit`）、`ca_pem` 契约已实现并在候选 `9489f6c` 验收：最低 TLS 1.2、控制与数据通道都加密（数据通道在传输命令发出后握手）、拒绝降级、校验不受信任 CA/主机名/过期，四类拒绝（`tls_untrusted`、`tls_hostname`、`tls_expired`、`tls_negotiation`）都在发送凭据之前。`tls_negotiation` 只表示 TLS 握手失败或服务器拒绝 AUTH TLS；问候语里的拒绝（如 `421 Too many users`，显式模式在 AUTH 之前、隐式模式在握手之后）按普通 FTP 回复归类为 `reply` 并保留 `reply_code`（`c68dee4` 的 run 41876148900）。`container-ftps` 用真实 Pure-FTPd 1.0.54 夹具跑显式与隐式，并从仅 FTPS 副本恢复增量 1、2（run 41859225449）。**内网 FTPS（V1-A2）随 V1 于 2026-11-05 取消，未验证**，不能用夹具结果外推。
 - **明文 FTP**：凭据明文过网，响应里 `plaintext_credentials: true` 常驻标注；只在受控内网使用，且服务器行为须由运维按第 12 节自测。
 - **非夹具 FTP/FTPS 服务器**：FTP/FTPS 证据仅来自固定 Pure-FTPd 1.0.54 夹具；其他服务器软件/版本、被动模式/NAT 后端、带宽与耗时**没有证据**，V1 内网实测已于 2026-11-05 取消，不得把夹具结果外推为任意服务器已验证。

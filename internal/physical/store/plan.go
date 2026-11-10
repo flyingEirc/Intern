@@ -28,7 +28,7 @@ func (s *Store) Plan(ctx context.Context, request PlanRequest) (Plan, error) {
 	}
 	var plan Plan
 	// Keep the chain identity and all members in one consistent snapshot.
-	err := s.withTx(ctx, func(q *storesql.Queries) error {
+	err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
 		var err error
 		plan, err = incrementalPlan(ctx, q, request)
 		return err

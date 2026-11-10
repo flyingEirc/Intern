@@ -18,11 +18,14 @@ import (
 	"github.com/flyingEirc/Intern/internal/artifact"
 )
 
+const configTestDatabaseURL = "postgres://127.0.0.1/intern_config_test?sslmode=disable"
+
 func cleanConfigEnv(t *testing.T) {
 	t.Helper()
 	keys := []string{
 		"INTERN_CONFIG", "INTERN_LISTEN", "INTERN_METADATA_DIR", "INTERN_LOG_LEVEL", "INTERN_TLS_CERT_FILE", "INTERN_TLS_KEY_FILE", "INTERN_SHUTDOWN_TIMEOUT", "INTERN_TRUSTED_PROXIES", "INTERN_TLS_TERMINATED_BY_PROXY", "INTERN_SESSION_IDLE_TIMEOUT", "INTERN_SESSION_LIFETIME",
 		"INTERN_KEK_FILE", "INTERN_WORK_ROOT", "INTERN_XTRABACKUP_PATH", "INTERN_MIN_WORK_BYTES", "INTERN_MIN_BACKUP_BYTES",
+		"INTERN_DATABASE_URL", "INTERN_DATABASE_URL_FILE",
 	}
 	for _, key := range keys {
 		value, existed := os.LookupEnv(key)
@@ -35,6 +38,7 @@ func cleanConfigEnv(t *testing.T) {
 		})
 		os.Unsetenv(key)
 	}
+	t.Setenv("INTERN_DATABASE_URL", configTestDatabaseURL)
 }
 
 func loadConfig(t *testing.T, args ...string) (configuration, error) {
@@ -84,7 +88,7 @@ func assertConfig(t *testing.T, c configuration, err error, listen, dir, level s
 		t.Fatal(err)
 	}
 	want := configuration{
-		Listen: listen, MetadataDir: dir, ShutdownTimeout: timeout, TrustedProxies: proxies,
+		Listen: listen, MetadataDir: dir, DatabaseURL: configTestDatabaseURL, ShutdownTimeout: timeout, TrustedProxies: proxies,
 		RestoreExpansionFactor: 8,
 	}
 	want.Log.Level = level

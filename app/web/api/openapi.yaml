@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Intern Web control plane
-  version: 0.4.0
+  version: 0.5.0
   description: >-
     Session authentication, three-role authorization, users and audit API.
     JSON uses encoding/json/v2; handwritten handlers are checked by kin-openapi.
@@ -27,8 +27,16 @@ info:
     as text/event-stream over an unbuffered, authenticated channel: replay from
     Last-Event-ID or after_seq, heartbeats every 15s, one final end event at the
     terminal status, and a revoked event when the session stops being valid.
-    zstd_level is stored per policy but the encoder is fixed at concurrency 1
-    and the level is not applied.
+    New policies receive five low-level tuning values from one server-side
+    default source; those values are read-only diagnostics in Policy responses
+    and are rejected by PolicyWrite. The same cron engine previews full and
+    incremental schedules in the policy's IANA time zone.
+    GET /api/v1/auth/setup is an anonymous, read-only one-time setup probe.
+    POST creates the first administrator, success audit, and persistent
+    completion marker in one database transaction; a completed deployment
+    answers 409 setup_completed. Concurrent setup requests share a bounded
+    process gate before the existing password hash cap, while a PostgreSQL row
+    lock is the final cross-process uniqueness authority.
     Stage D adds isolated restores: a read-only plan endpoint behind
     restores:plan, an execute endpoint behind restores:execute that requires
     the administrator's password re-entry and a matching plan digest, bounded
@@ -121,6 +129,79 @@ paths:
           $ref: '#/components/responses/RetryableError'
         default:
           $ref: '#/components/responses/Error'
+  /api/v1/auth/setup:
+    get:
+      operationId: getSetup
+      security: []
+      summary: Read whether one-time administrator setup is required
+      description: >-
+        Anonymous and read-only. The response contains only a boolean; it never
+        reveals a username, credential, user count, or completion audit.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      responses:
+        '200':
+          description: One-time setup state
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupStatusResponse'
+        '413':
+          $ref: '#/components/responses/Error'
+        default:
+          $ref: '#/components/responses/Error'
+    post:
+      operationId: createSetup
+      security: []
+      summary: Create the first administrator and establish a normal session
+      description: >-
+        Only an uninitialized, user-free control plane accepts this request.
+        The administrator, success audit, and persistent completion marker
+        commit together. Existing login and password-hash limits, cross-origin
+        protection, and the Secure server-side session remain authoritative.
+      parameters:
+        - $ref: '#/components/parameters/RequestID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupRequest'
+      responses:
+        '201':
+          description: First administrator created; a fresh server-side session is issued
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+            Set-Cookie:
+              required: true
+              description: intern_session with Secure, HttpOnly, SameSite=Lax, Path=/
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '400':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
+        '409':
+          $ref: '#/components/responses/Error'
+        '413':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '429':
+          $ref: '#/components/responses/RetryableError'
+        '503':
+          $ref: '#/components/responses/RetryableError'
+        default:
+          $ref: '#/components/responses/Error'
+
   /api/v1/auth/logout:
     post:
       operationId: logout
@@ -1714,9 +1795,10 @@ components:
       description: >-
         Unified error; covers invalid_json (400), validation_failed (400),
         unauthorized (401), forbidden and cross_origin_rejected (403), not_found
-        (404), method_not_allowed (405), conflict (409), payload_too_large (413),
-        unsupported_media_type (415), rate_limited (429), internal (500), and
-        unavailable (503), as applicable. Wrong current password is 400, not 401.
+        (404), method_not_allowed (405), conflict and setup_completed (409),
+        payload_too_large (413), unsupported_media_type (415), rate_limited
+        (429), internal (500), and unavailable (503), as applicable. Wrong
+        current password is 400, not 401.
       headers:
         X-Request-ID:
           $ref: '#/components/headers/RequestID'
@@ -1735,6 +1817,26 @@ components:
         password:
           type: string
           writeOnly: true
+    SetupRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      description: >-
+        Unknown fields are rejected. This shape intentionally has no role or
+        low-level policy tuning fields: the first user is always an admin.
+      properties:
+        username:
+          $ref: '#/components/schemas/Username'
+        password:
+          $ref: '#/components/schemas/Password'
+    SetupStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [required]
+      properties:
+        required:
+          type: boolean
+          description: True only while anonymous one-time setup is still open.
     Username:
       type: string
       pattern: '^[A-Za-z0-9._-]{3,64}$'
@@ -2144,6 +2246,10 @@ components:
               type: integer
               minimum: 0
     Policy:
+      description: >-
+        Business policy with five server-owned tuning diagnostics. Those five
+        values are read-only on the wire; a business edit preserves historical
+        values instead of silently replacing them.
       type: object
       additionalProperties: false
       required: [id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight, created_at, updated_at]
@@ -2171,18 +2277,28 @@ components:
         max_chain_length:
           type: integer
           minimum: 1
+          readOnly: true
+          description: Server-owned maximum physical chain length.
         parallel:
           type: integer
           minimum: 1
+          readOnly: true
+          description: Server-owned tool concurrency.
         throttle:
           type: integer
           minimum: 0
+          readOnly: true
+          description: Server-owned throttle; zero applies no extra limit.
         zstd_level:
           type: integer
           minimum: 1
           maximum: 22
+          readOnly: true
+          description: Server-owned stored Zstandard level; the current encoder uses fixed concurrency.
         page_tracking:
           type: boolean
+          readOnly: true
+          description: Server-owned page-tracking diagnostic.
         enabled:
           type: boolean
         last_preflight:
@@ -2198,7 +2314,11 @@ components:
     PolicyWrite:
       type: object
       additionalProperties: false
-      required: [name, source_id, local_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled]
+      description: >-
+        Only business fields are configurable. Low-level tuning is supplied once
+        by the server at creation and is never accepted as a write field; a
+        business update preserves the existing tuning columns.
+      required: [name, source_id, local_repository_id, full_cron, incremental_cron, timezone, enabled]
       properties:
         name:
           type: string
@@ -2213,28 +2333,14 @@ components:
           nullable: true
         full_cron:
           type: string
-          description: Standard 5-field cron expression, validated with cron.ParseStandard.
+          description: Standard 5-field cron expression for full backups, validated with cron.ParseStandard.
         incremental_cron:
           type: string
+          description: Standard 5-field cron expression for incremental backups, previewed by the same schedule engine.
         timezone:
           type: string
           minLength: 1
           description: Non-empty IANA time zone name. The empty string and Local are rejected.
-        max_chain_length:
-          type: integer
-          minimum: 1
-        parallel:
-          type: integer
-          minimum: 1
-        throttle:
-          type: integer
-          minimum: 0
-        zstd_level:
-          type: integer
-          minimum: 1
-          maximum: 22
-        page_tracking:
-          type: boolean
         enabled:
           type: boolean
     PolicyPage:
@@ -2943,7 +3049,7 @@ components:
                 unconfigured.
         code:
           type: string
-          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, validation_failed, preflight_failed, restore_refused, plan_changed, confirmation_failed]
+          enum: [bad_request, invalid_json, unsupported_media_type, payload_too_large, not_found, method_not_allowed, internal, unavailable, unauthorized, forbidden, cross_origin_rejected, rate_limited, conflict, setup_completed, validation_failed, preflight_failed, restore_refused, plan_changed, confirmation_failed]
         message:
           type: string
           minLength: 1

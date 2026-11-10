@@ -7,16 +7,14 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
@@ -69,24 +67,6 @@ func (b fixtureBackup) payloadDigest() string { return strings.Repeat("a", 48) +
 
 func (b fixtureBackup) metadataDigest() string { return strings.Repeat("b", 48) + b.ID[len(b.ID)-16:] }
 
-func openFixtureDB(t *testing.T, filename string) *sql.DB {
-	t.Helper()
-	u := url.URL{Scheme: "file", Path: filename}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	mustNoError(t, err)
-	db.SetMaxOpenConns(1)
-	mustNoError(t, store.Migrate(t.Context(), db))
-	mustNoError(t, replication.Migrate(t.Context(), db))
-	t.Cleanup(func() { mustNoError(t, db.Close()) })
-	return db
-}
-
 func mustNoError(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
@@ -113,7 +93,9 @@ func newPlanFixture(t *testing.T) *planFixture {
 	mustNoError(t, err)
 	t.Cleanup(func() { mustNoError(t, repo.Close()) })
 	fixture.repo = repo
-	fixture.db = openFixtureDB(t, filepath.Join(root, "intern.db"))
+	fixture.db = pgtest.Open(t)
+	mustNoError(t, store.Migrate(t.Context(), fixture.db))
+	mustNoError(t, replication.Migrate(t.Context(), fixture.db))
 	fixture.store = store.New(fixture.db)
 	fixture.replication = replication.NewCatalog(fixture.db)
 	keyID, err := artifact.KeyID(fixture.keyFile)
@@ -133,7 +115,7 @@ func writeExecutable(t *testing.T, root, name string) string {
 
 func insertFixtureChain(fixture *planFixture, keyID string) error {
 	_, err := fixture.db.ExecContext(context.Background(),
-		`INSERT INTO chains (id, source_id, server_uuid, server_version, tool_version, started_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chains (id, source_id, server_uuid, server_version, tool_version, started_at) VALUES ($1, $2, $3, $4, $5, $6)`,
 		fixtureChain, fixtureSource, "8f0f5b3f-3b57-4b0f-9f39-0a3f6a1b2c3d", "8.4.11", "8.4.0-7", "2026-01-01T00:00:00.000000000Z")
 	if err != nil {
 		return err
@@ -155,7 +137,7 @@ func insertFixtureChain(fixture *planFixture, keyID string) error {
 			`INSERT INTO backups (id, chain_id, seq, parent_id, kind, status, instance_id, run_id, from_lsn, to_lsn, last_lsn,
 			 checkpoints, xtrabackup_info, object_path, payload_size, payload_sha256, metadata_size, metadata_sha256, key_id,
 			 local_present, created_at, completed_at)
-			 VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+			 VALUES ($1, $2, $3, $4, $5, 'completed', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 1, $19, $20)`,
 			backup.ID, fixtureChain, backup.Seq, nullText(backup.ParentID), backup.Kind, fixtureInstance, "run-"+backup.ID,
 			uintText(backup.FromLSN), uintText(backup.ToLSN), uintText(backup.ToLSN),
 			[]byte("backup_type=incremental\nfrom_lsn="+uintText(backup.FromLSN)+"\nto_lsn="+uintText(backup.ToLSN)+"\nlast_lsn="+uintText(backup.ToLSN)+"\n"),
@@ -210,7 +192,7 @@ func repeated(value byte, size int64) []byte {
 func insertReplica(db *sql.DB, backup fixtureBackup, status string) error {
 	_, err := db.ExecContext(context.Background(),
 		`INSERT INTO replicas (backup_id, repository_id, idem_key, status, attempts, permanent, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)`,
+		 VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $7, $8, $9)`,
 		backup.ID, fixtureRepoID, "replicate:"+backup.ID+":"+fixtureRepoID, status,
 		"2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z",
 		"2026-01-01T00:00:00.000000000Z", "2026-01-01T00:00:00.000000000Z")
@@ -224,7 +206,7 @@ func insertReplica(db *sql.DB, backup fixtureBackup, status string) error {
 		size := replicaSize(backup, member)
 		if _, err = db.ExecContext(context.Background(),
 			`INSERT INTO replica_members (backup_id, repository_id, member, status, digest, size, updated_at)
-			 VALUES (?, ?, ?, 'verified', ?, ?, ?)`,
+			 VALUES ($1, $2, $3, 'verified', $4, $5, $6)`,
 			backup.ID, fixtureRepoID, member, digest, size, "2026-01-01T00:00:00.000000000Z",
 		); err != nil {
 			return err

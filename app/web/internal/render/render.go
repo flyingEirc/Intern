@@ -27,6 +27,7 @@ const (
 	RateLimited          = "rate_limited"
 	Conflict             = "conflict"
 	ValidationFailed     = "validation_failed"
+	SetupCompleted       = "setup_completed"
 	PreflightFailed      = "preflight_failed"
 	// W5 restore codes. restore_refused carries the restore engine's fixed
 	// machine code in error.detail.code; plan_changed is a digest mismatch;

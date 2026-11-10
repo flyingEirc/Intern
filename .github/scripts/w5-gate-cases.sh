@@ -32,6 +32,8 @@ snap1=$(printf 'b%.0s' {1..64})
 snap2=$(printf 'c%.0s' {1..64})
 snapf=$(printf 'd%.0s' {1..64})
 mysql_image='mysql:8.4.11@sha256:85b9bf2e29cf836ecb8c2a15a935d4ba0c606631dff1dd79531a11983c638f2a'
+legacy_source=06c34299f03becdaf0fdcdffff5fbd4319bedafb
+export_continued=0123456789abcdef0123456789abcd04
 
 accepted=0
 work=$(mktemp -d)
@@ -43,7 +45,7 @@ payload() {
 		"W5-A2 plan target=inc2 links=ftp:3 digest=${digest} lsn=9000 required_export=209715200 available_export=900000000 export_path=/export/{restore_id} rehearsal=true risks=no_auto_replace_production,server_uuid_duplicate,pitr_unavailable" \
 		"W5-A2 plan_readonly restores=0 export_dirs=0 ftp_namespace=0123456789abcdef ftp_writes=0 local_payloads=removed" \
 		"W5-A2 refused backup_not_found=404 unconfigured=503" \
-		"W5-A6 e2e chain=seq:1,2,3 inc1=${backup_inc1} inc2=${backup_inc2} replicas_verified=3 local_payloads=removed logs_agree=sqlite log_rows=14 phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing" \
+		"W5-A6 e2e chain=seq:1,2,3 inc1=${backup_inc1} inc2=${backup_inc2} replicas_verified=3 local_payloads=removed logs_agree=postgres log_rows=14 phase_seen=fetching,authenticating,extracting,preparing,exporting,rehearsing" \
 		"W5-A6 export=${export_inc1} bytes=268435512 data_digest=0011223344556677 phase=rehearsing links=ftp:2 mode=0750" \
 		"W5-A6 export=${export_inc2} bytes=268435612 data_digest=1122334455667788 phase=exporting links=ftp:3 mode=0750" \
 		"W5-A6 restore=inc1 source=ftp export=${export_inc1} expected_snapshot=${snap1} verify_status=passed" \
@@ -51,14 +53,33 @@ payload() {
 		"W5-A3 execute admin_only=true cross_origin=cross_origin_rejected confirm=403,confirmation_failed no_row=true audit_denied=7 limiter=429 retry_after=11 digest_changed=409,plan_changed replay_same_id=true conflict=409 audit_atomic=true" \
 		"W5-A6 export=${export_full} bytes=268435400 data_digest=2233445566778899 phase=exporting links=ftp:1 mode=0750" \
 		"W5-A3 restore=full source=ftp export=${export_full} expected_snapshot=${snapf} verify_status=not_requested" \
-		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 sqlite_intervals=disjoint" \
-		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=sqlite" \
+		"W5-A4 exclusion run_blocked_by_restore=true restore_blocked_by_run=true running_max=1 queued_samples=48 postgres_intervals=disjoint" \
+		"W5-A5 state phase_seen=fetching,authenticating,extracting,preparing sources=ftp completed_restores=3 export_bytes=805306524 verify_status=not_requested side_effects=explicit canceled_queued=true canceled_running=true logs_agree=postgres" \
 		"W5-A5 sigkill=failed/interrupted side_effects=explicit cleanup=exact published_intact=true refused=source_unavailable:409 recovery_repeated=true" \
 		"W5-A6 restored=inc1 container_snapshot=${snap1} expected_snapshot=${snap1} match=true" \
 		"W5-A6 restored=inc2 container_snapshot=${snap2} expected_snapshot=${snap2} match=true" \
 		"W5-A3 restored=full container_snapshot=${snapf} expected_snapshot=${snapf} match=true" \
 		"W5-A6 exports_started=3 snapshots_match=true new_mysql=${mysql_image}" \
 		"W5 candidate source=${source} source_dirty=false binary_sha256=${binary} mysql_image=${mysql_image} pxb_image=percona-xtrabackup@sha256:bf1 worker_image=sha256:aa ftp_image=sha256:bb daemon=linux/amd64 platform=linux/amd64 worker_uid=999 worker_gid=999 tool_sha256=${binary} xbstream_sha256=${binary} mysqld_sha256=${binary} server=Pure-FTPd-1.0.54 client=jlaffaye/ftp-v0.2.4 topology=private-network-no-NAT"
+	printf '%s\n' \
+		"PG-G3 legacy source=${legacy_source} schema=web:9,physical:1,replication:2 instance=11111111-1111-4111-8111-111111111111 sqlite_sha256=${digest} origin=retired-production-serve chain=full,inc1,inc2 fault_history=explicit-owned-crash-fixture" \
+		"PG-G3 import command=production tables=18 equal=true source_intact=true repeat=refused nonempty=refused rollback=empty" \
+		"PG-G3 continuity login=original setup=closed history=visible chain=1,2,3,4 lsn=continuous replicas=4 cleanup=recovered" \
+		"PG-G3 binary path=/tmp/legacy-web sha256=${binary} legacy_source=${legacy_source}" \
+		"PG-G3 binary path=/tmp/candidate-web sha256=${digest} legacy_source=${legacy_source}" \
+		"PG-G3 export point=full id=${export_full} snapshot=${snapf} source=ftp" \
+		"PG-G3 export point=inc1 id=${export_inc1} snapshot=${snap1} source=ftp" \
+		"PG-G3 export point=inc2 id=${export_inc2} snapshot=${snap2} source=ftp" \
+		"PG-G3 export point=continued id=${export_continued} snapshot=${digest} source=ftp" \
+		"PG-G3 restored point=full actual_snapshot=${snapf} expected_snapshot=${snapf} match=true" \
+		"PG-G3 restored point=inc1 actual_snapshot=${snap1} expected_snapshot=${snap1} match=true" \
+		"PG-G3 restored point=inc2 actual_snapshot=${snap2} expected_snapshot=${snap2} match=true" \
+		"PG-G3 restored point=continued actual_snapshot=${digest} expected_snapshot=${digest} match=true"
+	local table
+	for table in instance users sessions session_tombstones audit_logs repositories sources policies \
+		runs run_logs restores restore_logs chains backups cleanup_ledger replicas replica_members replica_parts; do
+		printf 'PG-G3 table=%s rows=1 sha256=%s equal=true\n' "$table" "$digest"
+	done
 }
 
 # stream wraps one payload file in the pass events the gate counts: one pass per
@@ -150,7 +171,7 @@ reject not_admin_only 'if has("Output") then .Output |= sub("admin_only=true"; "
 reject no_blocker 'if has("Output") then .Output |= sub("run_blocked_by_restore=true"; "run_blocked_by_restore=false") else . end'
 reject no_blockee 'if has("Output") then .Output |= sub("restore_blocked_by_run=true"; "restore_blocked_by_run=false") else . end'
 reject two_slots 'if has("Output") then .Output |= sub("running_max=1"; "running_max=2") else . end'
-reject overlap 'if has("Output") then .Output |= sub("sqlite_intervals=disjoint"; "sqlite_intervals=overlap") else . end'
+reject overlap 'if has("Output") then .Output |= sub("postgres_intervals=disjoint"; "postgres_intervals=overlap") else . end'
 reject no_cancel_queued 'if has("Output") then .Output |= sub("canceled_queued=true"; "canceled_queued=false") else . end'
 reject no_cancel_running 'if has("Output") then .Output |= sub("canceled_running=true"; "canceled_running=false") else . end'
 reject implicit_effects 'if has("Output") then .Output |= gsub("side_effects=explicit"; "side_effects=none") else . end'
@@ -160,7 +181,7 @@ reject no_refusal 'if has("Output") then .Output |= sub("refused=source_unavaila
 reject recovery_twice 'if has("Output") then .Output |= sub("recovery_repeated=true"; "recovery_repeated=false") else . end'
 reject diagnostics_dump 'if has("Output") then .Output |= ("W4 diagnostics: begin (bounded to 400 lines)\n" + .) else . end'
 reject a4_running_max_dropped 'if has("Output") then .Output |= sub("restore_blocked_by_run=true running_max=1 queued_samples=48"; "restore_blocked_by_run=true queued_samples=48") else . end'
-reject a4_facts_reordered 'if has("Output") then .Output |= sub("running_max=1 queued_samples=48 sqlite_intervals=disjoint"; "queued_samples=48 running_max=1 sqlite_intervals=disjoint") else . end'
+reject a4_facts_reordered 'if has("Output") then .Output |= sub("running_max=1 queued_samples=48 postgres_intervals=disjoint"; "queued_samples=48 running_max=1 postgres_intervals=disjoint") else . end'
 reject a4_zero_slots 'if has("Output") then .Output |= sub("running_max=1"; "running_max=0") else . end'
 reject a5_state_facts_reordered 'if has("Output") then .Output |= sub("side_effects=explicit canceled_queued=true"; "canceled_queued=true side_effects=explicit") else . end'
 reject a5_sigkill_facts_moved 'if has("Output") then .Output |= sub("W5-A5 sigkill=failed/interrupted side_effects=explicit"; "W5-A5 sigkill=failed/interrupted\nW5-A5 recovery side_effects=explicit") else . end'
@@ -168,6 +189,40 @@ reject a5_sigkill_facts_reordered 'if has("Output") then .Output |= sub("cleanup
 reject dirty_source 'if has("Output") then .Output |= sub("source_dirty=false"; "source_dirty=true") else . end'
 reject root_worker 'if has("Output") then .Output |= sub("worker_uid=999 worker_gid=999"; "worker_uid=0 worker_gid=0") else . end'
 reject emulated 'if has("Output") then .Output |= sub("daemon=linux/amd64"; "daemon=linux/arm64") else . end'
+reject migration_absent 'if has("Output") then .Output |= gsub("PG-G3 [^\n]*\n"; "") else . end'
+reject migration_legacy_missing 'if has("Output") then .Output |= sub("PG-G3 legacy [^\n]*\n"; "") else . end'
+reject migration_legacy_foreign 'if has("Output") then .Output |= sub("PG-G3 legacy source=[0-9a-f]{40}"; "PG-G3 legacy source=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") else . end'
+reject migration_wrong_schema 'if has("Output") then .Output |= sub("schema=web:9,physical:1,replication:2"; "schema=web:8,physical:1,replication:2") else . end'
+reject migration_not_production 'if has("Output") then .Output |= sub("command=production tables=18"; "command=store-helper tables=18") else . end'
+reject migration_source_changed 'if has("Output") then .Output |= sub("source_intact=true"; "source_intact=false") else . end'
+reject migration_repeat_accepted 'if has("Output") then .Output |= sub("repeat=refused"; "repeat=accepted") else . end'
+reject migration_nonempty_accepted 'if has("Output") then .Output |= sub("nonempty=refused"; "nonempty=accepted") else . end'
+reject migration_partial_rollback 'if has("Output") then .Output |= sub("rollback=empty"; "rollback=partial") else . end'
+reject migration_missing_table 'if has("Output") then .Output |= sub("PG-G3 table=replica_parts [^\n]*\n"; "") else . end'
+reject migration_wrong_table 'if has("Output") then .Output |= sub("PG-G3 table=replica_parts "; "PG-G3 table=replica_members ") else . end'
+reject migration_table_changed 'if has("Output") then .Output |= sub("PG-G3 table=users rows=1 sha256=[0-9a-f]{64} equal=true"; "PG-G3 table=users rows=1 sha256=abc equal=false") else . end'
+reject migration_extra_table 'if has("Output") then .Output |= (. + "PG-G3 table=unlisted rows=1 sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa equal=true\n") else . end'
+reject migration_login_failed 'if has("Output") then .Output |= sub("login=original"; "login=failed") else . end'
+reject migration_setup_open 'if has("Output") then .Output |= sub("setup=closed"; "setup=open") else . end'
+reject migration_history_missing 'if has("Output") then .Output |= sub("history=visible"; "history=missing") else . end'
+reject migration_chain_short 'if has("Output") then .Output |= sub("chain=1,2,3,4"; "chain=1,2,3") else . end'
+reject migration_lsn_broken 'if has("Output") then .Output |= sub("lsn=continuous"; "lsn=broken") else . end'
+reject migration_replica_missing 'if has("Output") then .Output |= sub("replicas=4"; "replicas=3") else . end'
+reject migration_cleanup_pending 'if has("Output") then .Output |= sub("cleanup=recovered"; "cleanup=pending") else . end'
+reject migration_missing_export 'if has("Output") then .Output |= sub("PG-G3 export point=continued [^\n]*\n"; "") else . end'
+reject migration_duplicate_export 'if has("Output") then .Output |= sub("PG-G3 export point=continued "; "PG-G3 export point=inc2 ") else . end'
+reject migration_reused_export_id 'if has("Output") then .Output |= sub("PG-G3 export point=continued id=0123456789abcdef0123456789abcd04"; "PG-G3 export point=continued id=0123456789abcdef0123456789abcd03") else . end'
+reject migration_missing_restored 'if has("Output") then .Output |= sub("PG-G3 restored point=continued [^\n]*\n"; "") else . end'
+reject migration_duplicate_restored 'if has("Output") then .Output |= sub("PG-G3 restored point=continued "; "PG-G3 restored point=inc2 ") else . end'
+reject migration_false_match 'if has("Output") then .Output |= sub("PG-G3 restored point=full actual_snapshot=[0-9a-f]{64} expected_snapshot=[0-9a-f]{64} match=true"; "PG-G3 restored point=full actual_snapshot=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd expected_snapshot=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd match=false") else . end'
+reject migration_actual_mismatch 'if has("Output") then .Output |= sub("PG-G3 restored point=inc1 actual_snapshot=[0-9a-f]{64}"; "PG-G3 restored point=inc1 actual_snapshot=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd") else . end'
+reject migration_unbound_snapshot 'if has("Output") then .Output |= sub("PG-G3 export point=continued id=0123456789abcdef0123456789abcd04 snapshot=[0-9a-f]{64}"; "PG-G3 export point=continued id=0123456789abcdef0123456789abcd04 snapshot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") else . end'
+reject migration_missing_binary 'if has("Output") then .Output |= sub("PG-G3 binary path=/tmp/legacy-web [^\n]*\n"; "") else . end'
+reject migration_binary_source_changed 'if has("Output") then .Output |= sub("legacy_source=[0-9a-f]{40}"; "legacy_source=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") else . end'
+reject migration_full_not_ftp 'if has("Output") then .Output |= sub("PG-G3 export point=full id=[0-9a-f]{32} snapshot=[0-9a-f]{64} source=ftp"; "PG-G3 export point=full id=0123456789abcdef0123456789abcd03 snapshot=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd source=local") else . end'
+reject migration_inc1_not_ftp 'if has("Output") then .Output |= sub("PG-G3 export point=inc1 id=[0-9a-f]{32} snapshot=[0-9a-f]{64} source=ftp"; "PG-G3 export point=inc1 id=0123456789abcdef0123456789abcd01 snapshot=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb source=local") else . end'
+reject migration_inc2_not_ftp 'if has("Output") then .Output |= sub("PG-G3 export point=inc2 id=[0-9a-f]{32} snapshot=[0-9a-f]{64} source=ftp"; "PG-G3 export point=inc2 id=0123456789abcdef0123456789abcd02 snapshot=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc source=local") else . end'
+reject migration_continued_not_ftp 'if has("Output") then .Output |= sub("PG-G3 export point=continued id=[0-9a-f]{32} snapshot=[0-9a-f]{64} source=ftp"; "PG-G3 export point=continued id=0123456789abcdef0123456789abcd04 snapshot=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa source=local") else . end'
 
 if run_gate "$wrong_source" "$work/accept.jsonl" "$work/sha.log"; then
 	echo 'FAIL: the gate accepted a foreign GITHUB_SHA' >&2

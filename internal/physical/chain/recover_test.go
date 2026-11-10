@@ -3,32 +3,20 @@ package chain
 import (
 	"database/sql"
 	"errors"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/storage/local"
 )
 
 func recoveryStore(t *testing.T) (*store.Store, *sql.DB) {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: filepath.Join(t.TempDir(), "intern.db")}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	check(t, err)
-	db.SetMaxOpenConns(1)
+	db := pgtest.Open(t)
 	check(t, store.Migrate(t.Context(), db))
-	t.Cleanup(func() { check(t, db.Close()) })
 	return store.New(db), db
 }
 
@@ -122,7 +110,7 @@ func TestRecoverRefusesSymlinkWorkTargetAndRetainsLedger(t *testing.T) {
 func assertRecoveryCount(t *testing.T, db *sql.DB, id string, want int) {
 	t.Helper()
 	var count int
-	check(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cleanup_ledger WHERE backup_id=?", id).Scan(&count))
+	check(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cleanup_ledger WHERE backup_id=$1", id).Scan(&count))
 	if count != want {
 		t.Fatalf("ledger rows=%d want=%d", count, want)
 	}

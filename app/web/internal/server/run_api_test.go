@@ -426,7 +426,7 @@ func (retryOK) TriggerRun(context.Context, string, string, string, string, strin
 func countUserAudit(t *testing.T, h *runHarness, action, result string) int {
 	t.Helper()
 	var count int
-	query := `SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ?`
+	query := `SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND result = $2`
 	if err := h.fixture.database.DB().QueryRowContext(t.Context(), query, action, result).Scan(&count); err != nil {
 		t.Fatal(err)
 	}

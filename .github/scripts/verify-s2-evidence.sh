@@ -14,7 +14,7 @@
 #
 # Each value a marker carries was read back by the worker or the harness that printed
 # it: the fixture's own manifest, the audit the server-side taps wrote, a real TLS
-# handshake, the served API row, SQLite, the FTPS namespace listing, or a brand-new
+# handshake, the served API row, PostgreSQL, the FTPS namespace listing, or a brand-new
 # MySQL 8.4.11 container started on a published export. The gate never reads a
 # secret: it only inspects lines the workers already proved free of the generated
 # credentials. Synthetic accept and reject cases live in s2-gate-cases.sh.

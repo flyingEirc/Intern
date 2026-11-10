@@ -6,7 +6,18 @@ export const zLoginRequest = z.object({
     username: z.string()
 });
 
+export const zSetupStatusResponse = z.object({
+    required: z.boolean()
+});
+
 export const zUsername = z.string().regex(/^[A-Za-z0-9._-]{3,64}$/);
+
+/**
+ * Unknown fields are rejected. This shape intentionally has no role or low-level policy tuning fields: the first user is always an admin.
+ */
+export const zSetupRequest = z.object({
+    username: zUsername
+});
 
 /**
  * 12–256 Unicode characters; never returned or logged
@@ -209,6 +220,9 @@ export const zProbeResult = z.object({
     }).optional()
 });
 
+/**
+ * Business policy with five server-owned tuning diagnostics. Those five values are read-only on the wire; a business edit preserves historical values instead of silently replacing them.
+ */
 export const zPolicy = z.object({
     id: z.string(),
     name: z.string().min(1).max(64),
@@ -218,17 +232,20 @@ export const zPolicy = z.object({
     full_cron: z.string(),
     incremental_cron: z.string(),
     timezone: z.string().min(1),
-    max_chain_length: z.int().gte(1),
-    parallel: z.int().gte(1),
-    throttle: z.int().gte(0),
-    zstd_level: z.int().gte(1).lte(22),
-    page_tracking: z.boolean(),
+    max_chain_length: z.int().gte(1).readonly(),
+    parallel: z.int().gte(1).readonly(),
+    throttle: z.int().gte(0).readonly(),
+    zstd_level: z.int().gte(1).lte(22).readonly(),
+    page_tracking: z.boolean().readonly(),
     enabled: z.boolean(),
     last_preflight: zPreflightRecord.nullable(),
     created_at: z.iso.datetime(),
     updated_at: z.iso.datetime()
 });
 
+/**
+ * Only business fields are configurable. Low-level tuning is supplied once by the server at creation and is never accepted as a write field; a business update preserves the existing tuning columns.
+ */
 export const zPolicyWrite = z.object({
     name: z.string().min(1).max(64),
     source_id: z.string(),
@@ -237,11 +254,6 @@ export const zPolicyWrite = z.object({
     full_cron: z.string(),
     incremental_cron: z.string(),
     timezone: z.string().min(1),
-    max_chain_length: z.int().gte(1),
-    parallel: z.int().gte(1),
-    throttle: z.int().gte(0),
-    zstd_level: z.int().gte(1).lte(22),
-    page_tracking: z.boolean(),
     enabled: z.boolean()
 });
 
@@ -599,6 +611,7 @@ export const zError = z.object({
         'cross_origin_rejected',
         'rate_limited',
         'conflict',
+        'setup_completed',
         'validation_failed',
         'preflight_failed',
         'restore_refused',
@@ -616,6 +629,14 @@ export const zErrorResponse = z.object({
 export const zLoginRequestWritable = z.object({
     username: z.string(),
     password: z.string()
+});
+
+/**
+ * Unknown fields are rejected. This shape intentionally has no role or low-level policy tuning fields: the first user is always an admin.
+ */
+export const zSetupRequestWritable = z.object({
+    username: zUsername,
+    password: zPassword
 });
 
 export const zRepositoryWriteWritable = z.object({
@@ -639,6 +660,29 @@ export const zSourceWriteWritable = z.object({
     datadir: z.string().min(1),
     username: z.string().min(1),
     password: z.string().min(1).optional()
+});
+
+/**
+ * Business policy with five server-owned tuning diagnostics. Those five values are read-only on the wire; a business edit preserves historical values instead of silently replacing them.
+ */
+export const zPolicyWritable = z.object({
+    id: z.string(),
+    name: z.string().min(1).max(64),
+    source_id: z.string(),
+    local_repository_id: z.string(),
+    replica_repository_id: z.string().nullable(),
+    full_cron: z.string(),
+    incremental_cron: z.string(),
+    timezone: z.string().min(1),
+    enabled: z.boolean(),
+    last_preflight: zPreflightRecord.nullable(),
+    created_at: z.iso.datetime(),
+    updated_at: z.iso.datetime()
+});
+
+export const zPolicyPageWritable = z.object({
+    items: z.array(zPolicyWritable),
+    next_before: z.string().nullable()
 });
 
 export const zRestoreExecuteRequestWritable = z.object({
@@ -694,6 +738,26 @@ export const zLoginBody = zLoginRequestWritable;
  * Authenticated user; a fresh server-side session is issued
  */
 export const zLoginResponse = zUserResponse;
+
+export const zGetSetupHeaders = z.object({
+    'X-Request-ID': z.string().optional()
+});
+
+/**
+ * One-time setup state
+ */
+export const zGetSetupResponse = zSetupStatusResponse;
+
+export const zCreateSetupBody = zSetupRequestWritable;
+
+export const zCreateSetupHeaders = z.object({
+    'X-Request-ID': z.string().optional()
+});
+
+/**
+ * First administrator created; a fresh server-side session is issued
+ */
+export const zCreateSetupResponse = zUserResponse;
 
 /**
  * Operation completed

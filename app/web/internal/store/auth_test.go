@@ -6,17 +6,18 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func TestSessionStorePersistsExpiresAndDeletes(t *testing.T) {
-	dir := privateTempDir(t)
+	dir := pgtest.New(t)
 	database := openTestStore(t, dir)
 	sessions := database.Sessions()
 	if err := sessions.Commit("active", []byte("session-data"), time.Now().Add(time.Hour)); err != nil {
@@ -70,7 +71,7 @@ func assertExpiredSessionCleanup(t *testing.T, database *Store) {
 }
 
 func TestDeletedSessionIsNotResurrectedByCommit(t *testing.T) {
-	dir := privateTempDir(t)
+	dir := pgtest.New(t)
 	database, err := Open(t.Context(), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +114,7 @@ func assertSessionAbsent(t *testing.T, sessions *SessionStore, token string) {
 
 func assertExpiredTombstoneAllowsReuse(t *testing.T, database *Store) {
 	t.Helper()
-	_, err := database.db.ExecContext(t.Context(), "UPDATE session_tombstones SET expiry = ?", unixSeconds(time.Now().Add(-time.Second)))
+	_, err := database.db.ExecContext(t.Context(), "UPDATE session_tombstones SET expiry = $1", unixSeconds(time.Now().Add(-time.Second)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func assertExpiredTombstoneAllowsReuse(t *testing.T, database *Store) {
 }
 
 func TestSessionCleanupFailureLogsError(t *testing.T) {
-	database, err := Open(t.Context(), privateTempDir(t))
+	database, err := Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func (l *lockedLog) String() string {
 }
 
 func TestSQLSessionCleanupStopsAndRemovesExpiredRows(t *testing.T) {
-	database := openTestStore(t, privateTempDir(t))
+	database := openTestStore(t, pgtest.New(t))
 	sessions := database.Sessions()
 	if err := sessions.Commit("expired", []byte("data"), time.Now().Add(-time.Second)); err != nil {
 		t.Fatal(err)
@@ -217,7 +218,7 @@ func TestSQLSessionCleanupStopsAndRemovesExpiredRows(t *testing.T) {
 }
 
 func TestUsersSchemaAndLastAdminGuard(t *testing.T) {
-	database := openTestStore(t, privateTempDir(t))
+	database := openTestStore(t, pgtest.New(t))
 	admin, err := database.CreateUser(t.Context(), "Admin", "test-hash", "admin", SystemAudit("users.create", AuditDetail{Role: "admin"}))
 	if err != nil {
 		t.Fatal(err)
@@ -250,23 +251,17 @@ func assertUserSchema(t *testing.T, database *Store, admin User) {
 	if _, err = database.CreateUser(t.Context(), "invalidrole", "other", "owner", SystemAudit("users.create", AuditDetail{Role: "owner"})); err == nil {
 		t.Fatal("role CHECK missing")
 	}
-	if _, err = database.db.ExecContext(t.Context(), "UPDATE users SET disabled = 2 WHERE id = ?", admin.ID); err == nil {
+	if _, err = database.db.ExecContext(t.Context(), "UPDATE users SET disabled = 2 WHERE id = $1", admin.ID); err == nil {
 		t.Fatal("disabled CHECK missing")
 	}
 }
 
-func TestOpenCurrentRequiresExactMigrationsWithoutOwnership(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "metadata")
-	if _, err := OpenCurrent(t.Context(), dir); err == nil {
-		t.Fatal("uninitialized database accepted")
+func TestSetupRequiresExactMigrationsWithOwnership(t *testing.T) {
+	database, dsn := openTestStoreDSN(t)
+	if _, err := Open(t.Context(), dsn); !errors.Is(err, ErrOwnerInUse) {
+		t.Fatalf("second owner: %v", err)
 	}
-	database := openTestStore(t, dir)
-	other, err := OpenCurrent(t.Context(), dir)
-	if err != nil {
-		t.Fatalf("serve ownership blocked admin connection: %v", err)
-	}
-	defer other.Close()
-	user, err := other.CreateAdmin(t.Context(), "bootstrap", "test-hash")
+	user, err := database.SetupAdmin(t.Context(), "bootstrap", "test-hash", SystemAudit("auth.setup", AuditDetail{Role: "admin"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +272,7 @@ func TestOpenCurrentRequiresExactMigrationsWithoutOwnership(t *testing.T) {
 	if _, err = database.db.ExecContext(t.Context(), "DELETE FROM web_goose_db_version WHERE version_id = 4"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = OpenCurrent(t.Context(), dir); err == nil {
+	if err = database.Ready(t.Context()); err == nil {
 		t.Fatal("old database version accepted")
 	}
 }

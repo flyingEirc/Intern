@@ -365,7 +365,7 @@ func TestRestoreExecuteRequiresPasswordConfirmation(t *testing.T) {
 	}
 	var denied int
 	if err = f.database.DB().QueryRowContext(t.Context(),
-		`SELECT COUNT(*) FROM audit_logs WHERE action = 'restores.execute' AND result = 'denied' AND actor_id = ?`,
+		`SELECT COUNT(*) FROM audit_logs WHERE action = 'restores.execute' AND result = 'denied' AND actor_id = $1`,
 		admin.ID).Scan(&denied); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +426,7 @@ func TestRestoreExecuteAuditIsAtomic(t *testing.T) {
 	f.engine = serverEngine
 	f.client = newContractClient(t, Handler(serverEngine))
 
-	setSuccessAuditAbort(t, f.dir, "restores.execute")
+	setSuccessAuditAbort(t, f.dsn, "restores.execute")
 	response := f.request(t, "POST", "/api/v1/restores",
 		restoreExecuteBody(plan.BackupID, plan.Digest, testPassword, false), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
@@ -437,7 +437,7 @@ func TestRestoreExecuteAuditIsAtomic(t *testing.T) {
 	if engine.executed != 0 {
 		t.Fatal("the engine ran a restore whose row rolled back")
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 	f.request(t, "POST", "/api/v1/restores",
 		restoreExecuteBody(plan.BackupID, plan.Digest, testPassword, false), cookie, http.StatusAccepted)
 }

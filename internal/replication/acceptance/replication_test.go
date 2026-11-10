@@ -416,7 +416,7 @@ func a3Idempotent(t *testing.T, w *worker) {
 	fresh(w)
 	r := w.replicator("ftp-idempotent", replication.NewFTPRemote(w.ftp), w.paths.key, replication.Policy{})
 	file := w.produced(t, "r1-retry")[0]
-	single := "SELECT COUNT(*) FROM replicas WHERE backup_id = ? AND repository_id = ?"
+	single := "SELECT COUNT(*) FROM replicas WHERE backup_id = $1 AND repository_id = $2"
 	for range 3 {
 		enqueue(t, r, file.BackupID)
 		must(t, r.EnqueueCompleted(t.Context(), "r1-retry"))
@@ -541,7 +541,7 @@ func (w *worker) recordedPart(t *testing.T, repositoryID, backupID string) strin
 	t.Helper()
 	var part string
 	must(t, w.db.QueryRowContext(t.Context(),
-		"SELECT part FROM replica_parts WHERE repository_id = ? AND backup_id = ?", repositoryID, backupID).Scan(&part))
+		"SELECT part FROM replica_parts WHERE repository_id = $1 AND backup_id = $2", repositoryID, backupID).Scan(&part))
 	if part == "" {
 		t.Fatal("the killed worker left no recorded part")
 	}

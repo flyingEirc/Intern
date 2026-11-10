@@ -1,39 +1,33 @@
 package store
 
 import (
-	"os"
-	"path/filepath"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
 )
 
 func TestPhysicalAndWebShareDatabase(t *testing.T) {
-	dir := privateTempDir(t)
-	s := openTestStore(t, dir)
+	s, dsn := openTestStoreDSN(t)
 	assertSharedTables(t, s)
 	beginPhysicalBackup(t, s)
 	if err := physicalstore.Migrate(t.Context(), s.db); err != nil {
 		t.Fatal(err)
 	}
-	// A separate read-only connection to intern.db sees both schemas and the
-	// physical transaction; no second catalog file participates.
-	db, err := openDatabase(t.Context(), filepath.Join(dir, "intern.db"), true)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	var instance, owner string
 	if err = db.QueryRowContext(t.Context(), "SELECT i.id, b.instance_id FROM instance i CROSS JOIN backups b WHERE b.id = 'backup'").Scan(&instance, &owner); err != nil || instance != s.InstanceID() || owner != instance {
-		t.Fatalf("same-file ownership: %q %q %v", instance, owner, err)
+		t.Fatalf("same-database ownership: %q %q %v", instance, owner, err)
 	}
-	if _, err = os.Stat(filepath.Join(dir, "catalog.sqlite")); !os.IsNotExist(err) {
-		t.Fatalf("unexpected CLI catalog: %v", err)
-	}
-	assertPhysicalStatus(t, dir, 1, 0)
+	assertPhysicalStatus(t, dsn, 1, 0)
 	if err = s.Ready(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -48,10 +42,10 @@ func TestPhysicalPendingMigrationAndFutureReadiness(t *testing.T) {
 	}{
 		{"pending", "DELETE FROM physical_goose_db_version WHERE version_id = 1", 0, 1},
 		{"missing table", "DROP TABLE physical_goose_db_version", 0, 1},
-		{"future", "INSERT INTO physical_goose_db_version (version_id, is_applied) VALUES (42, 1)", 42, 0},
+		{"future", "INSERT INTO physical_goose_db_version (version_id, is_applied) VALUES (42, TRUE)", 42, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := privateTempDir(t)
+			dir := pgtest.New(t)
 			s := openTestStore(t, dir)
 			if _, err := s.db.ExecContext(t.Context(), tc.query); err != nil {
 				t.Fatal(err)
@@ -68,16 +62,13 @@ func TestPhysicalPendingMigrationAndFutureReadiness(t *testing.T) {
 }
 
 func TestPhysicalStatusBeforeDatabaseCreation(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "not-created")
-	status, err := ReadStatus(t.Context(), dir)
+	dsn := pgtest.New(t)
+	status, err := ReadStatus(t.Context(), dsn)
 	latest := replicationLatest(t)
 	if err != nil || status.PhysicalCurrentVersion != 0 || status.PhysicalLatestVersion != 1 || status.PhysicalPendingMigrations != 1 ||
 		status.ReplicationCurrentVersion != 0 || status.ReplicationLatestVersion != latest ||
 		status.ReplicationPending != int(latest) {
 		t.Fatalf("uninitialized status: %+v %v", status, err)
-	}
-	if _, err = os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("status created metadata directory: %v", err)
 	}
 }
 
@@ -132,7 +123,7 @@ func TestReplicationPendingMigrationAndFutureReadiness(t *testing.T) {
 	}{
 		{"pending", "DELETE FROM replication_goose_db_version", 0, int(latest)},
 		{"missing table", "DROP TABLE replication_goose_db_version", 0, int(latest)},
-		{"future", "INSERT INTO replication_goose_db_version (version_id, is_applied) VALUES (42, 1)", 42, 0},
+		{"future", "INSERT INTO replication_goose_db_version (version_id, is_applied) VALUES (42, TRUE)", 42, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertReplicationSchemaState(t, tc.name, tc.query, tc.current, tc.pending, latest)
@@ -153,7 +144,7 @@ func replicationLatest(t *testing.T) int64 {
 
 func assertReplicationSchemaState(t *testing.T, name, query string, current int64, pending int, latest int64) {
 	t.Helper()
-	dir := privateTempDir(t)
+	dir := pgtest.New(t)
 	s := openTestStore(t, dir)
 	if _, err := s.db.ExecContext(t.Context(), query); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api/errors";
 import {
   describeRestoreError,
+  exportLocation,
   exportStartCommand,
   maxVerifyStatementBytes,
   maxVerifyStatements,
@@ -131,5 +132,21 @@ describe("exportStartCommand", () => {
     expect(command).toContain("--skip-log-bin");
     expect(command).toContain("--innodb-buffer-pool-size=64M");
     expect(command).toContain('"$INTERN_MYSQL_IMAGE"');
+  });
+});
+
+describe("exportLocation", () => {
+  it("shows the export root and that a new restore directory will be created", () => {
+    expect(exportLocation("/var/lib/intern/export/{restore_id}")).toEqual({
+      root: "/var/lib/intern/export",
+      pending: true,
+    });
+  });
+
+  it("leaves a published path untouched", () => {
+    expect(exportLocation("/var/lib/intern/export/abc")).toEqual({
+      root: "/var/lib/intern/export/abc",
+      pending: false,
+    });
   });
 });

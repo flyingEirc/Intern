@@ -11,10 +11,10 @@ import (
 )
 
 const cancelQueuedRestore = `-- name: CancelQueuedRestore :execrows
-UPDATE restores SET status = 'canceled', phase = NULL, finished_at = ?1,
-    side_effects_json = ?2,
+UPDATE restores SET status = 'canceled', phase = NULL, finished_at = $1,
+    side_effects_json = $2,
     verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
-WHERE id = ?3 AND status = 'queued' AND cancel_requested = 0
+WHERE id = $3 AND status = 'queued' AND cancel_requested = 0
 `
 
 type CancelQueuedRestoreParams struct {
@@ -35,8 +35,8 @@ func (q *Queries) CancelQueuedRestore(ctx context.Context, arg CancelQueuedResto
 }
 
 const cancelQueuedRun = `-- name: CancelQueuedRun :execrows
-UPDATE runs SET status = 'canceled', finished_at = ?1
-WHERE id = ?2 AND status = 'queued' AND cancel_requested = 0
+UPDATE runs SET status = 'canceled', finished_at = $1
+WHERE id = $2 AND status = 'queued' AND cancel_requested = 0
 `
 
 type CancelQueuedRunParams struct {
@@ -54,11 +54,11 @@ func (q *Queries) CancelQueuedRun(ctx context.Context, arg CancelQueuedRunParams
 
 const cancelRunningRestore = `-- name: CancelRunningRestore :execrows
 UPDATE restores SET
-    status = 'canceled', phase = NULL, finished_at = ?1,
-    error_class = ?2, error_code = ?3,
-    side_effects_json = ?4,
-    verify_status = ?5, verify_result_json = ?6
-WHERE id = ?7 AND status = 'running'
+    status = 'canceled', phase = NULL, finished_at = $1,
+    error_class = $2, error_code = $3,
+    side_effects_json = $4,
+    verify_status = $5, verify_result_json = $6
+WHERE id = $7 AND status = 'running'
 `
 
 type CancelRunningRestoreParams struct {
@@ -88,8 +88,8 @@ func (q *Queries) CancelRunningRestore(ctx context.Context, arg CancelRunningRes
 }
 
 const cancelRunningRun = `-- name: CancelRunningRun :execrows
-UPDATE runs SET status = 'canceled', finished_at = ?1
-WHERE id = ?2 AND status = 'running'
+UPDATE runs SET status = 'canceled', finished_at = $1
+WHERE id = $2 AND status = 'running'
 `
 
 type CancelRunningRunParams struct {
@@ -106,8 +106,8 @@ func (q *Queries) CancelRunningRun(ctx context.Context, arg CancelRunningRunPara
 }
 
 const changePassword = `-- name: ChangePassword :one
-UPDATE users SET password_hash = ?, session_epoch = session_epoch + 1, updated_at = ?
-WHERE id = ? AND session_epoch = ? AND disabled = 0 RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
+UPDATE users SET password_hash = $1, session_epoch = session_epoch + 1, updated_at = $2
+WHERE id = $3 AND session_epoch = $4 AND disabled = 0 RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
 `
 
 type ChangePasswordParams struct {
@@ -139,7 +139,7 @@ func (q *Queries) ChangePassword(ctx context.Context, arg ChangePasswordParams) 
 }
 
 const claimNextRestore = `-- name: ClaimNextRestore :one
-UPDATE restores SET status = 'running', started_at = ?1, phase = NULL
+UPDATE restores SET status = 'running', started_at = $1, phase = NULL
 WHERE id = (
     SELECT id FROM restores WHERE status = 'queued' AND cancel_requested = 0
     ORDER BY created_at, id LIMIT 1
@@ -186,7 +186,7 @@ func (q *Queries) ClaimNextRestore(ctx context.Context, startedAt sql.NullString
 const claimNextRun = `-- name: ClaimNextRun :one
 UPDATE runs SET
     status = 'running',
-    started_at = ?1,
+    started_at = $1,
     local_repository_id = (SELECT p.local_repository_id FROM policies p WHERE p.id = runs.policy_id),
     replica_repository_id = (SELECT p.replica_repository_id FROM policies p WHERE p.id = runs.policy_id)
 WHERE id = (
@@ -195,7 +195,7 @@ WHERE id = (
 ) AND status = 'queued'
 AND NOT EXISTS (SELECT 1 FROM runs WHERE status = 'running')
 AND NOT EXISTS (SELECT 1 FROM restores WHERE status = 'running')
-RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
+RETURNING id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
 `
 
 // Global backup concurrency is 1: a queued row is claimed only when no run is
@@ -205,7 +205,7 @@ RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_ha
 //
 // The restore queue shares the same global slot, so a queued run is also
 // refused while any restore is running. Both claims read both tables inside
-// one write statement, which SQLite serializes: the two queues can never run
+// one transaction on the single owned PostgreSQL connection: the two queues can never run
 // a backup chain and a restore at the same time.
 //
 // The claim also snapshots the policy's (local, replica) pair onto the row, in
@@ -241,7 +241,7 @@ func (q *Queries) ClaimNextRun(ctx context.Context, startedAt sql.NullString) (R
 }
 
 const commitSession = `-- name: CommitSession :exec
-INSERT INTO sessions (token, data, expiry) VALUES (?, ?, ?)
+INSERT INTO sessions (token, data, expiry) VALUES ($1, $2, $3)
 ON CONFLICT (token) DO UPDATE SET data = excluded.data, expiry = excluded.expiry
 `
 
@@ -258,11 +258,11 @@ func (q *Queries) CommitSession(ctx context.Context, arg CommitSessionParams) er
 
 const completeRestore = `-- name: CompleteRestore :execrows
 UPDATE restores SET
-    status = 'completed', phase = NULL, finished_at = ?1,
-    export_path = ?2, export_bytes = ?3,
-    side_effects_json = ?4,
-    verify_status = ?5, verify_result_json = ?6
-WHERE id = ?7 AND status = 'running'
+    status = 'completed', phase = NULL, finished_at = $1,
+    export_path = $2, export_bytes = $3,
+    side_effects_json = $4,
+    verify_status = $5, verify_result_json = $6
+WHERE id = $7 AND status = 'running'
 `
 
 type CompleteRestoreParams struct {
@@ -293,9 +293,9 @@ func (q *Queries) CompleteRestore(ctx context.Context, arg CompleteRestoreParams
 
 const completeRun = `-- name: CompleteRun :execrows
 UPDATE runs SET
-    status = 'completed', finished_at = ?1, backup_id = ?2,
-    chain_id = ?3, payload_size = ?4
-WHERE id = ?5 AND status = 'running'
+    status = 'completed', finished_at = $1, backup_id = $2,
+    chain_id = $3, payload_size = $4
+WHERE id = $5 AND status = 'running'
 `
 
 type CompleteRunParams struct {
@@ -318,6 +318,15 @@ func (q *Queries) CompleteRun(ctx context.Context, arg CompleteRunParams) (int64
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const completeSetup = `-- name: CompleteSetup :exec
+UPDATE setup_state SET completed = TRUE WHERE singleton = 1
+`
+
+func (q *Queries) CompleteSetup(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, completeSetup)
+	return err
 }
 
 const completedRunReplicationPairs = `-- name: CompletedRunReplicationPairs :many
@@ -362,55 +371,55 @@ func (q *Queries) CompletedRunReplicationPairs(ctx context.Context) ([]Completed
 
 const countActiveFullsForSource = `-- name: CountActiveFullsForSource :one
 SELECT COUNT(*) FROM runs
-WHERE source_id = ? AND kind = 'full' AND status IN ('queued', 'running')
+WHERE source_id = $1 AND kind = 'full' AND status IN ('queued', 'running')
 `
 
-func (q *Queries) CountActiveFullsForSource(ctx context.Context, sourceID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countActiveFullsForSource, sourceID)
+func (q *Queries) CountActiveFullsForSource(ctx context.Context, sourceid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActiveFullsForSource, sourceid)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countPoliciesByRepository = `-- name: CountPoliciesByRepository :one
-SELECT COUNT(*) FROM policies WHERE local_repository_id = ?1 OR replica_repository_id = ?1
+SELECT COUNT(*) FROM policies WHERE local_repository_id = $1 OR replica_repository_id = $1
 `
 
-func (q *Queries) CountPoliciesByRepository(ctx context.Context, localRepositoryID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countPoliciesByRepository, localRepositoryID)
+func (q *Queries) CountPoliciesByRepository(ctx context.Context, localrepositoryid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPoliciesByRepository, localrepositoryid)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countPoliciesBySource = `-- name: CountPoliciesBySource :one
-SELECT COUNT(*) FROM policies WHERE source_id = ?
+SELECT COUNT(*) FROM policies WHERE source_id = $1
 `
 
-func (q *Queries) CountPoliciesBySource(ctx context.Context, sourceID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countPoliciesBySource, sourceID)
+func (q *Queries) CountPoliciesBySource(ctx context.Context, sourceid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPoliciesBySource, sourceid)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countRestoreLogs = `-- name: CountRestoreLogs :one
-SELECT COUNT(*) FROM restore_logs WHERE restore_id = ?
+SELECT COUNT(*) FROM restore_logs WHERE restore_id = $1
 `
 
-func (q *Queries) CountRestoreLogs(ctx context.Context, restoreID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countRestoreLogs, restoreID)
+func (q *Queries) CountRestoreLogs(ctx context.Context, restoreid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRestoreLogs, restoreid)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
 }
 
 const countRunLogs = `-- name: CountRunLogs :one
-SELECT COUNT(*) FROM run_logs WHERE run_id = ?
+SELECT COUNT(*) FROM run_logs WHERE run_id = $1
 `
 
-func (q *Queries) CountRunLogs(ctx context.Context, runID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, countRunLogs, runID)
+func (q *Queries) CountRunLogs(ctx context.Context, runid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countRunLogs, runid)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -421,7 +430,7 @@ INSERT INTO policies (
     id, name, source_id, local_repository_id, replica_repository_id, full_cron,
     incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level,
     page_tracking, enabled, last_preflight_json, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type CreatePolicyParams struct {
@@ -491,7 +500,7 @@ func (q *Queries) CreatePolicy(ctx context.Context, arg CreatePolicyParams) (Pol
 
 const createRepository = `-- name: CreateRepository :one
 INSERT INTO repositories (id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
 `
 
 type CreateRepositoryParams struct {
@@ -532,7 +541,7 @@ func (q *Queries) CreateRepository(ctx context.Context, arg CreateRepositoryPara
 
 const createSource = `-- name: CreateSource :one
 INSERT INTO sources (id, name, socket, datadir, username, secret_ciphertext, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
 `
 
 type CreateSourceParams struct {
@@ -576,7 +585,7 @@ func (q *Queries) CreateSource(ctx context.Context, arg CreateSourceParams) (Sou
 
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?) RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
+VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
 `
 
 type CreateUserParams struct {
@@ -612,7 +621,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 }
 
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :exec
-DELETE FROM sessions WHERE expiry <= ?
+DELETE FROM sessions WHERE expiry <= $1
 `
 
 func (q *Queries) DeleteExpiredSessions(ctx context.Context, expiry float64) error {
@@ -621,7 +630,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context, expiry float64) err
 }
 
 const deleteExpiredTombstones = `-- name: DeleteExpiredTombstones :exec
-DELETE FROM session_tombstones WHERE expiry <= ?
+DELETE FROM session_tombstones WHERE expiry <= $1
 `
 
 func (q *Queries) DeleteExpiredTombstones(ctx context.Context, expiry float64) error {
@@ -630,7 +639,7 @@ func (q *Queries) DeleteExpiredTombstones(ctx context.Context, expiry float64) e
 }
 
 const deletePolicy = `-- name: DeletePolicy :exec
-DELETE FROM policies WHERE id = ?
+DELETE FROM policies WHERE id = $1
 `
 
 func (q *Queries) DeletePolicy(ctx context.Context, id string) error {
@@ -639,7 +648,7 @@ func (q *Queries) DeletePolicy(ctx context.Context, id string) error {
 }
 
 const deleteRepository = `-- name: DeleteRepository :exec
-DELETE FROM repositories WHERE id = ?
+DELETE FROM repositories WHERE id = $1
 `
 
 func (q *Queries) DeleteRepository(ctx context.Context, id string) error {
@@ -648,7 +657,7 @@ func (q *Queries) DeleteRepository(ctx context.Context, id string) error {
 }
 
 const deleteSession = `-- name: DeleteSession :exec
-DELETE FROM sessions WHERE token = ?
+DELETE FROM sessions WHERE token = $1
 `
 
 func (q *Queries) DeleteSession(ctx context.Context, token string) error {
@@ -657,7 +666,7 @@ func (q *Queries) DeleteSession(ctx context.Context, token string) error {
 }
 
 const deleteSource = `-- name: DeleteSource :exec
-DELETE FROM sources WHERE id = ?
+DELETE FROM sources WHERE id = $1
 `
 
 func (q *Queries) DeleteSource(ctx context.Context, id string) error {
@@ -667,8 +676,8 @@ func (q *Queries) DeleteSource(ctx context.Context, id string) error {
 
 const duePolicies = `-- name: DuePolicies :many
 SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies
-WHERE enabled = 1 AND (next_full_at IS NOT NULL AND next_full_at <= ?1
-    OR next_incremental_at IS NOT NULL AND next_incremental_at <= ?1)
+WHERE enabled = 1 AND (next_full_at IS NOT NULL AND next_full_at <= $1
+    OR next_incremental_at IS NOT NULL AND next_incremental_at <= $1)
 `
 
 // The scheduler looks at one column at a time; a NULL value means the schedule
@@ -765,11 +774,11 @@ func (q *Queries) EnabledPolicies(ctx context.Context) ([]Policy, error) {
 
 const failInterruptedRestore = `-- name: FailInterruptedRestore :execrows
 UPDATE restores SET
-    status = 'failed', phase = NULL, finished_at = ?1,
+    status = 'failed', phase = NULL, finished_at = $1,
     error_class = 'interrupted', error_code = 'interrupted',
-    side_effects_json = ?2,
+    side_effects_json = $2,
     verify_status = CASE WHEN rehearse = 1 THEN 'not_run' ELSE verify_status END
-WHERE id = ?3 AND status = 'running'
+WHERE id = $3 AND status = 'running'
 `
 
 type FailInterruptedRestoreParams struct {
@@ -788,11 +797,11 @@ func (q *Queries) FailInterruptedRestore(ctx context.Context, arg FailInterrupte
 
 const failRestore = `-- name: FailRestore :execrows
 UPDATE restores SET
-    status = 'failed', phase = NULL, finished_at = ?1,
-    error_class = ?2, error_code = ?3,
-    side_effects_json = ?4,
-    verify_status = ?5, verify_result_json = ?6
-WHERE id = ?7 AND status = 'running'
+    status = 'failed', phase = NULL, finished_at = $1,
+    error_class = $2, error_code = $3,
+    side_effects_json = $4,
+    verify_status = $5, verify_result_json = $6
+WHERE id = $7 AND status = 'running'
 `
 
 type FailRestoreParams struct {
@@ -823,9 +832,9 @@ func (q *Queries) FailRestore(ctx context.Context, arg FailRestoreParams) (int64
 
 const failRun = `-- name: FailRun :execrows
 UPDATE runs SET
-    status = 'failed', finished_at = ?1,
-    error_class = ?2, error_code = ?3
-WHERE id = ?4 AND status = 'running'
+    status = 'failed', finished_at = $1,
+    error_class = $2, error_code = $3
+WHERE id = $4 AND status = 'running'
 `
 
 type FailRunParams struct {
@@ -849,7 +858,7 @@ func (q *Queries) FailRun(ctx context.Context, arg FailRunParams) (int64, error)
 }
 
 const findSession = `-- name: FindSession :one
-SELECT data FROM sessions WHERE token = ? AND expiry > ?
+SELECT data FROM sessions WHERE token = $1 AND expiry > $2
 `
 
 type FindSessionParams struct {
@@ -881,7 +890,7 @@ func (q *Queries) GetInstance(ctx context.Context) (GetInstanceRow, error) {
 }
 
 const getPolicy = `-- name: GetPolicy :one
-SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE id = ?
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE id = $1
 `
 
 func (q *Queries) GetPolicy(ctx context.Context, id string) (Policy, error) {
@@ -912,7 +921,7 @@ func (q *Queries) GetPolicy(ctx context.Context, id string) (Policy, error) {
 }
 
 const getPolicySchedule = `-- name: GetPolicySchedule :one
-SELECT next_full_at, next_incremental_at FROM policies WHERE id = ?
+SELECT next_full_at, next_incremental_at FROM policies WHERE id = $1
 `
 
 type GetPolicyScheduleRow struct {
@@ -928,7 +937,7 @@ func (q *Queries) GetPolicySchedule(ctx context.Context, id string) (GetPolicySc
 }
 
 const getRepository = `-- name: GetRepository :one
-SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE id = ?
+SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE id = $1
 `
 
 func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, error) {
@@ -948,7 +957,7 @@ func (q *Queries) GetRepository(ctx context.Context, id string) (Repository, err
 }
 
 const getRestore = `-- name: GetRestore :one
-SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE id = ?
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE id = $1
 `
 
 func (q *Queries) GetRestore(ctx context.Context, id string) (Restore, error) {
@@ -983,11 +992,11 @@ func (q *Queries) GetRestore(ctx context.Context, id string) (Restore, error) {
 }
 
 const getRestoreByIdempotencyKey = `-- name: GetRestoreByIdempotencyKey :one
-SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE idempotency_key = ?
+SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores WHERE idempotency_key = $1
 `
 
-func (q *Queries) GetRestoreByIdempotencyKey(ctx context.Context, idempotencyKey sql.NullString) (Restore, error) {
-	row := q.db.QueryRowContext(ctx, getRestoreByIdempotencyKey, idempotencyKey)
+func (q *Queries) GetRestoreByIdempotencyKey(ctx context.Context, idempotencykey sql.NullString) (Restore, error) {
+	row := q.db.QueryRowContext(ctx, getRestoreByIdempotencyKey, idempotencykey)
 	var i Restore
 	err := row.Scan(
 		&i.ID,
@@ -1018,7 +1027,7 @@ func (q *Queries) GetRestoreByIdempotencyKey(ctx context.Context, idempotencyKey
 }
 
 const getRestoreLog = `-- name: GetRestoreLog :one
-SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = ? AND seq = ?
+SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = $1 AND seq = $2
 `
 
 type GetRestoreLogParams struct {
@@ -1041,7 +1050,7 @@ func (q *Queries) GetRestoreLog(ctx context.Context, arg GetRestoreLogParams) (R
 }
 
 const getRun = `-- name: GetRun :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE id = ?
+SELECT id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE id = $1
 `
 
 func (q *Queries) GetRun(ctx context.Context, id string) (Run, error) {
@@ -1074,11 +1083,11 @@ func (q *Queries) GetRun(ctx context.Context, id string) (Run, error) {
 }
 
 const getRunByIdempotencyKey = `-- name: GetRunByIdempotencyKey :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE idempotency_key = ?
+SELECT id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE idempotency_key = $1
 `
 
-func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey string) (Run, error) {
-	row := q.db.QueryRowContext(ctx, getRunByIdempotencyKey, idempotencyKey)
+func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencykey string) (Run, error) {
+	row := q.db.QueryRowContext(ctx, getRunByIdempotencyKey, idempotencykey)
 	var i Run
 	err := row.Scan(
 		&i.ID,
@@ -1107,7 +1116,7 @@ func (q *Queries) GetRunByIdempotencyKey(ctx context.Context, idempotencyKey str
 }
 
 const getRunLog = `-- name: GetRunLog :one
-SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? AND seq = ?
+SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = $1 AND seq = $2
 `
 
 type GetRunLogParams struct {
@@ -1131,7 +1140,7 @@ func (q *Queries) GetRunLog(ctx context.Context, arg GetRunLogParams) (RunLog, e
 }
 
 const getSessionExpiry = `-- name: GetSessionExpiry :one
-SELECT expiry FROM sessions WHERE token = ?
+SELECT expiry FROM sessions WHERE token = $1
 `
 
 func (q *Queries) GetSessionExpiry(ctx context.Context, token string) (float64, error) {
@@ -1141,8 +1150,19 @@ func (q *Queries) GetSessionExpiry(ctx context.Context, token string) (float64, 
 	return expiry, err
 }
 
+const getSetupCompleted = `-- name: GetSetupCompleted :one
+SELECT completed FROM setup_state WHERE singleton = 1
+`
+
+func (q *Queries) GetSetupCompleted(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, getSetupCompleted)
+	var completed bool
+	err := row.Scan(&completed)
+	return completed, err
+}
+
 const getSource = `-- name: GetSource :one
-SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE id = ?
+SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE id = $1
 `
 
 func (q *Queries) GetSource(ctx context.Context, id string) (Source, error) {
@@ -1165,7 +1185,7 @@ func (q *Queries) GetSource(ctx context.Context, id string) (Source, error) {
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users WHERE id = ?
+SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUser(ctx context.Context, id string) (User, error) {
@@ -1185,7 +1205,7 @@ func (q *Queries) GetUser(ctx context.Context, id string) (User, error) {
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users WHERE username = ?
+SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users WHERE translate(username, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = translate($1, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
 `
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User, error) {
@@ -1204,11 +1224,22 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 	return i, err
 }
 
+const hasUsers = `-- name: HasUsers :one
+SELECT EXISTS (SELECT 1 FROM users)
+`
+
+func (q *Queries) HasUsers(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasUsers)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const insertAuditLog = `-- name: InsertAuditLog :exec
 INSERT INTO audit_logs (
     ts, actor_type, actor_id, actor_name, action, resource_type, resource_id,
     ip, result, status, request_id, detail_json
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 `
 
 type InsertAuditLogParams struct {
@@ -1245,7 +1276,7 @@ func (q *Queries) InsertAuditLog(ctx context.Context, arg InsertAuditLogParams) 
 }
 
 const insertInstance = `-- name: InsertInstance :exec
-INSERT INTO instance (singleton, id, created_at) VALUES (1, ?, ?)
+INSERT INTO instance (singleton, id, created_at) VALUES (1, $1, $2)
 `
 
 type InsertInstanceParams struct {
@@ -1262,7 +1293,7 @@ const insertRestore = `-- name: InsertRestore :one
 INSERT INTO restores (
     id, backup_id, status, plan_json, plan_digest, rehearse, verify_sql_json,
     idempotency_key, request_hash, requested_by, created_at, verify_status
-) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
+) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json
 `
 
 type InsertRestoreParams struct {
@@ -1323,7 +1354,7 @@ func (q *Queries) InsertRestore(ctx context.Context, arg InsertRestoreParams) (R
 }
 
 const insertRestoreLog = `-- name: InsertRestoreLog :exec
-INSERT INTO restore_logs (restore_id, seq, ts, level, message, data) VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO restore_logs (restore_id, seq, ts, level, message, data) VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertRestoreLogParams struct {
@@ -1351,7 +1382,7 @@ const insertRun = `-- name: InsertRun :one
 INSERT INTO runs (
     id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash,
     status, scheduled_at, created_at, actor_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?) RETURNING id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', $8, $9, $10) RETURNING id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id
 `
 
 type InsertRunParams struct {
@@ -1408,7 +1439,7 @@ func (q *Queries) InsertRun(ctx context.Context, arg InsertRunParams) (Run, erro
 }
 
 const insertRunLog = `-- name: InsertRunLog :exec
-INSERT INTO run_logs (run_id, seq, ts, level, event, message, data) VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO run_logs (run_id, seq, ts, level, event, message, data) VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
 
 type InsertRunLogParams struct {
@@ -1418,7 +1449,7 @@ type InsertRunLogParams struct {
 	Level   string
 	Event   string
 	Message string
-	Data    interface{}
+	Data    sql.NullString
 }
 
 func (q *Queries) InsertRunLog(ctx context.Context, arg InsertRunLogParams) error {
@@ -1486,7 +1517,7 @@ func (q *Queries) InterruptedRestores(ctx context.Context) ([]Restore, error) {
 }
 
 const interruptedRuns = `-- name: InterruptedRuns :many
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE status = 'running'
+SELECT id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE status = 'running'
 `
 
 func (q *Queries) InterruptedRuns(ctx context.Context) ([]Run, error) {
@@ -1535,16 +1566,16 @@ func (q *Queries) InterruptedRuns(ctx context.Context) ([]Run, error) {
 }
 
 const listAuditLogs = `-- name: ListAuditLogs :many
-SELECT id, ts, actor_type, actor_id, actor_name, "action", resource_type, resource_id, ip, result, status, request_id, detail_json FROM audit_logs WHERE id < ? ORDER BY id DESC LIMIT ?
+SELECT id, ts, actor_type, actor_id, actor_name, action, resource_type, resource_id, ip, result, status, request_id, detail_json FROM audit_logs WHERE id < $1 ORDER BY id DESC LIMIT $2::bigint
 `
 
 type ListAuditLogsParams struct {
-	ID    int64
-	Limit int64
+	ID       int64
+	RowLimit int64
 }
 
 func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([]AuditLog, error) {
-	rows, err := q.db.QueryContext(ctx, listAuditLogs, arg.ID, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, listAuditLogs, arg.ID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -1581,8 +1612,8 @@ func (q *Queries) ListAuditLogs(ctx context.Context, arg ListAuditLogsParams) ([
 }
 
 const listPolicies = `-- name: ListPolicies :many
-SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
-ORDER BY id DESC LIMIT ?2
+SELECT id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at FROM policies WHERE (CAST($1 AS TEXT) = '' OR id < CAST($1 AS TEXT))
+ORDER BY id DESC LIMIT $2::bigint
 `
 
 type ListPoliciesParams struct {
@@ -1634,8 +1665,8 @@ func (q *Queries) ListPolicies(ctx context.Context, arg ListPoliciesParams) ([]P
 }
 
 const listRepositories = `-- name: ListRepositories :many
-SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
-ORDER BY id DESC LIMIT ?2
+SELECT id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at FROM repositories WHERE (CAST($1 AS TEXT) = '' OR id < CAST($1 AS TEXT))
+ORDER BY id DESC LIMIT $2::bigint
 `
 
 type ListRepositoriesParams struct {
@@ -1677,10 +1708,10 @@ func (q *Queries) ListRepositories(ctx context.Context, arg ListRepositoriesPara
 
 const listRestores = `-- name: ListRestores :many
 SELECT id, backup_id, status, phase, plan_json, plan_digest, rehearse, verify_sql_json, idempotency_key, request_hash, requested_by, work_dir, export_path, export_bytes, created_at, started_at, finished_at, cancel_requested, error_class, error_code, side_effects_json, verify_status, verify_result_json FROM restores
-WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
-    AND (CAST(?2 AS TEXT) = '' OR status = CAST(?2 AS TEXT))
-    AND (CAST(?3 AS TEXT) = '' OR backup_id = CAST(?3 AS TEXT))
-ORDER BY id DESC LIMIT ?4
+WHERE (CAST($1 AS TEXT) = '' OR id < CAST($1 AS TEXT))
+    AND (CAST($2 AS TEXT) = '' OR status = CAST($2 AS TEXT))
+    AND (CAST($3 AS TEXT) = '' OR backup_id = CAST($3 AS TEXT))
+ORDER BY id DESC LIMIT $4::bigint
 `
 
 type ListRestoresParams struct {
@@ -1743,12 +1774,12 @@ func (q *Queries) ListRestores(ctx context.Context, arg ListRestoresParams) ([]R
 }
 
 const listRuns = `-- name: ListRuns :many
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs
-WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
-    AND (CAST(?2 AS TEXT) = '' OR policy_id = CAST(?2 AS TEXT))
-    AND (CAST(?3 AS TEXT) = '' OR source_id = CAST(?3 AS TEXT))
-    AND (CAST(?4 AS TEXT) = '' OR status = CAST(?4 AS TEXT))
-ORDER BY id DESC LIMIT ?5
+SELECT id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs
+WHERE (CAST($1 AS TEXT) = '' OR id < CAST($1 AS TEXT))
+    AND (CAST($2 AS TEXT) = '' OR policy_id = CAST($2 AS TEXT))
+    AND (CAST($3 AS TEXT) = '' OR source_id = CAST($3 AS TEXT))
+    AND (CAST($4 AS TEXT) = '' OR status = CAST($4 AS TEXT))
+ORDER BY id DESC LIMIT $5::bigint
 `
 
 type ListRunsParams struct {
@@ -1811,8 +1842,8 @@ func (q *Queries) ListRuns(ctx context.Context, arg ListRunsParams) ([]Run, erro
 }
 
 const listSources = `-- name: ListSources :many
-SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE (CAST(?1 AS TEXT) = '' OR id < CAST(?1 AS TEXT))
-ORDER BY id DESC LIMIT ?2
+SELECT id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at FROM sources WHERE (CAST($1 AS TEXT) = '' OR id < CAST($1 AS TEXT))
+ORDER BY id DESC LIMIT $2::bigint
 `
 
 type ListSourcesParams struct {
@@ -1856,7 +1887,7 @@ func (q *Queries) ListSources(ctx context.Context, arg ListSourcesParams) ([]Sou
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users ORDER BY username COLLATE NOCASE, id
+SELECT id, username, password_hash, role, disabled, session_epoch, created_at, updated_at FROM users ORDER BY translate(username, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), id
 `
 
 func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
@@ -1891,23 +1922,34 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
-const maxRestoreLogSeq = `-- name: MaxRestoreLogSeq :one
-SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM restore_logs WHERE restore_id = ?
+const lockSetupState = `-- name: LockSetupState :one
+SELECT completed FROM setup_state WHERE singleton = 1 FOR UPDATE
 `
 
-func (q *Queries) MaxRestoreLogSeq(ctx context.Context, restoreID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, maxRestoreLogSeq, restoreID)
+func (q *Queries) LockSetupState(ctx context.Context) (bool, error) {
+	row := q.db.QueryRowContext(ctx, lockSetupState)
+	var completed bool
+	err := row.Scan(&completed)
+	return completed, err
+}
+
+const maxRestoreLogSeq = `-- name: MaxRestoreLogSeq :one
+SELECT CAST(COALESCE(MAX(seq), 0) AS BIGINT) FROM restore_logs WHERE restore_id = $1
+`
+
+func (q *Queries) MaxRestoreLogSeq(ctx context.Context, restoreid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, maxRestoreLogSeq, restoreid)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
 }
 
 const maxRunLogSeq = `-- name: MaxRunLogSeq :one
-SELECT CAST(COALESCE(MAX(seq), 0) AS INTEGER) FROM run_logs WHERE run_id = ?
+SELECT CAST(COALESCE(MAX(seq), 0) AS BIGINT) FROM run_logs WHERE run_id = $1
 `
 
-func (q *Queries) MaxRunLogSeq(ctx context.Context, runID string) (int64, error) {
-	row := q.db.QueryRowContext(ctx, maxRunLogSeq, runID)
+func (q *Queries) MaxRunLogSeq(ctx context.Context, runid string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, maxRunLogSeq, runid)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -1916,7 +1958,7 @@ func (q *Queries) MaxRunLogSeq(ctx context.Context, runID string) (int64, error)
 const pairBackups = `-- name: PairBackups :many
 SELECT DISTINCT r.backup_id AS backup_id
 FROM runs r
-WHERE r.local_repository_id = ? AND r.replica_repository_id = ?
+WHERE r.local_repository_id = $1 AND r.replica_repository_id = $2
   AND r.backup_id IS NOT NULL
 `
 
@@ -1956,11 +1998,11 @@ func (q *Queries) PairBackups(ctx context.Context, arg PairBackupsParams) ([]sql
 
 const recordSourcePreflight = `-- name: RecordSourcePreflight :one
 UPDATE sources SET
-    server_uuid = COALESCE(?1, server_uuid),
-    server_version = COALESCE(?2, server_version),
-    last_preflight_json = ?3,
-    updated_at = ?4
-WHERE id = ?5 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+    server_uuid = COALESCE($1, server_uuid),
+    server_version = COALESCE($2, server_version),
+    last_preflight_json = $3,
+    updated_at = $4
+WHERE id = $5 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
 `
 
 type RecordSourcePreflightParams struct {
@@ -1997,8 +2039,8 @@ func (q *Queries) RecordSourcePreflight(ctx context.Context, arg RecordSourcePre
 }
 
 const replaceRestoreLog = `-- name: ReplaceRestoreLog :execrows
-UPDATE restore_logs SET ts = ?, level = ?, message = ?, data = ?
-WHERE restore_id = ? AND seq = ?
+UPDATE restore_logs SET ts = $1, level = $2, message = $3, data = $4
+WHERE restore_id = $5 AND seq = $6
 `
 
 type ReplaceRestoreLogParams struct {
@@ -2026,8 +2068,8 @@ func (q *Queries) ReplaceRestoreLog(ctx context.Context, arg ReplaceRestoreLogPa
 }
 
 const replaceRunLog = `-- name: ReplaceRunLog :execrows
-UPDATE run_logs SET ts = ?, level = ?, event = ?, message = ?, data = ?
-WHERE run_id = ? AND seq = ?
+UPDATE run_logs SET ts = $1, level = $2, event = $3, message = $4, data = $5
+WHERE run_id = $6 AND seq = $7
 `
 
 type ReplaceRunLogParams struct {
@@ -2035,7 +2077,7 @@ type ReplaceRunLogParams struct {
 	Level   string
 	Event   string
 	Message string
-	Data    interface{}
+	Data    sql.NullString
 	RunID   string
 	Seq     int64
 }
@@ -2058,7 +2100,7 @@ func (q *Queries) ReplaceRunLog(ctx context.Context, arg ReplaceRunLogParams) (i
 
 const requestCancel = `-- name: RequestCancel :execrows
 UPDATE runs SET cancel_requested = 1
-WHERE id = ?1 AND status IN ('queued', 'running')
+WHERE id = $1 AND status IN ('queued', 'running')
 `
 
 func (q *Queries) RequestCancel(ctx context.Context, id string) (int64, error) {
@@ -2070,7 +2112,7 @@ func (q *Queries) RequestCancel(ctx context.Context, id string) (int64, error) {
 }
 
 const requestRestoreCancel = `-- name: RequestRestoreCancel :execrows
-UPDATE restores SET cancel_requested = 1 WHERE id = ? AND status IN ('queued', 'running')
+UPDATE restores SET cancel_requested = 1 WHERE id = $1 AND status IN ('queued', 'running')
 `
 
 func (q *Queries) RequestRestoreCancel(ctx context.Context, id string) (int64, error) {
@@ -2082,17 +2124,17 @@ func (q *Queries) RequestRestoreCancel(ctx context.Context, id string) (int64, e
 }
 
 const restoreLogsAfter = `-- name: RestoreLogsAfter :many
-SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = ? AND seq > ? ORDER BY seq LIMIT ?
+SELECT restore_id, seq, ts, level, message, data FROM restore_logs WHERE restore_id = $1 AND seq > $2 ORDER BY seq LIMIT $3::bigint
 `
 
 type RestoreLogsAfterParams struct {
 	RestoreID string
 	Seq       int64
-	Limit     int64
+	RowLimit  int64
 }
 
 func (q *Queries) RestoreLogsAfter(ctx context.Context, arg RestoreLogsAfterParams) ([]RestoreLog, error) {
-	rows, err := q.db.QueryContext(ctx, restoreLogsAfter, arg.RestoreID, arg.Seq, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, restoreLogsAfter, arg.RestoreID, arg.Seq, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -2122,7 +2164,7 @@ func (q *Queries) RestoreLogsAfter(ctx context.Context, arg RestoreLogsAfterPara
 }
 
 const revokeUserSessions = `-- name: RevokeUserSessions :one
-UPDATE users SET session_epoch = session_epoch + 1, updated_at = ? WHERE id = ? RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
+UPDATE users SET session_epoch = session_epoch + 1, updated_at = $1 WHERE id = $2 RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
 `
 
 type RevokeUserSessionsParams struct {
@@ -2147,11 +2189,11 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 }
 
 const runByBackupID = `-- name: RunByBackupID :one
-SELECT id, policy_id, source_id, kind, "trigger", idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE backup_id = ? ORDER BY id DESC LIMIT 1
+SELECT id, policy_id, source_id, kind, trigger, idempotency_key, request_hash, status, scheduled_at, created_at, started_at, finished_at, backup_id, chain_id, payload_size, error_class, error_code, cancel_requested, actor_id, local_repository_id, replica_repository_id FROM runs WHERE backup_id = $1 ORDER BY id DESC LIMIT 1
 `
 
-func (q *Queries) RunByBackupID(ctx context.Context, backupID sql.NullString) (Run, error) {
-	row := q.db.QueryRowContext(ctx, runByBackupID, backupID)
+func (q *Queries) RunByBackupID(ctx context.Context, backupid sql.NullString) (Run, error) {
+	row := q.db.QueryRowContext(ctx, runByBackupID, backupid)
 	var i Run
 	err := row.Scan(
 		&i.ID,
@@ -2180,17 +2222,17 @@ func (q *Queries) RunByBackupID(ctx context.Context, backupID sql.NullString) (R
 }
 
 const runLogsAfter = `-- name: RunLogsAfter :many
-SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?
+SELECT run_id, seq, ts, level, event, message, data FROM run_logs WHERE run_id = $1 AND seq > $2 ORDER BY seq LIMIT $3::bigint
 `
 
 type RunLogsAfterParams struct {
-	RunID string
-	Seq   int64
-	Limit int64
+	RunID    string
+	Seq      int64
+	RowLimit int64
 }
 
 func (q *Queries) RunLogsAfter(ctx context.Context, arg RunLogsAfterParams) ([]RunLog, error) {
-	rows, err := q.db.QueryContext(ctx, runLogsAfter, arg.RunID, arg.Seq, arg.Limit)
+	rows, err := q.db.QueryContext(ctx, runLogsAfter, arg.RunID, arg.Seq, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -2222,10 +2264,10 @@ func (q *Queries) RunLogsAfter(ctx context.Context, arg RunLogsAfterParams) ([]R
 
 const setPolicyEnabled = `-- name: SetPolicyEnabled :one
 UPDATE policies SET
-    enabled = ?1,
-    last_preflight_json = COALESCE(?2, last_preflight_json),
-    updated_at = ?3
-WHERE id = ?4 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
+    enabled = $1,
+    last_preflight_json = COALESCE($2, last_preflight_json),
+    updated_at = $3
+WHERE id = $4 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type SetPolicyEnabledParams struct {
@@ -2270,10 +2312,10 @@ func (q *Queries) SetPolicyEnabled(ctx context.Context, arg SetPolicyEnabledPara
 
 const setPolicySchedule = `-- name: SetPolicySchedule :one
 UPDATE policies SET
-    next_full_at = ?1,
-    next_incremental_at = ?2,
-    updated_at = ?3
-WHERE id = ?4 RETURNING next_full_at, next_incremental_at
+    next_full_at = $1,
+    next_incremental_at = $2,
+    updated_at = $3
+WHERE id = $4 RETURNING next_full_at, next_incremental_at
 `
 
 type SetPolicyScheduleParams struct {
@@ -2301,7 +2343,7 @@ func (q *Queries) SetPolicySchedule(ctx context.Context, arg SetPolicySchedulePa
 }
 
 const setRestoreWorkDir = `-- name: SetRestoreWorkDir :exec
-UPDATE restores SET work_dir = ? WHERE id = ? AND status = 'running'
+UPDATE restores SET work_dir = $1 WHERE id = $2 AND status = 'running'
 `
 
 type SetRestoreWorkDirParams struct {
@@ -2315,7 +2357,7 @@ func (q *Queries) SetRestoreWorkDir(ctx context.Context, arg SetRestoreWorkDirPa
 }
 
 const tombstoneActive = `-- name: TombstoneActive :one
-SELECT expiry FROM session_tombstones WHERE token = ? AND expiry > ?
+SELECT expiry FROM session_tombstones WHERE token = $1 AND expiry > $2
 `
 
 type TombstoneActiveParams struct {
@@ -2332,22 +2374,17 @@ func (q *Queries) TombstoneActive(ctx context.Context, arg TombstoneActiveParams
 
 const updatePolicy = `-- name: UpdatePolicy :one
 UPDATE policies SET
-    name = ?1,
-    source_id = ?2,
-    local_repository_id = ?3,
-    replica_repository_id = ?4,
-    full_cron = ?5,
-    incremental_cron = ?6,
-    timezone = ?7,
-    max_chain_length = ?8,
-    parallel = ?9,
-    throttle = ?10,
-    zstd_level = ?11,
-    page_tracking = ?12,
-    enabled = ?13,
-    last_preflight_json = ?14,
-    updated_at = ?15
-WHERE id = ?16 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
+    name = $1,
+    source_id = $2,
+    local_repository_id = $3,
+    replica_repository_id = $4,
+    full_cron = $5,
+    incremental_cron = $6,
+    timezone = $7,
+    enabled = $8,
+    last_preflight_json = $9,
+    updated_at = $10
+WHERE id = $11 RETURNING id, name, source_id, local_repository_id, replica_repository_id, full_cron, incremental_cron, timezone, max_chain_length, parallel, throttle, zstd_level, page_tracking, enabled, last_preflight_json, created_at, updated_at, next_full_at, next_incremental_at
 `
 
 type UpdatePolicyParams struct {
@@ -2358,11 +2395,6 @@ type UpdatePolicyParams struct {
 	FullCron            string
 	IncrementalCron     string
 	Timezone            string
-	MaxChainLength      int64
-	Parallel            int64
-	Throttle            int64
-	ZstdLevel           int64
-	PageTracking        int64
 	Enabled             int64
 	LastPreflightJson   sql.NullString
 	UpdatedAt           string
@@ -2379,11 +2411,6 @@ func (q *Queries) UpdatePolicy(ctx context.Context, arg UpdatePolicyParams) (Pol
 		arg.FullCron,
 		arg.IncrementalCron,
 		arg.Timezone,
-		arg.MaxChainLength,
-		arg.Parallel,
-		arg.Throttle,
-		arg.ZstdLevel,
-		arg.PageTracking,
 		arg.Enabled,
 		arg.LastPreflightJson,
 		arg.UpdatedAt,
@@ -2416,11 +2443,11 @@ func (q *Queries) UpdatePolicy(ctx context.Context, arg UpdatePolicyParams) (Pol
 
 const updateRepository = `-- name: UpdateRepository :one
 UPDATE repositories SET
-    name = ?1,
-    config_json = ?2,
-    secret_ciphertext = COALESCE(?3, secret_ciphertext),
-    updated_at = ?4
-WHERE id = ?5 RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
+    name = $1,
+    config_json = $2,
+    secret_ciphertext = COALESCE($3, secret_ciphertext),
+    updated_at = $4
+WHERE id = $5 RETURNING id, name, kind, config_json, secret_ciphertext, tls_mode, created_at, updated_at
 `
 
 type UpdateRepositoryParams struct {
@@ -2455,7 +2482,7 @@ func (q *Queries) UpdateRepository(ctx context.Context, arg UpdateRepositoryPara
 }
 
 const updateRestorePhase = `-- name: UpdateRestorePhase :exec
-UPDATE restores SET phase = ? WHERE id = ? AND status = 'running'
+UPDATE restores SET phase = $1 WHERE id = $2 AND status = 'running'
 `
 
 type UpdateRestorePhaseParams struct {
@@ -2470,13 +2497,13 @@ func (q *Queries) UpdateRestorePhase(ctx context.Context, arg UpdateRestorePhase
 
 const updateSource = `-- name: UpdateSource :one
 UPDATE sources SET
-    name = ?1,
-    socket = ?2,
-    datadir = ?3,
-    username = ?4,
-    secret_ciphertext = COALESCE(?5, secret_ciphertext),
-    updated_at = ?6
-WHERE id = ?7 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
+    name = $1,
+    socket = $2,
+    datadir = $3,
+    username = $4,
+    secret_ciphertext = COALESCE($5, secret_ciphertext),
+    updated_at = $6
+WHERE id = $7 RETURNING id, name, socket, datadir, username, secret_ciphertext, server_uuid, server_version, last_preflight_json, created_at, updated_at
 `
 
 type UpdateSourceParams struct {
@@ -2519,15 +2546,15 @@ func (q *Queries) UpdateSource(ctx context.Context, arg UpdateSourceParams) (Sou
 
 const updateUser = `-- name: UpdateUser :one
 UPDATE users SET
-    role = COALESCE(?1, role),
-    disabled = COALESCE(?2, disabled),
-    password_hash = COALESCE(?3, password_hash),
+    role = COALESCE($1, role),
+    disabled = COALESCE($2, disabled),
+    password_hash = COALESCE($3, password_hash),
     session_epoch = session_epoch + 1,
-    updated_at = ?4
-WHERE id = ?5
+    updated_at = $4
+WHERE users.id = $5
 AND NOT (
     role = 'admin' AND disabled = 0
-    AND (COALESCE(?1, role) <> 'admin' OR COALESCE(?2, disabled) = 1)
+    AND (COALESCE($1, role) <> 'admin' OR COALESCE($2, disabled) = 1)
     AND (SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0) = 1
 )
 RETURNING id, username, password_hash, role, disabled, session_epoch, created_at, updated_at
@@ -2538,7 +2565,7 @@ type UpdateUserParams struct {
 	Disabled     sql.NullInt64
 	PasswordHash sql.NullString
 	UpdatedAt    string
-	ID           string
+	UserID       string
 }
 
 func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, error) {
@@ -2547,7 +2574,7 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 		arg.Disabled,
 		arg.PasswordHash,
 		arg.UpdatedAt,
-		arg.ID,
+		arg.UserID,
 	)
 	var i User
 	err := row.Scan(
@@ -2564,8 +2591,8 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) (User, e
 }
 
 const upsertSessionTombstone = `-- name: UpsertSessionTombstone :exec
-INSERT INTO session_tombstones (token, expiry) VALUES (?, ?)
-ON CONFLICT (token) DO UPDATE SET expiry = MAX(session_tombstones.expiry, excluded.expiry)
+INSERT INTO session_tombstones (token, expiry) VALUES ($1, $2)
+ON CONFLICT (token) DO UPDATE SET expiry = GREATEST(session_tombstones.expiry, excluded.expiry)
 `
 
 type UpsertSessionTombstoneParams struct {

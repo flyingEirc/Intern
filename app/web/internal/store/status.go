@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"os"
-	"path/filepath"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/flyingEirc/Intern/app/web/internal/store/internal/storesql"
-	"github.com/flyingEirc/Intern/internal/fsutil"
 	physicalstore "github.com/flyingEirc/Intern/internal/physical/store"
 	"github.com/flyingEirc/Intern/internal/replication"
 )
@@ -26,8 +27,9 @@ type Status struct {
 	ReplicationPending        int    `json:"replication_pending_migrations"`
 }
 
-// ReadStatus never creates a directory, locks ownership, or runs migrations.
-func ReadStatus(ctx context.Context, dir string) (_ Status, retErr error) {
+// ReadStatus never runs migrations or takes the ownership lock. Its connection
+// is read-only and independent of the serve owner.
+func ReadStatus(ctx context.Context, dsn string) (_ Status, retErr error) {
 	versions, err := embeddedVersions()
 	if err != nil {
 		return Status{}, err
@@ -36,24 +38,11 @@ func ReadStatus(ctx context.Context, dir string) (_ Status, retErr error) {
 	if err = readReplicaVersionPairs(ctx, nil, &status); err != nil {
 		return Status{}, err
 	}
-	if err = checkDirectory(dir); errors.Is(err, os.ErrNotExist) {
-		return status, nil
-	}
+	db, err := openReadOnly(ctx, dsn)
 	if err != nil {
 		return Status{}, err
 	}
-	path := filepath.Join(dir, "intern.db")
-	if err = checkFile(path); errors.Is(err, os.ErrNotExist) {
-		return status, nil
-	}
-	if err != nil {
-		return Status{}, err
-	}
-	db, err := openDatabase(ctx, path, true)
-	if err != nil {
-		return Status{}, err
-	}
-	defer fsutil.Close(&retErr, db)
+	defer func() { retErr = errors.Join(retErr, db.Close()) }()
 	if err = readAppliedVersions(ctx, db, versions, &status); err != nil {
 		return Status{}, err
 	}
@@ -99,9 +88,37 @@ func readInstanceID(ctx context.Context, db *sql.DB) (string, error) {
 	return instance.ID, err
 }
 
-func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+// rowQueryer is the read surface shared by a pool and a transaction.
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// openReadOnly is a single read-only session. Startup rejects writes, and a
+// failed dial is returned as a fixed reason without the connection identity.
+func openReadOnly(ctx context.Context, dsn string) (*sql.DB, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("database_url is required")
+	}
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, errors.New("invalid PostgreSQL database configuration")
+	}
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["default_transaction_read_only"] = "on"
+	db := sql.OpenDB(stdlib.GetConnector(*config))
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err = db.PingContext(ctx); err != nil {
+		return nil, errors.Join(redactConnectError(err), db.Close())
+	}
+	return db, nil
+}
+
+func tableExists(ctx context.Context, q rowQueryer, name string) (bool, error) {
 	var exists bool
-	err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?)", name).Scan(&exists)
+	err := q.QueryRowContext(ctx, "SELECT to_regclass($1) IS NOT NULL", name).Scan(&exists)
 	return exists, err
 }
 
@@ -110,11 +127,11 @@ func readVersions(ctx context.Context, db *sql.DB, embedded []int64, status *Sta
 	if err != nil || !exists {
 		return err
 	}
-	rows, err := db.QueryContext(ctx, "SELECT version_id FROM web_goose_db_version WHERE is_applied = 1")
+	rows, err := db.QueryContext(ctx, "SELECT version_id FROM web_goose_db_version WHERE is_applied")
 	if err != nil {
 		return err
 	}
-	defer fsutil.Close(&retErr, rows)
+	defer func() { retErr = errors.Join(retErr, rows.Close()) }()
 	applied := make(map[int64]bool)
 	for rows.Next() {
 		var version int64

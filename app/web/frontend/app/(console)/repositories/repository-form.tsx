@@ -164,7 +164,11 @@ export function RepositoryForm({ repository }: { repository?: Repository }) {
         : "未设置";
 
   return (
-    <form noValidate onSubmit={onSubmit} className="flex flex-col gap-6">
+    <form
+      noValidate
+      onSubmit={onSubmit}
+      className="flex w-full max-w-4xl flex-col gap-6"
+    >
       {preflight ? (
         <PreflightResultView result={preflight} title="保存被预检拒绝" />
       ) : null}
@@ -357,9 +361,9 @@ export function RepositoryForm({ repository }: { repository?: Repository }) {
                 placeholder={passwordPlaceholder}
                 autoComplete="new-password"
               />
-              <FieldDescription>
-                密码只写不读，服务端不会返回已保存的值；编辑时留空表示保留现有密码。
-              </FieldDescription>
+              {creating ? null : (
+                <FieldDescription>留空保留现有密码。</FieldDescription>
+              )}
               <FieldError>{errors.password}</FieldError>
             </Field>
 

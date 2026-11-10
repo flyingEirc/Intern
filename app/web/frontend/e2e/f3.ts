@@ -161,11 +161,6 @@ async function main(): Promise<void> {
       full_cron: "0 3 1 1 *",
       incremental_cron: "30 4 1 * *",
       timezone: "Asia/Shanghai",
-      max_chain_length: 7,
-      parallel: 1,
-      throttle: 0,
-      zstd_level: 3,
-      page_tracking: false,
       enabled: false,
     }),
   );
@@ -286,11 +281,14 @@ async function main(): Promise<void> {
     );
     b.open(`${stack.origin}/replicas`);
     b.waitText("已校验");
-    const replicasPage = b.text();
+    const replicaTargets = b.ab(
+      "eval",
+      "JSON.stringify(Array.from(document.querySelectorAll('a[href*=\"/backups/detail?id=\"]'), (element) => element.getAttribute('href')))",
+    );
     for (const replica of replicas) {
       expect(
-        replicasPage.includes(replica.backup_id.slice(0, 8)),
-        `replica of ${replica.backup_id} is not listed`,
+        replicaTargets.includes(replica.backup_id),
+        `replica of ${replica.backup_id} is not linked`,
       );
     }
     b.record({
@@ -360,6 +358,8 @@ async function main(): Promise<void> {
       ).json,
     );
     b.open(`${stack.origin}/backups/detail?id=${latest.id}`);
+    b.waitText("恢复诊断");
+    b.click("恢复诊断");
     b.waitText(latest.payload_sha256);
     // The per-repository replica of this backup, as GET /backups/{id} reports.
     expect(
@@ -467,6 +467,17 @@ async function main(): Promise<void> {
 
     stack.setFtp("up");
     b.open(`${stack.origin}/replicas`);
+    // The queue is fetched after the document loads; wait for the failed row
+    // to render instead of querying the DOM mid-load.
+    b.waitText("查看失败详情");
+    const opened = b.ab(
+      "eval",
+      "(() => { const target = Array.from(document.querySelectorAll('button')).find((element) => element.textContent?.includes('查看失败详情')); target?.click(); return target !== undefined; })()",
+    );
+    expect(
+      opened === "true",
+      `the failed replica has no failure detail action; page says: ${b.text().slice(0, 2000)}`,
+    );
     b.waitText(failed.last_error_code ?? "");
     b.record({
       id: "08-replica-failed",

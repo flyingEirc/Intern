@@ -391,7 +391,7 @@ func (f *fixture) s2Topology(t *testing.T, environment *s2Environment, face, mod
 	host, port := environment.address(t, face)
 	f.ftpID = f.s2CreateFTPSRepository(t, "s2-"+face, mode, host, port, environment.ca)
 	f.sourceID = f.createSource(t)
-	f.e2ePolicy = f.createPolicy(t, "s2-"+face, 3)
+	f.e2ePolicy = f.createPolicy(t, "s2-"+face)
 	f.enable(t, f.e2ePolicy)
 }
 
@@ -725,8 +725,7 @@ func (f *fixture) createPolicyNamed(t *testing.T, name, sourceID, localID, repli
 	t.Helper()
 	body := fmt.Sprintf(
 		`{"name":%q,"source_id":%q,"local_repository_id":%q,"replica_repository_id":%q,`+
-			`"full_cron":%q,"incremental_cron":%q,"timezone":"UTC","max_chain_length":3,`+
-			`"parallel":1,"throttle":0,"zstd_level":3,"page_tracking":false,"enabled":false}`,
+			`"full_cron":%q,"incremental_cron":%q,"timezone":"UTC","enabled":false}`,
 		name, sourceID, localID, replicaID, cronFull, cronInc)
 	return f.decodeID(t, f.admin.request(t, http.MethodPost, "/api/v1/policies", body, http.StatusCreated))
 }

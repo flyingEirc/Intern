@@ -1,5 +1,13 @@
 import { z } from "zod";
 import type { Policy, PolicyWrite } from "@/lib/api/generated/types.gen";
+import {
+  describeFull,
+  describeIncremental,
+  fullCron,
+  incrementalCron,
+  parseFullCron,
+  parseIncrementalCron,
+} from "./schedule";
 import { hasControlCharacters } from "./validation";
 
 export type PolicyFormValues = {
@@ -10,11 +18,6 @@ export type PolicyFormValues = {
   full_cron: string;
   incremental_cron: string;
   timezone: string;
-  max_chain_length: string;
-  parallel: string;
-  throttle: string;
-  zstd_level: string;
-  page_tracking: boolean;
   enabled: boolean;
 };
 
@@ -28,35 +31,28 @@ const cronExpression = (label: string) =>
       `${label}必须是标准 5 段 cron 表达式`,
     );
 
-const integerField = (label: string, minimum: number, maximum?: number) =>
-  z
-    .string()
-    .trim()
-    .min(1, `请输入${label}`)
-    .refine(
-      (value) =>
-        /^\d+$/.test(value) &&
-        Number(value) >= minimum &&
-        (maximum === undefined || Number(value) <= maximum),
-      maximum === undefined
-        ? `${label}必须是不小于 ${minimum} 的整数`
-        : `${label}必须是 ${minimum}–${maximum} 的整数`,
-    );
-
 export function newPolicyFormValues(): PolicyFormValues {
   return {
     name: "",
     source_id: "",
     local_repository_id: "",
     replica_repository_id: "",
-    full_cron: "0 2 * * *",
-    incremental_cron: "0 * * * *",
+    full_cron: fullCron({
+      frequency: "daily",
+      time: "02:00",
+      weekday: "1",
+      monthDay: "1",
+      cron: "0 2 * * *",
+      legacy: false,
+    }),
+    incremental_cron: incrementalCron({
+      frequency: "hourly",
+      time: "00:00",
+      everyHours: "1",
+      cron: "0 * * * *",
+      legacy: false,
+    }),
     timezone: "Asia/Shanghai",
-    max_chain_length: "7",
-    parallel: "1",
-    throttle: "0",
-    zstd_level: "3",
-    page_tracking: false,
     enabled: false,
   };
 }
@@ -70,11 +66,6 @@ export function policyToFormValues(policy: Policy): PolicyFormValues {
     full_cron: policy.full_cron,
     incremental_cron: policy.incremental_cron,
     timezone: policy.timezone,
-    max_chain_length: String(policy.max_chain_length),
-    parallel: String(policy.parallel),
-    throttle: String(policy.throttle),
-    zstd_level: String(policy.zstd_level),
-    page_tracking: policy.page_tracking,
     enabled: policy.enabled,
   };
 }
@@ -101,11 +92,6 @@ export function policyFormSchema() {
           (value) => value !== "Local",
           "不能使用 Local，请输入 IANA 时区名",
         ),
-      max_chain_length: integerField("最大链长", 1),
-      parallel: integerField("并行度", 1),
-      throttle: integerField("限速（字节/秒）", 0),
-      zstd_level: integerField("zstd 级别", 1, 22),
-      page_tracking: z.boolean(),
       enabled: z.boolean(),
     })
     .superRefine((value, ctx) => {
@@ -139,11 +125,23 @@ export function buildPolicyWrite(value: PolicyFormValues): PolicyWrite {
     full_cron: value.full_cron.trim(),
     incremental_cron: value.incremental_cron.trim(),
     timezone: value.timezone.trim(),
-    max_chain_length: Number(value.max_chain_length),
-    parallel: Number(value.parallel),
-    throttle: Number(value.throttle),
-    zstd_level: Number(value.zstd_level),
-    page_tracking: value.page_tracking,
     enabled: value.enabled,
+  };
+}
+
+/**
+ * One line of business wording for a policy's two schedules, plus the raw
+ * cron expression wherever the wording falls back to a custom schedule.
+ */
+export function scheduleSummary(
+  policy: Pick<Policy, "full_cron" | "incremental_cron">,
+): { text: string; expressions: string[] } {
+  const full = parseFullCron(policy.full_cron);
+  const incremental = parseIncrementalCron(policy.incremental_cron);
+  return {
+    text: `${full.frequency === "custom" ? "自定义全量安排" : describeFull(full)}；${incremental.frequency === "custom" ? "自定义增量安排" : describeIncremental(incremental)}`,
+    expressions: [full, incremental]
+      .filter((schedule) => schedule.frequency === "custom")
+      .map((schedule) => schedule.cron),
   };
 }

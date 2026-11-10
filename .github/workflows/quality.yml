@@ -194,7 +194,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Runner prerequisites
-        run: .github/scripts/require-runner.sh --cc --bun
+        run: .github/scripts/require-runner.sh --cc --bun --docker
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.0'
@@ -208,7 +208,19 @@ jobs:
       - name: Build
         run: go build -p 4 ./internal/... ./app/cli/... ./app/web/...
       - name: Behavior and race tests
-        run: go test -race -p 4 -shuffle=on ./internal/... ./app/cli/... ./app/web/...
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/quality/postgres
+          go test -json -race -p 4 -shuffle=on ./internal/... ./app/cli/... ./app/web/... | tee .cache/quality/postgres/events.jsonl
+      - name: Retain PostgreSQL control-plane regression evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-control-plane-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+          path: .cache/quality/postgres/events.jsonl
       # The gates' own accept and reject cases, including an empty GITHUB_SHA,
       # run here too.
       - name: W4 evidence gate accept and reject cases
@@ -372,10 +384,10 @@ jobs:
           # go test fails the step even though tee succeeds). A cancelled step
           # leaves the group running; the always() step below stops that group.
           rm -f "$INTERN_TEST_PGID_FILE"
-          setsid --wait bash -eo pipefail -c '
-            printf "%s\n" "$$" > "$1"
-            go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
-          ' _ "$INTERN_TEST_PGID_FILE" &
+          setsid --wait bash -eo pipefail -s -- "$INTERN_TEST_PGID_FILE" <<'CLI_TEST' &
+          printf "%s\n" "$$" > "$1"
+          go test -json -tags=integration -count=1 -shuffle=on -parallel=2 -timeout=35m ./app/cli/integration/... | tee "$INTERN_TEST_REPORT_DIR/events.jsonl"
+          CLI_TEST
           wait $!
       # A cancelled test step leaves its process group running: stop exactly
       # that group before anything reads the evidence or the Docker resources.
@@ -645,6 +657,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # PG-G3 builds the pinned pre-PG production program with git archive.
+          fetch-depth: 0
           persist-credentials: false
       - name: Runner prerequisites
         run: .github/scripts/require-runner.sh --docker
@@ -842,7 +856,7 @@ jobs:
         run: |
           set -uo pipefail
           failed=()
-          for suite in run f5 f2 f3 f4 journey; do
+          for suite in run f5 f2 f3 f4 responsive journey; do
             echo "::group::e2e/$suite.ts"
             if ! bun "e2e/$suite.ts"; then
               failed+=("$suite")
@@ -853,7 +867,7 @@ jobs:
             printf 'ui-e2e: failed suites: %s\n' "${failed[*]}" >&2
             exit 1
           fi
-          echo 'ui-e2e: all six suites passed'
+          echo 'ui-e2e: all seven suites passed'
       - name: Remove this job's e2e stacks
         if: always()
         timeout-minutes: 5
@@ -872,7 +886,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           include-hidden-files: true
-          path: .cache/e2e*/**
+          # Browser storage state contains session cookies. Upload only the
+          # named business readbacks, manifests and screenshots, never the
+          # evidence directory or a JSON wildcard.
+          path: |
+            .cache/e2e*/**/manifest.json
+            .cache/e2e*/**/*.png
+            .cache/e2e-f2/**/B1-server-defaults.json
+            .cache/e2e-f2/**/B2-historical-values.json
+            .cache/e2e-f2/**/B4-business-schedules.json
 
   quality-gate:
     name: quality-gate

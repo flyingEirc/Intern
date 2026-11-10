@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo, useState } from "react";
+import { DataPanel, LoadMoreButton } from "@/components/resources/data-panel";
 import {
   ListSkeleton,
   NoPermission,
@@ -7,8 +9,6 @@ import {
   ResourceError,
 } from "@/components/resources/states";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import {
   Table,
   TableBody,
@@ -44,19 +44,32 @@ export function AuditView() {
   const session = useSession();
   const canRead = hasPermission(session.data?.permissions, "audit:read");
   const pages = useAuditLogPages(canRead);
+  const [query, setQuery] = useState("");
 
+  const entries = pages.data?.pages.flatMap((page) => page.items) ?? [];
+  const visible = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle === "") return entries;
+    return entries.filter((entry) =>
+      [
+        entry.actor_name,
+        auditActionLabel[entry.action] ?? entry.action,
+        entry.resource_type,
+        auditResultLabel[entry.result],
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [entries, query]);
   if (!canRead) {
     return (
-      <NoPermission
-        action="读取审计日志"
-        note="当前账号没有读取审计日志的权限。审计记录只对管理员开放，服务端仍会逐请求拒绝。"
-      />
+      <NoPermission action="读取审计日志" note="审计日志仅对管理员开放。" />
     );
   }
 
-  const entries = pages.data?.pages.flatMap((page) => page.items) ?? [];
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <PageHeader
         title="审计日志"
         description="按时间倒序。详情是结构化字段，不含密码或凭据。"
@@ -69,7 +82,19 @@ export function AuditView() {
         <p className="text-sm text-muted-foreground">还没有审计记录。</p>
       ) : null}
       {entries.length > 0 ? (
-        <div className="flex flex-col gap-3">
+        <DataPanel
+          title="审计记录"
+          count={visible.length}
+          search={query}
+          onSearch={setQuery}
+          footer={
+            <LoadMoreButton
+              hasNextPage={pages.hasNextPage}
+              isFetching={pages.isFetchingNextPage}
+              onLoadMore={() => pages.fetchNextPage()}
+            />
+          }
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -85,7 +110,14 @@ export function AuditView() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {entries.map((entry) => (
+              {visible.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={9} className="h-20 text-center">
+                    没有匹配的记录
+                  </TableCell>
+                </TableRow>
+              ) : null}
+              {visible.map((entry) => (
                 <TableRow key={auditIdNumber(entry.id)}>
                   <TableCell className="whitespace-nowrap">
                     {formatDateTime(entry.ts)}
@@ -135,21 +167,7 @@ export function AuditView() {
               ))}
             </TableBody>
           </Table>
-          {pages.hasNextPage ? (
-            <div>
-              <Button
-                variant="outline"
-                disabled={pages.isFetchingNextPage}
-                onClick={() => pages.fetchNextPage()}
-              >
-                {pages.isFetchingNextPage ? (
-                  <Spinner data-icon="inline-start" />
-                ) : null}
-                加载更多
-              </Button>
-            </div>
-          ) : null}
-        </div>
+        </DataPanel>
       ) : null}
     </div>
   );

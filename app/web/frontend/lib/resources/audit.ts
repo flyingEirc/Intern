@@ -33,6 +33,7 @@ export const auditResultLabel: Record<AuditLog["result"], string> = {
  */
 export const auditActionLabel: Record<string, string> = {
   "auth.login": "登录",
+  "auth.setup": "首次管理员初始化",
   "auth.logout": "退出登录",
   "auth.password": "修改自己的密码",
   "users.create": "创建用户",

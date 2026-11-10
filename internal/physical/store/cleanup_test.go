@@ -34,7 +34,8 @@ func TestCleanupLedgerIsolationAndRetries(t *testing.T) {
 func TestCompletionTransactionRetainsLedgerOnFailure(t *testing.T) {
 	s := testStore(t)
 	mustBegin(t, s, "full", "full")
-	execSQL(t, s, `CREATE TRIGGER reject_cleanup BEFORE DELETE ON cleanup_ledger BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END`)
+	execSQL(t, s, `CREATE FUNCTION reject_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected metadata failure'; END $$`)
+	execSQL(t, s, `CREATE TRIGGER reject_cleanup BEFORE DELETE ON cleanup_ledger FOR EACH ROW EXECUTE FUNCTION reject_cleanup()`)
 	if err := s.Complete(t.Context(), completion("full", "full-backuped", 0, 100)); err == nil {
 		t.Fatal("metadata transaction failure ignored")
 	}
@@ -46,7 +47,7 @@ func TestCompletionTransactionRetainsLedgerOnFailure(t *testing.T) {
 	if err != nil || len(pending) != 3 {
 		t.Fatalf("lost cleanup after rollback: %+v %v", pending, err)
 	}
-	execSQL(t, s, "DROP TRIGGER reject_cleanup")
+	execSQL(t, s, "DROP TRIGGER reject_cleanup ON cleanup_ledger")
 	mustComplete(t, s, completion("full", "full-backuped", 0, 100))
 	// Even an externally restored stale ledger must never expose completed objects.
 	execSQL(t, s, "INSERT INTO cleanup_ledger (backup_id, instance_id, run_id, kind, target, created_at) VALUES ('full', 'instance', 'full', 'object', 'stale', 'now')")
@@ -74,7 +75,7 @@ func TestPhysicalMigrateIdempotenceAndDowngrade(t *testing.T) {
 
 func TestPhysicalMigrateRejectsDowngrade(t *testing.T) {
 	s := testStore(t)
-	execSQL(t, s, "INSERT INTO physical_goose_db_version (version_id, is_applied) VALUES (99, 1)")
+	execSQL(t, s, "INSERT INTO physical_goose_db_version (version_id, is_applied) VALUES (99, TRUE)")
 	if err := Migrate(t.Context(), s.db); err == nil {
 		t.Fatal("downgrade accepted")
 	}
@@ -114,7 +115,7 @@ func checkCleanupRetry(t *testing.T, s *Store, cleanup Cleanup) {
 	}
 	var attempts int
 	var code string
-	if err := s.db.QueryRowContext(t.Context(), "SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = ?", cleanup.ID).Scan(&attempts, &code); err != nil || attempts != 1 || code != "permission_denied" {
+	if err := s.db.QueryRowContext(t.Context(), "SELECT attempts, last_error_code FROM cleanup_ledger WHERE id = $1", cleanup.ID).Scan(&attempts, &code); err != nil || attempts != 1 || code != "permission_denied" {
 		t.Fatalf("retry record: %d %q %v", attempts, code, err)
 	}
 	for range 2 {

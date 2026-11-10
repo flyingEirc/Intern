@@ -117,7 +117,7 @@ func TestSourcePreflightMapsRealFailures(t *testing.T) {
 	if persisted.ServerUUID != nil || persisted.ServerVersion != nil {
 		t.Fatalf("failed identity check persisted server identity: %+v", persisted)
 	}
-	expectAuditCount(t, f.dir, "sources.preflight", "success", 0)
+	expectAuditCount(t, f.dsn, "sources.preflight", "success", 0)
 	// The contract permits paths the client supplied; it forbids the secret and
 	// any diagnostic the server observed on its own.
 	f.noSecrets(t, response.Body.String(), "{{SECRET_preflight_source}}")
@@ -204,14 +204,14 @@ func TestPolicyEnableFailsWithPreflightAndStaysDisabled(t *testing.T) {
 	if err != nil || persisted.Enabled || persisted.LastPreflight != nil {
 		t.Fatalf("enable persisted: %+v %v", persisted, err)
 	}
-	expectAuditCount(t, f.dir, "policies.enable", "success", 0)
+	expectAuditCount(t, f.dsn, "policies.enable", "success", 0)
 
 	// Creating with enabled=true is refused the same way and leaves no row.
 	enabled := strings.Replace(policyBody("policy-b", source.ID, local), `"enabled":false`, `"enabled":true`, 1)
 	created := f.request(t, "POST", "/api/v1/policies", enabled, cookie, http.StatusConflict)
 	assertPreflightFailed(t, created, "identity", "identity_query_failed")
 	var count int
-	if err = queryOne(t, f.dir, `SELECT COUNT(*) FROM policies WHERE name = 'policy-b'`, &count); err != nil {
+	if err = queryOne(t, f.dsn, `SELECT COUNT(*) FROM policies WHERE name = 'policy-b'`, &count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -269,12 +269,12 @@ func TestDisableAfterFailedEnableSucceeds(t *testing.T) {
 	if disabled.Enabled {
 		t.Fatal("disable left the policy enabled")
 	}
-	expectAuditCount(t, f.dir, "policies.disable", "success", 1)
+	expectAuditCount(t, f.dsn, "policies.disable", "success", 1)
 }
 
 func queryOne(t *testing.T, dir, query string, dst *int) error {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	db, err := sql.Open("pgx", dir)
 	if err != nil {
 		return err
 	}

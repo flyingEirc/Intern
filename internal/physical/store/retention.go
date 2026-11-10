@@ -90,7 +90,9 @@ func (s *Store) ReserveLocalDelete(ctx context.Context, chainID string, at time.
 	if chainID == "" || at.IsZero() {
 		return nil, errors.New("physical store: incomplete local delete reservation")
 	}
-	if err := s.withTx(ctx, func(q *storesql.Queries) error { return reserveChain(ctx, q, chainID, timestamp(at)) }); err != nil {
+	if err := s.withTx(ctx, func(ctx context.Context, q *storesql.Queries) error {
+		return reserveChain(ctx, q, chainID, timestamp(at))
+	}); err != nil {
 		return nil, err
 	}
 	return s.LocalDeletePending(ctx, chainID)

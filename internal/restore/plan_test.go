@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 )
 
@@ -144,7 +145,7 @@ func TestBuildPlanFTPWhenAllLocalPayloadsAreReclaimed(t *testing.T) {
 func TestBuildPlanReplicaNotVerified(t *testing.T) {
 	fixture := newPlanFixture(t)
 	mustNoError(t, os.RemoveAll(filepath.Join(fixture.repoRoot, filepath.FromSlash(fixture.backup(1).ObjectPath))))
-	fixture.exec("UPDATE replicas SET status = 'uploaded' WHERE backup_id = ? AND repository_id = ?", fixture.backup(1).ID, fixtureRepoID)
+	fixture.exec("UPDATE replicas SET status = 'uploaded' WHERE backup_id = $1 AND repository_id = $2", fixture.backup(1).ID, fixtureRepoID)
 	_, err := BuildPlan(t.Context(), fixture.options(), fixture.backup(2).ID)
 	requirePlanCode(t, err, CodeSourceUnavailable)
 }
@@ -164,28 +165,28 @@ func TestBuildPlanRejections(t *testing.T) {
 		{
 			name: "not completed", code: CodeBackupNotCompleted,
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
-				f.exec("UPDATE backups SET status = 'failed' WHERE id = ?", f.backup(1).ID)
+				f.exec("UPDATE backups SET status = 'failed' WHERE id = $1", f.backup(1).ID)
 				return f.options(), f.backup(1).ID
 			},
 		},
 		{
 			name: "missing middle link", code: CodeChainBroken,
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
-				f.exec("UPDATE backups SET seq = 9 WHERE id = ?", f.backup(1).ID)
+				f.exec("UPDATE backups SET seq = 9 WHERE id = $1", f.backup(1).ID)
 				return f.options(), f.backup(2).ID
 			},
 		},
 		{
 			name: "wrong parent", code: CodeChainBroken,
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
-				f.exec("UPDATE backups SET parent_id = ? WHERE id = ?", f.backup(0).ID, f.backup(2).ID)
+				f.exec("UPDATE backups SET parent_id = $1 WHERE id = $2", f.backup(0).ID, f.backup(2).ID)
 				return f.options(), f.backup(2).ID
 			},
 		},
 		{
 			name: "discontinuous lsn", code: CodeLSNDiscontinuous,
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
-				f.exec("UPDATE backups SET from_lsn = '999' WHERE id = ?", f.backup(1).ID)
+				f.exec("UPDATE backups SET from_lsn = '999' WHERE id = $1", f.backup(1).ID)
 				return f.options(), f.backup(2).ID
 			},
 		},
@@ -210,7 +211,7 @@ func TestBuildPlanRejections(t *testing.T) {
 		{
 			name: "outside matrix", code: CodeMatrixUnsupported,
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
-				f.exec("UPDATE chains SET server_version = '8.4.12' WHERE id = ?", fixtureChain)
+				f.exec("UPDATE chains SET server_version = '8.4.12' WHERE id = $1", fixtureChain)
 				return f.options(), f.backup(2).ID
 			},
 		},
@@ -229,7 +230,7 @@ func TestBuildPlanRejections(t *testing.T) {
 			mutate: func(t *testing.T, f *planFixture) (Options, string) {
 				for _, backup := range f.backups {
 					mustNoError(t, os.RemoveAll(filepath.Join(f.repoRoot, filepath.FromSlash(backup.ObjectPath))))
-					f.exec("UPDATE replicas SET status = 'failed' WHERE backup_id = ?", backup.ID)
+					f.exec("UPDATE replicas SET status = 'failed' WHERE backup_id = $1", backup.ID)
 				}
 				return f.options(), f.backup(2).ID
 			},
@@ -352,15 +353,14 @@ func TestBuildPlanDigest(t *testing.T) {
 
 func TestBuildPlanReadOnly(t *testing.T) {
 	fixture := newPlanFixture(t)
-	dbPath := filepath.Join(filepath.Dir(fixture.workRoot), "intern.db")
-	beforeDB := fileDigestForTest(t, dbPath)
+	beforeDB := pgtest.Digest(t, fixture.db)
 	beforeRepo := directoryDigest(t, fixture.repoRoot)
 	plan, err := BuildPlan(t.Context(), fixture.options(), fixture.backup(2).ID)
 	mustNoError(t, err)
 	if plan.Digest == "" {
 		t.Fatal("plan has no digest")
 	}
-	if after := fileDigestForTest(t, dbPath); after != beforeDB {
+	if after := pgtest.Digest(t, fixture.db); after != beforeDB {
 		t.Fatal("plan changed the control-plane database")
 	}
 	if after := directoryDigest(t, fixture.repoRoot); after != beforeRepo {
@@ -424,7 +424,7 @@ func TestBuildPlanRefusesTheMoreSpecificConfigurationFault(t *testing.T) {
 	mismatch.probeTool = func(context.Context, string) (physical.ToolVersion, error) {
 		return physical.ToolVersion{Version: "8.4.0-8"}, nil
 	}
-	fixture.exec("UPDATE chains SET server_version = '8.4.12' WHERE id = ?", fixtureChain)
+	fixture.exec("UPDATE chains SET server_version = '8.4.12' WHERE id = $1", fixtureChain)
 	_, err := BuildPlan(t.Context(), mismatch, fixture.backup(2).ID)
 	requirePlanCode(t, err, CodeToolVersionMismatch)
 
@@ -441,9 +441,9 @@ func TestBuildPlanRejectsReorderedSequence(t *testing.T) {
 	fixture := newPlanFixture(t)
 	// Permuted sequence: the incremental-2 row now sits at seq 2 and the
 	// incremental-1 row at seq 3, so the sorted rows no longer follow parentage.
-	fixture.exec("UPDATE backups SET seq = 9 WHERE id = ?", fixture.backup(1).ID)
-	fixture.exec("UPDATE backups SET seq = 2 WHERE id = ?", fixture.backup(2).ID)
-	fixture.exec("UPDATE backups SET seq = 3 WHERE id = ?", fixture.backup(1).ID)
+	fixture.exec("UPDATE backups SET seq = 9 WHERE id = $1", fixture.backup(1).ID)
+	fixture.exec("UPDATE backups SET seq = 2 WHERE id = $1", fixture.backup(2).ID)
+	fixture.exec("UPDATE backups SET seq = 3 WHERE id = $1", fixture.backup(1).ID)
 	_, err := BuildPlan(t.Context(), fixture.options(), fixture.backup(1).ID)
 	requirePlanCode(t, err, CodeChainBroken)
 	_, err = BuildPlan(t.Context(), fixture.options(), fixture.backup(2).ID)

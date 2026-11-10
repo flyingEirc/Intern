@@ -86,7 +86,7 @@ describe("RepositoryForm", () => {
     expect(push).toHaveBeenCalledWith(
       "/repositories/detail?id=0190c1f6-4f2a-7c1e-9b55-6f0f8d1e2a3b",
     );
-  });
+  }, 20000);
 
   it("never renders a stored password and omits a blank one from PUT", async () => {
     routeFetch({

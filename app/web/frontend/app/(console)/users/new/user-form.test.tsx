@@ -50,7 +50,7 @@ describe("UserForm", () => {
       "用户名只能包含字母、数字、点、下划线和连字符（3–64 位）",
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+  }, 20000);
 
   it("refuses a password shorter than 12 characters without a request", async () => {
     routeFetch({

@@ -15,16 +15,15 @@ import (
 
 // AuditTimeout is the context budget for a detached audit write after the
 // request context is canceled. Client disconnects still get the full budget;
-// server shutdown can shorten it via DetachedAudit.Bound. It is not a hard cap
-// on a SQLite call already inside the driver: the modernc busy callback does
-// not observe sqlite3_interrupt, so that call can continue for store.BusyTimeout.
-// Shutdown waits for this budget plus that busy timeout before closing the database.
+// server shutdown can shorten it via DetachedAudit.Bound. The PostgreSQL
+// statement and lock timeouts bound a call already inside the driver.
 const AuditTimeout = 5 * time.Second
 
 const auditRecordedKey = "intern.audit_recorded"
 
 var auditActions = map[string]string{
 	"POST /api/v1/auth/login":           "auth.login",
+	"POST /api/v1/auth/setup":           "auth.setup",
 	"POST /api/v1/auth/logout":          "auth.logout",
 	"PUT /api/v1/auth/password":         "auth.password",
 	"POST /api/v1/users":                "users.create",

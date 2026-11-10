@@ -8,8 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +21,7 @@ import (
 	"github.com/flyingEirc/Intern/app/web/internal/middleware"
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func TestRejectUnprotectedListen(t *testing.T) {
@@ -219,45 +218,135 @@ func TestShutdownReportsUncooperativeHandlers(t *testing.T) {
 	}
 }
 
-// TestShutdownWaitsOutSQLiteBusyBeforeReturning holds the database write lock
-// with a second connection's BEGIN IMMEDIATE, then logs out through the real
-// handler. Cancel is armed only after that logout stays inside a SQLite call.
-// Run must still be blocked past the old graceful-plus-audit window while the
-// logout is inside SQLite, and it may return only after that driver call
-// finishes. Closing the client does not end the lock wait. The wait is the
-// driver's busy sleep, not a channel stand-in.
-func TestShutdownWaitsOutSQLiteBusyBeforeReturning(t *testing.T) {
-	fixture := newAuthFixture(t)
-	fixture.seed(t, "admin", "admin")
-	config := Config{Listen: freeAddress(t), ShutdownTimeout: time.Second}
+// A SHARE lock permits session authentication reads but blocks logout writes.
+// Cancel only after PostgreSQL reports that write waiting on the lock, then
+// prove Run retains the database until the handler and its audit have drained.
+func TestShutdownWaitsForBlockedLogoutAndAudit(t *testing.T) {
+	h := startBlockedLogout(t)
+	h.cancel()
+	h.waitCanceled(t)
+	waitForSessionWriteLock(t, h.observer)
+	select {
+	case <-h.handlerDone:
+		t.Fatal("blocked logout returned before its write lock was released")
+	case err := <-h.done:
+		t.Fatalf("Run closed the database under a blocked logout: %v", err)
+	default:
+	}
+	h.release()
+	h.assertDrained(t)
+	expectAuditCount(t, h.fixture.dsn, "auth.logout", "success", 1)
+}
+
+func TestShutdownBoundsBlockedDatabaseStatement(t *testing.T) {
+	h := startBlockedLogout(t)
+	start := time.Now()
+	h.cancel()
+	h.waitCanceled(t)
+	// Keep the SHARE lock held through the server's statement_timeout. The
+	// transaction must fail and roll back, including its success audit.
+	h.assertDrained(t)
+	if elapsed := time.Since(start); elapsed > store.StatementTimeout+5*time.Second {
+		t.Fatalf("blocked logout exceeded the PostgreSQL statement bound: %s", elapsed)
+	}
+	expectAuditCount(t, h.fixture.dsn, "auth.logout", "success", 0)
+	h.release()
+}
+
+type blockedLogout struct {
+	fixture     *authFixture
+	observer    *sql.DB
+	release     func()
+	cancel      context.CancelFunc
+	handlerDone chan struct{}
+	canceled    chan struct{}
+	done        chan error
+	finished    chan struct{}
+	clientDone  chan logoutResult
+}
+
+func startBlockedLogout(t *testing.T) *blockedLogout {
+	t.Helper()
+	f := newAuthFixture(t)
+	f.seed(t, "admin", "admin")
+	h := &blockedLogout{
+		fixture: f, handlerDone: make(chan struct{}), canceled: make(chan struct{}),
+		done: make(chan error, 1), finished: make(chan struct{}), clientDone: make(chan logoutResult, 1),
+	}
+	config := Config{Listen: freeAddress(t), ShutdownTimeout: 50 * time.Millisecond}
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- Run(ctx, New(config, Handler(fixture.engine)), config) }()
-	finish := waitRun(cancel, done, postCancelDrainWait()+config.ShutdownTimeout+3*time.Second)
-	t.Cleanup(func() { _ = finish() })
+	h.cancel = cancel
+	api := Handler(f.engine)
+	srv := New(config, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/auth/logout" {
+			defer close(h.handlerDone)
+			stop := context.AfterFunc(r.Context(), func() { close(h.canceled) })
+			defer stop()
+		}
+		api.ServeHTTP(w, r)
+	}))
+	go func() {
+		err := Run(ctx, srv, config)
+		select {
+		case <-h.handlerDone:
+		default:
+			err = errors.Join(err, errors.New("database close would precede logout handler and audit drain"))
+		}
+		h.done <- errors.Join(err, f.database.Close())
+		close(h.finished)
+	}()
+	t.Cleanup(func() {
+		h.releaseIfHeld()
+		cancel()
+		select {
+		case <-h.finished:
+		case <-time.After(config.ShutdownTimeout + postCancelDrainWait() + 3*time.Second):
+			t.Error("blocked logout server did not stop during cleanup")
+		}
+	})
 	waitListening(t, config.Listen, true)
 	cookie := liveLoginCookie(t, config.Listen)
-	release := holdImmediateWriteLock(t, filepath.Join(fixture.dir, "intern.db"))
-	defer release()
-	logoutDone := make(chan logoutResult, 1)
+	h.observer, h.release = holdSessionWriteLock(t, f.dsn)
 	go func() {
 		status, err := postStatus("http://"+config.Listen+"/api/v1/auth/logout", "", cookie, 20*time.Second)
-		logoutDone <- logoutResult{status: status, err: err}
+		h.clientDone <- logoutResult{status: status, err: err}
 	}()
-	waitForDriverBusy(t, fixture.database)
-	cancel()
-	// Past the old graceful timeout plus AuditTimeout, the logout must still be
-	// inside SQLite and Run must not have returned. Close drops the client
-	// connection; the handler's lock wait does not end with it.
-	assertStillInSQLite(t, fixture.database, done, config.ShutdownTimeout+middleware.AuditTimeout+400*time.Millisecond)
-	release()
-	err := finish()
-	assertBusyShutdownFinished(t, fixture, err)
+	waitForSessionWriteLock(t, h.observer)
+	return h
+}
+
+func (h *blockedLogout) releaseIfHeld() {
+	if h.release != nil {
+		h.release()
+	}
+}
+
+func (h *blockedLogout) waitCanceled(t *testing.T) {
+	t.Helper()
 	select {
-	case result := <-logoutDone:
-		t.Logf("logout client status=%d err=%v", result.status, result.err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("logout client did not return")
+	case <-h.canceled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not cancel the blocked logout request")
+	}
+}
+
+func (h *blockedLogout) assertDrained(t *testing.T) {
+	t.Helper()
+	select {
+	case err := <-h.done:
+		assertDatabaseShutdownDrained(t, h.fixture, err)
+	case <-time.After(store.StatementTimeout + 5*time.Second):
+		t.Fatal("shutdown did not drain the blocked logout")
+	}
+	select {
+	case <-h.handlerDone:
+	default:
+		t.Fatal("database closed before the logout handler and audit returned")
+	}
+	select {
+	case <-h.clientDone:
+	case <-time.After(time.Second):
+		t.Fatal("logout HTTP client did not exit after shutdown")
 	}
 }
 
@@ -319,75 +408,56 @@ func postRaw(rawURL, body string, cookie *http.Cookie, timeout time.Duration) (i
 	return resp.StatusCode, string(payload), resp.Cookies(), err
 }
 
-func holdImmediateWriteLock(t *testing.T, path string) func() {
+func holdSessionWriteLock(t *testing.T, dsn string) (*sql.DB, func()) {
 	t.Helper()
-	u := url.URL{Scheme: "file", Path: path}
-	query := u.Query()
-	query.Add("_pragma", "busy_timeout(5000)")
-	u.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	db.SetMaxOpenConns(1)
-	conn, err := db.Conn(t.Context())
+	t.Cleanup(func() { _ = db.Close() })
+	tx, err := db.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if _, err = conn.ExecContext(lockCtx, "BEGIN IMMEDIATE"); err != nil {
+	if _, err = tx.ExecContext(t.Context(), "LOCK TABLE sessions, session_tombstones IN SHARE MODE"); err != nil {
 		t.Fatal(err)
 	}
 	var once sync.Once
-	return func() {
-		once.Do(func() {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-			_ = conn.Close()
-			_ = db.Close()
-		})
-	}
+	release := func() { once.Do(func() { _ = tx.Rollback() }) }
+	t.Cleanup(release)
+	return db, release
 }
 
-func waitForDriverBusy(t *testing.T, database *store.Store) {
+func waitForSessionWriteLock(t *testing.T, observer *sql.DB) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	var since time.Time
-	for time.Now().Before(deadline) {
-		if database.ConnectionsInUse() > 0 {
-			if since.IsZero() {
-				since = time.Now()
-			}
-			if time.Since(since) >= 200*time.Millisecond {
-				return
-			}
-		} else {
-			since = time.Time{}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	for ctx.Err() == nil {
+		var waiting bool
+		err := observer.QueryRowContext(ctx, `SELECT EXISTS (
+			SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+			WHERE l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			AND l.relation IN ('sessions'::regclass, 'session_tombstones'::regclass)
+			AND NOT l.granted AND l.mode = 'RowExclusiveLock' AND a.wait_event_type = 'Lock'
+		)`).Scan(&waiting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("logout did not stay inside a SQLite call")
+	t.Fatal("logout did not reach a PostgreSQL session write lock wait")
 }
 
-func assertStillInSQLite(t *testing.T, database *store.Store, done <-chan error, wait time.Duration) {
+func assertDatabaseShutdownDrained(t *testing.T, fixture *authFixture, err error) {
 	t.Helper()
-	select {
-	case err := <-done:
-		t.Fatalf("Run returned while the write lock was still held: %v", err)
-	case <-time.After(wait):
-	}
-	if database.ConnectionsInUse() == 0 {
-		t.Fatal("SQLite call finished before the old shutdown window elapsed")
-	}
-}
-
-func assertBusyShutdownFinished(t *testing.T, fixture *authFixture, err error) {
-	t.Helper()
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "handlers still running") {
+	if err == nil || err.Error() != context.DeadlineExceeded.Error() {
 		t.Fatalf("shutdown error = %v", err)
 	}
 	if fixture.database.ConnectionsInUse() != 0 {
-		t.Fatal("SQLite call still active after Run returned")
+		t.Fatal("database call still active after Run returned")
 	}
 	if strings.Contains(fixture.logs.String(), "database is closed") {
 		t.Fatalf("database closed under the logout: %s", fixture.logs.String())
@@ -539,7 +609,7 @@ func waitForShutdownRejection(t *testing.T, drain *handlerDrain, finished <-chan
 
 func openReviewDatabase(t *testing.T) *store.Store {
 	t.Helper()
-	database, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "metadata"))
+	database, err := store.Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +711,7 @@ func TestSessionLoadPanicDoesNotDestroySession(t *testing.T) {
 	if _, found, err := f.database.Sessions().Find(cookie.Value); err != nil || !found {
 		t.Fatalf("session destroyed by load panic: found=%t err=%v", found, err)
 	}
-	if n := countAudit(t, f.dir, "auth.logout", "success"); n != 0 {
+	if n := countAudit(t, f.dsn, "auth.logout", "success"); n != 0 {
 		t.Fatalf("session panic recorded auth.logout success=%d", n)
 	}
 }
@@ -728,6 +798,11 @@ type blockingAnonymousHasher struct {
 func (b *blockingAnonymousHasher) block() {
 	b.once.Do(func() { close(b.started) })
 	<-b.hold
+}
+
+func (b *blockingAnonymousHasher) HashAnonymous(password string) (string, error) {
+	b.block()
+	return b.PasswordHasher.HashAnonymous(password)
 }
 
 func (b *blockingAnonymousHasher) Verify(password, encoded string) (bool, error) {

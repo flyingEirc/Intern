@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/physical/chain"
 	"github.com/flyingEirc/Intern/internal/physical/store"
@@ -23,12 +24,16 @@ import (
 )
 
 func TestP3RecoveryWorker(t *testing.T) {
+	pgtest.RequireDSN(t)
+	dsn := pgtest.New(t)
+	t.Setenv("INTERN_P3_DATABASE_URL", dsn)
 	root := t.TempDir()
 	for _, dir := range []string{"work", "repo"} {
 		must(t, os.Mkdir(filepath.Join(root, dir), 0o700))
 	}
 	must(t, artifact.GenerateKey(filepath.Join(root, "key.json")))
-	db := openP3DB(t, filepath.Join(root, "intern.db"))
+	db := pgtest.OpenDSN(t, dsn)
+	must(t, store.Migrate(t.Context(), db))
 	s := store.New(db)
 	repo, err := local.Open(filepath.Join(root, "repo"))
 	must(t, err)
@@ -166,11 +171,13 @@ func waitP3Ready(t *testing.T, marker string) {
 }
 
 func TestP3KillChildWorker(t *testing.T) {
+	pgtest.RequireDSN(t)
 	root := os.Getenv("INTERN_P3_RECOVERY_ROOT")
 	if !filepath.IsAbs(root) {
 		t.Fatal("kill child requires owned fixture root")
 	}
-	db := openP3DB(t, filepath.Join(root, "intern.db"))
+	db := pgtest.OpenDSN(t, os.Getenv("INTERN_P3_DATABASE_URL"))
+	must(t, store.Migrate(t.Context(), db))
 	repo, err := local.Open(filepath.Join(root, "repo"))
 	must(t, err)
 	defer func() { must(t, repo.Close()) }()
@@ -191,11 +198,13 @@ func TestP3KillChildWorker(t *testing.T) {
 }
 
 func TestP3RestartChildWorker(t *testing.T) {
+	pgtest.RequireDSN(t)
 	root := os.Getenv("INTERN_P3_RECOVERY_ROOT")
 	if !filepath.IsAbs(root) {
 		t.Fatal("restart child requires owned fixture root")
 	}
-	db := openP3DB(t, filepath.Join(root, "intern.db"))
+	db := pgtest.OpenDSN(t, os.Getenv("INTERN_P3_DATABASE_URL"))
+	must(t, store.Migrate(t.Context(), db))
 	repo, err := local.Open(filepath.Join(root, "repo"))
 	must(t, err)
 	defer func() { must(t, repo.Close()) }()

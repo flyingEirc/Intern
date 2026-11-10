@@ -26,7 +26,7 @@ const w4Root = "/tmp/w4"
 const w4WorkerTest = "TestW4Worker"
 
 var w4WorkerCases = []string{
-	"a1-a2-e2e", "a2-priority", "a3-cancel", "a4-sse", "a3-sigterm", "a3-sigkill",
+	"a1-a2-e2e", "a2-default-chain-rotation", "a2-priority", "a3-cancel", "a4-sse", "a3-sigterm", "a3-sigkill", "a3-postgres-owner-loss",
 }
 
 var w4ResultMarkers = []string{
@@ -35,12 +35,14 @@ var w4ResultMarkers = []string{
 
 var w4StateMarkers = []string{
 	"chain=seq:1,2,3", "lsn_continuous=true", "conflict=409", "replicas_verified=3",
+	"PG-G2 default_max=7 completed_chain=7 admission_fulls=1 next_incremental_seq=2 replicas_verified=9",
+	"PG-P3 owner_terminated=true second_owner=refused serve_exit=nonzero tool_canceled=true completed=0 recovered=interrupted injected_during=backup",
 	"protection_requires_verified=true uploaded_window=observed", "uploaded_backups=",
-	"logs_agree=sqlite", "lists_agree=sqlite,local,ftp",
-	"running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first sqlite_intervals=disjoint",
+	"logs_agree=postgres", "lists_agree=postgres,local,ftp",
+	"running_max=1 claim_full_before_incremental=true queued_together=true order=incremental_first postgres_intervals=disjoint",
 	"canceled=true completed_backup=false staging_reclaimed=true work_reclaimed=true requires_full=true source_backups_unchanged=true",
 	"sigterm_exit_bounded=true no_false_completed=true recovered=true",
-	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true sqlite_interrupted=true",
+	"sigkill=SIGKILL interrupted=true pending=gone work=gone published_untouched=true protection_held=true next_incremental=requires_full next_incremental_code=parent_not_completed admission_full=completed next_backup=completed remote_held=true postgres_interrupted=true",
 	"sse_end=true sse_ordered=true secrets=clean lifecycle=queued<claimed<preflight_ok<started<completed",
 }
 
@@ -139,6 +141,7 @@ func TestW4NativeContainers(t *testing.T) {
 
 func startW4Worker(t *testing.T, ctx context.Context, nw *tc.DockerNetwork, image, binary string, mounts []tc.ContainerMount, uid, gid int, env map[string]string) tc.Container {
 	t.Helper()
+	env = workerPostgres(t, ctx, nw, env)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: image, ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name}, Mounts: mounts, Env: env,

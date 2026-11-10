@@ -3,7 +3,6 @@ package server
 import (
 	"database/sql"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -26,25 +25,25 @@ func TestResourceMutationsRollBackWhenSuccessAuditFails(t *testing.T) {
 
 func assertRepositoryWritesRollBack(t *testing.T, f *authFixture, cookie *http.Cookie, seeded seededResources) {
 	t.Helper()
-	setSuccessAuditAbort(t, f.dir, "repositories.create")
-	failedCreate := countAudit(t, f.dir, "repositories.create", "failed")
+	setSuccessAuditAbort(t, f.dsn, "repositories.create")
+	failedCreate := countAudit(t, f.dsn, "repositories.create", "failed")
 	root := newRepositoryDir(t)
 	response := f.request(t, "POST", "/api/v1/repositories", localRepository("rollback-repository", root), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	var count int
-	if err := queryOne(t, f.dir, `SELECT COUNT(*) FROM repositories WHERE name = 'rollback-repository'`, &count); err != nil {
+	if err := queryOne(t, f.dsn, `SELECT COUNT(*) FROM repositories WHERE name = 'rollback-repository'`, &count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatal("repository persisted without a success audit")
 	}
-	expectAuditCount(t, f.dir, "repositories.create", "failed", failedCreate+1)
-	setSuccessAuditAbort(t, f.dir, "")
+	expectAuditCount(t, f.dsn, "repositories.create", "failed", failedCreate+1)
+	setSuccessAuditAbort(t, f.dsn, "")
 
 	// Rotation must also roll back, leaving the previous ciphertext in place.
-	before := storedCiphertext(t, f.dir, "repositories", seeded.freeRepository)
-	setSuccessAuditAbort(t, f.dir, "repositories.update")
-	failedUpdate := countAudit(t, f.dir, "repositories.update", "failed")
+	before := storedCiphertext(t, f.dsn, "repositories", seeded.freeRepository)
+	setSuccessAuditAbort(t, f.dsn, "repositories.update")
+	failedUpdate := countAudit(t, f.dsn, "repositories.update", "failed")
 	response = f.request(t, "PUT", "/api/v1/repositories/"+seeded.freeRepository,
 		localRepository("renamed", seeded.root), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
@@ -52,76 +51,76 @@ func assertRepositoryWritesRollBack(t *testing.T, f *authFixture, cookie *http.C
 	if err != nil || reloaded.Name == "renamed" {
 		t.Fatalf("update persisted without a success audit: %+v %v", reloaded, err)
 	}
-	if storedCiphertext(t, f.dir, "repositories", seeded.freeRepository) != before {
+	if storedCiphertext(t, f.dsn, "repositories", seeded.freeRepository) != before {
 		t.Fatal("secret changed without a success audit")
 	}
-	expectAuditCount(t, f.dir, "repositories.update", "failed", failedUpdate+1)
-	setSuccessAuditAbort(t, f.dir, "")
+	expectAuditCount(t, f.dsn, "repositories.update", "failed", failedUpdate+1)
+	setSuccessAuditAbort(t, f.dsn, "")
 
-	setSuccessAuditAbort(t, f.dir, "repositories.delete")
+	setSuccessAuditAbort(t, f.dsn, "repositories.delete")
 	response = f.request(t, "DELETE", "/api/v1/repositories/"+seeded.freeRepository, "", cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	if _, err := f.database.Repository(t.Context(), seeded.freeRepository); err != nil {
 		t.Fatalf("delete persisted without a success audit: %v", err)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 }
 
 func assertSourceWritesRollBack(t *testing.T, f *authFixture, cookie *http.Cookie, seeded seededResources) {
 	t.Helper()
-	setSuccessAuditAbort(t, f.dir, "sources.create")
+	setSuccessAuditAbort(t, f.dsn, "sources.create")
 	response := f.request(t, "POST", "/api/v1/sources", sourceBody("rollback-source"), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	var count int
-	if err := queryOne(t, f.dir, `SELECT COUNT(*) FROM sources WHERE name = 'rollback-source'`, &count); err != nil {
+	if err := queryOne(t, f.dsn, `SELECT COUNT(*) FROM sources WHERE name = 'rollback-source'`, &count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatal("source persisted without a success audit")
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 
-	before := storedCiphertext(t, f.dir, "sources", seeded.freeSource)
-	setSuccessAuditAbort(t, f.dir, "sources.update")
+	before := storedCiphertext(t, f.dsn, "sources", seeded.freeSource)
+	setSuccessAuditAbort(t, f.dsn, "sources.update")
 	response = f.request(t, "PUT", "/api/v1/sources/"+seeded.freeSource, sourceBody("renamed-source"), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	reloaded, err := f.database.Source(t.Context(), seeded.freeSource)
 	if err != nil || reloaded.Name == "renamed-source" {
 		t.Fatalf("source update persisted: %+v %v", reloaded, err)
 	}
-	if storedCiphertext(t, f.dir, "sources", seeded.freeSource) != before {
+	if storedCiphertext(t, f.dsn, "sources", seeded.freeSource) != before {
 		t.Fatal("source secret changed without a success audit")
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 
-	setSuccessAuditAbort(t, f.dir, "sources.delete")
+	setSuccessAuditAbort(t, f.dsn, "sources.delete")
 	response = f.request(t, "DELETE", "/api/v1/sources/"+seeded.freeSource, "", cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	if _, err := f.database.Source(t.Context(), seeded.freeSource); err != nil {
 		t.Fatalf("source delete persisted: %v", err)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 }
 
 func assertPolicyWritesRollBack(t *testing.T, f *authFixture, cookie *http.Cookie, seeded seededResources) {
 	t.Helper()
-	setSuccessAuditAbort(t, f.dir, "policies.create")
+	setSuccessAuditAbort(t, f.dsn, "policies.create")
 	response := f.request(t, "POST", "/api/v1/policies", policyBody("rollback-policy", seeded.freeSource, seeded.freeRepository), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	var count int
-	if err := queryOne(t, f.dir, `SELECT COUNT(*) FROM policies WHERE name = 'rollback-policy'`, &count); err != nil {
+	if err := queryOne(t, f.dsn, `SELECT COUNT(*) FROM policies WHERE name = 'rollback-policy'`, &count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
 		t.Fatal("policy persisted without a success audit")
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 
 	before, err := f.database.Policy(t.Context(), seeded.policyID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setSuccessAuditAbort(t, f.dir, "policies.update")
+	setSuccessAuditAbort(t, f.dsn, "policies.update")
 	response = f.request(t, "PUT", "/api/v1/policies/"+seeded.policyID,
 		policyBody("renamed-policy", seeded.freeSource, seeded.freeRepository), cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
@@ -129,27 +128,27 @@ func assertPolicyWritesRollBack(t *testing.T, f *authFixture, cookie *http.Cooki
 	if err != nil || reloaded.Name != before.Name || reloaded.UpdatedAt != before.UpdatedAt {
 		t.Fatalf("policy update persisted: %+v %+v", reloaded, err)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 
-	setSuccessAuditAbort(t, f.dir, "policies.enable")
+	setSuccessAuditAbort(t, f.dsn, "policies.enable")
 	response = f.request(t, "POST", "/api/v1/policies/"+seeded.policyID+"/enable", "", cookie, http.StatusServiceUnavailable)
 	// Without preflight settings this deployment cannot even attempt enable;
 	// only a deployment with them reaches the enable transaction.
 	if response.Code == http.StatusInternalServerError {
 		requireInternal(t, response)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
+	setSuccessAuditAbort(t, f.dsn, "")
 
-	setSuccessAuditAbort(t, f.dir, "policies.delete")
+	setSuccessAuditAbort(t, f.dsn, "policies.delete")
 	response = f.request(t, "DELETE", "/api/v1/policies/"+seeded.policyID, "", cookie, http.StatusInternalServerError)
 	requireInternal(t, response)
 	if _, err = f.database.Policy(t.Context(), seeded.policyID); err != nil {
 		t.Fatalf("policy delete persisted: %v", err)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
-	expectAuditCount(t, f.dir, "policies.create", "success", 1)
-	expectAuditCount(t, f.dir, "policies.update", "success", 0)
-	expectAuditCount(t, f.dir, "policies.delete", "success", 0)
+	setSuccessAuditAbort(t, f.dsn, "")
+	expectAuditCount(t, f.dsn, "policies.create", "success", 1)
+	expectAuditCount(t, f.dsn, "policies.update", "success", 0)
+	expectAuditCount(t, f.dsn, "policies.delete", "success", 0)
 }
 
 // TestEnableAuditFailureKeepsPolicyDisabled is the enable-specific atomic case:
@@ -169,7 +168,7 @@ func TestEnableAuditFailureKeepsPolicyDisabled(t *testing.T) {
 	}
 	policy := decodeResponse[store.Policy](t,
 		f.request(t, "POST", "/api/v1/policies", policyBody("policy-a", source.ID, local), cookie, http.StatusCreated))
-	setSuccessAuditAbort(t, f.dir, "policies.enable")
+	setSuccessAuditAbort(t, f.dsn, "policies.enable")
 	// The preflight fails here, so enable never reaches the transaction; the audit
 	// trigger is exercised through the standalone failure row instead.
 	f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/enable", "", cookie, http.StatusConflict)
@@ -177,8 +176,8 @@ func TestEnableAuditFailureKeepsPolicyDisabled(t *testing.T) {
 	if err != nil || persisted.Enabled {
 		t.Fatalf("enable state = %+v %v", persisted, err)
 	}
-	setSuccessAuditAbort(t, f.dir, "")
-	expectAuditCount(t, f.dir, "policies.enable", "success", 0)
+	setSuccessAuditAbort(t, f.dsn, "")
+	expectAuditCount(t, f.dsn, "policies.enable", "success", 0)
 	assertNoSecrets(t, f.authFixture, f.logs.String(), matrixSecret)
 }
 
@@ -198,14 +197,14 @@ func TestPreflightFailureAuditIsBestEffort(t *testing.T) {
 	}
 	policy := decodeResponse[store.Policy](t,
 		f.request(t, "POST", "/api/v1/policies", policyBody("policy-a", source.ID, local), cookie, http.StatusCreated))
-	setFailureAuditAbort(t, f.dir, "policies.enable")
+	setFailureAuditAbort(t, f.dsn, "policies.enable")
 	response := f.request(t, "POST", "/api/v1/policies/"+policy.ID+"/enable", "", cookie, http.StatusConflict)
 	assertPreflightFailed(t, response, "identity", "identity_query_failed")
 	persisted, err := f.database.Policy(t.Context(), policy.ID)
 	if err != nil || persisted.Enabled {
 		t.Fatalf("enable state = %+v %v", persisted, err)
 	}
-	setFailureAuditAbort(t, f.dir, "")
+	setFailureAuditAbort(t, f.dsn, "")
 	if !strings.Contains(f.logs.String(), "audit write failed") {
 		t.Fatalf("failure audit was not reported: %s", f.logs.String())
 	}
@@ -217,26 +216,31 @@ func setFailureAuditAbort(t *testing.T, dir, action string) {
 	abortAudit(t, dir, action, "failed")
 }
 
-func abortAudit(t *testing.T, dir, action, result string) {
+func abortAudit(t *testing.T, dsn, action, result string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "intern.db"))
+	if strings.ContainsAny(action+result, "'\\") {
+		t.Fatal("unsafe audit trigger predicate")
+	}
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err = db.ExecContext(t.Context(), `PRAGMA busy_timeout = 5000`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS abort_outcome_audit`); err != nil {
+	if _, err = db.ExecContext(t.Context(), `DROP TRIGGER IF EXISTS abort_outcome_audit ON audit_logs`); err != nil {
 		t.Fatal(err)
 	}
 	if action == "" {
 		return
 	}
-	query := `CREATE TRIGGER abort_outcome_audit BEFORE INSERT ON audit_logs
-WHEN NEW.result = '` + result + `' AND NEW.action = '` + action + `'
-BEGIN SELECT RAISE(ABORT, 'injected outcome audit failure'); END`
-	if _, err = db.ExecContext(t.Context(), query); err != nil {
+	function := `CREATE OR REPLACE FUNCTION abort_outcome_audit_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+	BEGIN RAISE EXCEPTION 'injected outcome audit failure'; END $$`
+	if _, err = db.ExecContext(t.Context(), function); err != nil {
+		t.Fatal(err)
+	}
+	trigger := `CREATE TRIGGER abort_outcome_audit BEFORE INSERT ON audit_logs
+	FOR EACH ROW WHEN (NEW.result = '` + result + `' AND NEW.action = '` + action + `')
+	EXECUTE FUNCTION abort_outcome_audit_fn()`
+	if _, err = db.ExecContext(t.Context(), trigger); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -46,9 +46,7 @@ export function SourceFormPage() {
       <PageHeader
         title={editing ? `编辑数据源：${editing.name}` : "新建数据源"}
         description={
-          editing
-            ? "密码留空表示保留原值；服务器身份由预检刷新。"
-            : "填写 intern 容器内可见的 socket、datadir 与只写密码。"
+          editing ? "更新数据库连接信息。" : "连接要保护的 MySQL 数据库。"
         }
       />
       <SourceForm source={editing} />

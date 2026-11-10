@@ -8,17 +8,18 @@ sql:
         package: "catalogsql"
         out: "catalog/internal/catalogsql"
         emit_empty_slices: true
-  - engine: "sqlite"
+  - engine: "postgresql"
     schema: "physical/store/migrations"
     queries: "physical/store/queries.sql"
     gen:
       go:
         package: "storesql"
         out: "physical/store/internal/storesql"
+        sql_package: "database/sql"
         emit_empty_slices: true
   # The replication queue joins the physical chains/backups tables, so its
   # schema covers both migrations and its output lives in its own package.
-  - engine: "sqlite"
+  - engine: "postgresql"
     schema:
       - "physical/store/migrations"
       - "replication/migrations"
@@ -27,4 +28,5 @@ sql:
       go:
         package: "replsql"
         out: "replication/internal/replsql"
+        sql_package: "database/sql"
         emit_empty_slices: true

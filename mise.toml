@@ -116,7 +116,7 @@ run = [
 ]
 
 [tasks.generate]
-description = "Regenerate SQLite bindings with pinned sqlc v1.30.0"
+description = "Regenerate CLI SQLite and Web PostgreSQL bindings with pinned sqlc v1.30.0"
 run = [
     "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f internal/sqlc.yaml",
     "go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.30.0 generate -f app/web/sqlc.yaml",

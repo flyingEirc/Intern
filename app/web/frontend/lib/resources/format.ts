@@ -77,25 +77,26 @@ export function formatAge(
   return { text: `${amount} ${unit}前`, stale: seconds >= 24 * 60 * 60 };
 }
 
-/**
- * One instant rendered in an IANA time zone and in UTC, so a scheduled fire
- * can be read in the policy's own zone without hiding the UTC the scheduler
- * stores.
- */
-export function formatZonedDateTime(value: string, timeZone: string): string {
+/** One instant rendered in one IANA time zone, named so the zone is explicit. */
+export function formatInTimeZone(value: string, timeZone: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
     return value;
   }
-  const local = new Intl.DateTimeFormat("zh-CN", {
+  const text = new Intl.DateTimeFormat("zh-CN", {
     dateStyle: "medium",
     timeStyle: "medium",
     timeZone,
   }).format(parsed);
-  const utc = new Intl.DateTimeFormat("zh-CN", {
-    dateStyle: "medium",
-    timeStyle: "medium",
-    timeZone: "UTC",
-  }).format(parsed);
-  return `${local}（${timeZone}）/ ${utc}（UTC）`;
+  return `${text}（${timeZone}）`;
+}
+
+/**
+ * One instant rendered in an IANA time zone and in UTC, so a scheduled fire
+ * can be read in the policy's own zone without hiding the UTC the scheduler
+ * stores. The two zones stay separate so a narrow column can wrap between
+ * them instead of truncating one line.
+ */
+export function formatZonedDateTime(value: string, timeZone: string): string {
+  return `${formatInTimeZone(value, timeZone)} / ${formatInTimeZone(value, "UTC")}`;
 }

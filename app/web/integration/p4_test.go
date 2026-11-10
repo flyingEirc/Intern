@@ -225,6 +225,7 @@ func startP4Worker(t *testing.T, ctx context.Context, root string, nw *tc.Docker
 	mounts []tc.ContainerMount, exportVolume string, uid, gid int, env map[string]string,
 ) tc.Container {
 	t.Helper()
+	env = workerPostgres(t, ctx, nw, env)
 	mounts = append(mounts, tc.VolumeMount(exportVolume, "/export"))
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		FromDockerfile: restoreImage.build(t, root, "amd64", map[string]string{"MYSQL_IMAGE": mysqlImage, "PXB_IMAGE": pxbImage}),

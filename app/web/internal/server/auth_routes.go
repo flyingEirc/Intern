@@ -39,8 +39,11 @@ type loginRequest struct {
 // deployment-wide per-user current-password limiter, shared with the restore
 // confirmation so one stolen session gets one budget, not two.
 func registerAuth(engine *gin.Engine, service *auth.Service, passwords *auth.PasswordLimiter, logger *slog.Logger) {
-	h := authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: passwords, logger: logger}
+	h := &authHandlers{service: service, limiter: auth.NewLoginLimiter(), passwords: passwords, logger: logger}
 	permissions := middleware.Authorization{Service: service}
+	setup := newSetupHandlers(h)
+	engine.GET("/api/v1/auth/setup", setup.status)
+	engine.POST("/api/v1/auth/setup", setup.create)
 	engine.POST("/api/v1/auth/login", h.login)
 	self := engine.Group("/api/v1/auth", permissions.RequirePermission(auth.SessionSelf))
 	self.POST("/logout", h.logout)

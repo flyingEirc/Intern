@@ -2,15 +2,16 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func restoreTestStore(t *testing.T) (*Store, User) {
 	t.Helper()
-	s := openTestStore(t, filepath.Join(t.TempDir(), "metadata"))
-	user, err := s.CreateAdmin(t.Context(), "restore-admin", "hash")
+	s := openTestStore(t, pgtest.New(t))
+	user, err := s.SetupAdmin(t.Context(), "restore-admin", "hash", SystemAudit("auth.setup", AuditDetail{Role: "admin"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func countRestores(t *testing.T, s *Store, action, result string) int {
 	t.Helper()
 	var count int
 	if err := s.DB().QueryRowContext(t.Context(),
-		`SELECT COUNT(*) FROM audit_logs WHERE action = ? AND result = ?`, action, result).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM audit_logs WHERE action = $1 AND result = $2`, action, result).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	return count

@@ -62,11 +62,22 @@ func runServe(ctx context.Context, metadata, listen, cert, key, kek, work, xtrab
 	if err := requireServePaths(metadata, listen, cert, key, kek, work, xtrabackup); err != nil {
 		return err
 	}
-	database, err := store.Open(ctx, metadata)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	database, err := store.Open(ctx, os.Getenv("INTERN_DATABASE_URL"))
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, database.Close()) }()
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		database.Watch(ctx)
+		if database.Err() != nil {
+			cancel()
+		}
+	}()
+	defer func() { cancel(); <-watchDone }()
 	engine, shutdown, err := serveEngine(ctx, database, kek, metadata, work, xtrabackup, export, xbstream, mysqld)
 	if err != nil {
 		return err
@@ -79,7 +90,8 @@ func runServe(ctx context.Context, metadata, listen, cert, key, kek, work, xtrab
 		}
 	}()
 	config := server.Config{Listen: listen, CertFile: cert, KeyFile: key, ShutdownTimeout: 30 * time.Second}
-	return server.Run(ctx, server.New(config, server.Handler(engine)), config)
+	runErr := server.Run(ctx, server.New(config, server.Handler(engine)), config)
+	return errors.Join(runErr, database.Err())
 }
 
 // requireServePaths rejects an incompletely configured child before it opens

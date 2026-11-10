@@ -89,7 +89,7 @@ func assertLoggedOutAfterRestart(t *testing.T, f *authFixture, cookie *http.Cook
 	if err := f.database.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := store.Open(t.Context(), f.dir)
+	reopened, err := store.Open(t.Context(), f.dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,8 +185,9 @@ func (unavailableHasher) Verify(string, string) (bool, error) {
 func (unavailableHasher) VerifyAuthenticated(string, string) (bool, error) {
 	return false, auth.ErrUnavailable
 }
-func (unavailableHasher) VerifyDummy(string) error { return auth.ErrUnavailable }
-func (unavailableHasher) Hash(string) (string, error) {
+func (unavailableHasher) VerifyDummy(string) error    { return auth.ErrUnavailable }
+func (unavailableHasher) Hash(string) (string, error) { return "", auth.ErrUnavailable }
+func (unavailableHasher) HashAnonymous(string) (string, error) {
 	return "", auth.ErrUnavailable
 }
 
@@ -202,6 +203,13 @@ func TestSaturatedHasherReturnsUnavailable(t *testing.T) {
 	if response.Header().Get("Retry-After") != "1" {
 		t.Fatalf("Retry-After=%q", response.Header().Get("Retry-After"))
 	}
+	setupFixture := newUnconfiguredAuthFixture(t)
+	setupFixture.service.Passwords = unavailableHasher{PasswordHasher: setupFixture.service.Passwords}
+	setup := setupFixture.request(t, http.MethodPost, "/api/v1/auth/setup", `{"username":"initial","password":"`+testPassword+`"}`, nil, http.StatusServiceUnavailable)
+	if setup.Header().Get("Retry-After") == "" {
+		t.Fatal("saturated setup omitted Retry-After")
+	}
+	assertSetupRows(t, setupFixture, 0, 0, false)
 }
 
 func TestCurrentPasswordVerificationIsRateLimited(t *testing.T) {

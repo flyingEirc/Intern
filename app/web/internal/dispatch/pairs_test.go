@@ -87,7 +87,7 @@ func (s *sharedFTPFixture) publishMember(t *testing.T, policy store.Policy, back
 	physical := physicalstore.New(s.database.DB())
 	plan, err := physical.Plan(t.Context(), physicalstore.PlanRequest{
 		SourceID: s.source.ID, ServerUUID: "server-uuid", ServerVersion: "8.4.11",
-		ToolVersion: "8.4.0-7", Kind: kind, MaxChainLength: 3,
+		ToolVersion: "8.4.0-7", Kind: kind, MaxChainLength: int(policy.MaxChainLength),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -463,9 +463,6 @@ func (s *sharedFTPFixture) updatePolicyPair(t *testing.T, policy store.Policy, l
 		Name: policy.Name, SourceID: policy.SourceID, LocalRepositoryID: localID,
 		ReplicaRepositoryID: replicaID, FullCron: policy.FullCron,
 		IncrementalCron: policy.IncrementalCron, Timezone: policy.Timezone,
-		MaxChainLength: policy.MaxChainLength, Parallel: policy.Parallel,
-		Throttle: policy.Throttle, ZstdLevel: policy.ZstdLevel,
-		PageTracking: policy.PageTracking, Enabled: policy.Enabled,
 	}, store.SystemAudit("policies.update", store.AuditDetail{}))
 	if err != nil {
 		t.Fatal(err)
@@ -670,7 +667,7 @@ func TestCatchUpSkipsPrunedBackups(t *testing.T) {
 	insertTerminalRun(t, f.database, policy, backupID, chainID)
 	// The chain was pruned after its copy: the row stays, its payload is gone.
 	if _, err := f.database.DB().ExecContext(t.Context(),
-		`UPDATE backups SET local_present = 0 WHERE id = ?`, backupID); err != nil {
+		`UPDATE backups SET local_present = 0 WHERE id = $1`, backupID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -783,7 +780,7 @@ func upsertReplicaAt(t *testing.T, database *store.Store, backupID, repositoryID
 	}
 	_, err := database.DB().ExecContext(t.Context(), `INSERT INTO replicas
 (backup_id, repository_id, local_repository_id, idem_key, status, attempts, next_attempt_at, uploaded_at, verified_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10)
 ON CONFLICT(backup_id, repository_id) DO UPDATE SET
   status = excluded.status, verified_at = excluded.verified_at, local_repository_id = excluded.local_repository_id`,
 		backupID, repositoryID, localRepositoryID, "replicate:"+backupID+":"+repositoryID,
@@ -799,8 +796,8 @@ func uploadingReplica(t *testing.T, database *store.Store, backupID, repositoryI
 	t.Helper()
 	stamp := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z")
 	_, err := database.DB().ExecContext(t.Context(), `UPDATE replicas
-SET status = 'uploading', next_attempt_at = ?, updated_at = ?
-WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?`,
+SET status = 'uploading', next_attempt_at = $1, updated_at = $2
+WHERE backup_id = $3 AND repository_id = $4 AND local_repository_id = $5`,
 		stamp, stamp, backupID, repositoryID, localRepositoryID)
 	if err != nil {
 		t.Fatal(err)
@@ -811,13 +808,10 @@ WHERE backup_id = ? AND repository_id = ? AND local_repository_id = ?`,
 // obligation startup recovery retries.
 func insertReplicaPart(t *testing.T, database *store.Store, backupID, repositoryID, part string) int64 {
 	t.Helper()
-	result, err := database.DB().ExecContext(t.Context(), `INSERT INTO replica_parts
-(backup_id, repository_id, member, part, created_at) VALUES (?, ?, 'payload.bin', ?, ?)`,
-		backupID, repositoryID, part, time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := result.LastInsertId()
+	var id int64
+	err := database.DB().QueryRowContext(t.Context(), `INSERT INTO replica_parts
+(backup_id, repository_id, member, part, created_at) VALUES ($1, $2, 'payload.bin', $3, $4) RETURNING id`,
+		backupID, repositoryID, part, time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z")).Scan(&id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +823,7 @@ func assertReplicaPartGone(t *testing.T, database *store.Store, id int64) {
 	t.Helper()
 	var count int
 	if err := database.DB().QueryRowContext(t.Context(),
-		`SELECT COUNT(*) FROM replica_parts WHERE id = ?`, id).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM replica_parts WHERE id = $1`, id).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 0 {
@@ -842,7 +836,7 @@ func assertReplicaPartGone(t *testing.T, database *store.Store, id int64) {
 func blockEnqueue(t *testing.T, database *store.Store, backupID string) {
 	t.Helper()
 	if _, err := database.DB().ExecContext(t.Context(),
-		`UPDATE backups SET status = 'running' WHERE id = ?`, backupID); err != nil {
+		`UPDATE backups SET status = 'running' WHERE id = $1`, backupID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -851,7 +845,7 @@ func blockEnqueue(t *testing.T, database *store.Store, backupID string) {
 func unblockEnqueue(t *testing.T, database *store.Store, backupID string) {
 	t.Helper()
 	if _, err := database.DB().ExecContext(t.Context(),
-		`UPDATE backups SET status = 'completed' WHERE id = ?`, backupID); err != nil {
+		`UPDATE backups SET status = 'completed' WHERE id = $1`, backupID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1020,7 +1014,7 @@ func chainOf(t *testing.T, s *sharedFTPFixture, backupID string) string {
 	t.Helper()
 	var chainID string
 	if err := s.database.DB().QueryRowContext(t.Context(),
-		`SELECT chain_id FROM backups WHERE id = ?`, backupID).Scan(&chainID); err != nil {
+		`SELECT chain_id FROM backups WHERE id = $1`, backupID).Scan(&chainID); err != nil {
 		t.Fatal(err)
 	}
 	return chainID
@@ -1043,7 +1037,7 @@ func TestReplicationPairsDropsAPairWhoseRepositoryIsGone(t *testing.T) {
 	s.updatePolicyPair(t, s.policyB, s.l2.ID, nil)
 	for _, repository := range []store.Repository{s.l1, s.ftp} {
 		if _, err := s.database.DB().ExecContext(t.Context(),
-			`DELETE FROM repositories WHERE id = ?`, repository.ID); err != nil {
+			`DELETE FROM repositories WHERE id = $1`, repository.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1186,7 +1180,7 @@ func TestBackupViewAndRetryResolveTheReplicaRowNotTheRunSnapshot(t *testing.T) {
 	// The pre-upgrade shape: no run of this source names a local repository, so a
 	// snapshot-derived read has nothing to scope itself by.
 	if _, err := s.database.DB().ExecContext(t.Context(),
-		`UPDATE runs SET local_repository_id = NULL WHERE source_id = ?`, s.source.ID); err != nil {
+		`UPDATE runs SET local_repository_id = NULL WHERE source_id = $1`, s.source.ID); err != nil {
 		t.Fatal(err)
 	}
 

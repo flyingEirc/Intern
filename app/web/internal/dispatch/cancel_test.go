@@ -182,7 +182,7 @@ func (q *queueFixture) claim(t *testing.T) store.Run {
 func (q *queueFixture) setCancelFlag(t *testing.T, runID string) {
 	t.Helper()
 	if _, err := q.database.DB().ExecContext(t.Context(),
-		`UPDATE runs SET cancel_requested = 1 WHERE id = ?`, runID); err != nil {
+		`UPDATE runs SET cancel_requested = 1 WHERE id = $1`, runID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -259,7 +259,7 @@ func assertNoPhysicalBackupForRun(t *testing.T, q *queueFixture, runID string) {
 	t.Helper()
 	var backups int
 	if err := q.database.DB().QueryRowContext(q.t.Context(),
-		`SELECT COUNT(*) FROM backups WHERE run_id = ?`, runID).Scan(&backups); err != nil {
+		`SELECT COUNT(*) FROM backups WHERE run_id = $1`, runID).Scan(&backups); err != nil {
 		t.Fatal(err)
 	}
 	if backups != 0 {

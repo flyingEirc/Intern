@@ -33,40 +33,40 @@ func New(config Config, handler http.Handler) *http.Server {
 }
 
 // postCancelDrainMargin keeps the handler wait from ending in the same instant
-// as a SQLite busy deadline. The busy handler can sleep slightly past
-// store.BusyTimeout, and a second statement can do the same.
+// as a PostgreSQL statement timeout. A statement can finish slightly past
+// store.StatementTimeout, and a second statement can do the same.
 const postCancelDrainMargin = 500 * time.Millisecond
 
 // errHandlersStillRunning is returned when handlers are still inside ServeHTTP
-// after cancellation and postCancelDrainWait. A normal SQLite lock wait finishes
-// inside that window: the statement already in the driver, which does not
-// observe cancellation, plus the detached audit that can follow it. Handlers
-// still running then are stuck in I/O or ignoring cancellation. Run cannot both
-// return in finite time and keep the database open until they finish.
-var errHandlersStillRunning = errors.New("handlers still running after cancellation and the SQLite busy and detached-audit bounds; normal lock waits finish within that time, and a finite shutdown cannot keep the database open for handlers that ignore cancellation or block beyond it")
+// after cancellation and postCancelDrainWait. A normal PostgreSQL statement
+// finishes inside that window: the statement already in the driver, plus the
+// detached audit that can follow it. Handlers still running then are stuck in
+// I/O or ignoring cancellation. Run cannot both return in finite time and keep
+// the database open until they finish.
+var errHandlersStillRunning = errors.New("handlers still running after cancellation and the PostgreSQL statement and detached-audit bounds; normal statement waits finish within that time, and a finite shutdown cannot keep the database open for handlers that ignore cancellation or block beyond it")
 
 // postCancelDrainWait is how long Run waits after it cancels request contexts.
-// The in-flight statement can ignore cancellation for up to store.BusyTimeout.
+// A statement already in the driver can run until store.StatementTimeout.
 // The detached audit that follows has an AuditTimeout context budget, but once
-// it enters the driver its busy callback can ignore cancellation for up to
-// store.BusyTimeout as well. Those two constants are equal, so the sum covers
-// both waits. The margin keeps the wait from ending on the same instant as the
-// driver's deadline. Stuck I/O past this window is not a normal lock wait.
+// it enters the driver its statement can also run for store.StatementTimeout.
+// Those two constants are equal, so the sum covers both waits. The margin keeps
+// the wait from ending on the same instant as the driver's deadline. Stuck I/O
+// past this window is not a normal database wait.
 func postCancelDrainWait() time.Duration {
-	return middleware.AuditTimeout + store.BusyTimeout + postCancelDrainMargin
+	return middleware.AuditTimeout + store.StatementTimeout + postCancelDrainMargin
 }
 
 // Run serves until ctx is canceled. The caller closes the database after Run
 // returns, so Run waits for tracked handlers first. The one exception is
-// errHandlersStillRunning: those handlers are past a normal SQLite busy wait,
-// and waiting for them without a bound would not be finite.
+// errHandlersStillRunning: those handlers are past a normal PostgreSQL
+// statement timeout, and waiting for them without a bound would not be finite.
 //
 // Cancellation stops new connections, then waits ShutdownTimeout while request
 // contexts stay active. If handlers remain, or Shutdown reports success while a
 // tracked handler is still inside ServeHTTP, Run stops admitting new work,
 // bounds detached audits, cancels request contexts, closes connections, and
 // waits postCancelDrainWait. Own handlers are not all interrupted immediately.
-// A statement already in the SQLite busy handler can run until store.BusyTimeout.
+// A statement already in the driver can run until store.StatementTimeout.
 func Run(ctx context.Context, srv *http.Server, config Config) error {
 	if err := config.validate(); err != nil {
 		return err
@@ -119,8 +119,8 @@ func shutdown(srv *http.Server, config Config, drain *handlerDrain, audit *middl
 // stopRemainingHandlers is the forced drain. It runs when the graceful deadline
 // fired and when Shutdown reported success but a tracked handler is still inside
 // ServeHTTP. Both paths bound detached audits, cancel request contexts, close
-// connections, and wait out a normal SQLite busy before the caller may close
-// the database. Work still running after that is not a normal lock wait.
+// connections, and wait out a normal PostgreSQL statement before the caller may close
+// the database. Work still running after that is not a normal database wait.
 func stopRemainingHandlers(srv *http.Server, drain *handlerDrain, audit *middleware.DetachedAudit, cancelRoot context.CancelFunc, shutdownErr error, done <-chan error) error {
 	drain.seal()
 	audit.Bound(middleware.AuditTimeout)

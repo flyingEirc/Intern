@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,9 +19,9 @@ import (
 	"testing"
 
 	driver "github.com/go-sql-driver/mysql"
-	_ "modernc.org/sqlite"
 
 	"github.com/flyingEirc/Intern/internal/artifact"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 	"github.com/flyingEirc/Intern/internal/physical"
 	"github.com/flyingEirc/Intern/internal/physical/chain"
 	"github.com/flyingEirc/Intern/internal/physical/store"
@@ -36,25 +35,9 @@ type p3Fixture struct {
 	repoRoot string
 }
 
-func openP3DB(t *testing.T, filename string) *sql.DB {
-	t.Helper()
-	u := url.URL{Scheme: "file", Path: filename}
-	q := u.Query()
-	for _, pragma := range []string{"journal_mode(WAL)", "synchronous(FULL)", "foreign_keys(1)", "busy_timeout(5000)"} {
-		q.Add("_pragma", pragma)
-	}
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("sqlite", u.String())
-	must(t, err)
-	db.SetMaxOpenConns(1)
-	must(t, store.Migrate(t.Context(), db))
-	t.Cleanup(func() { must(t, db.Close()) })
-	return db
-}
-
 func newP3Fixture(t *testing.T) p3Fixture {
 	t.Helper()
+	pgtest.RequireDSN(t)
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		t.Fatal("P3 requires native Linux amd64")
 	}
@@ -71,7 +54,8 @@ func newP3Fixture(t *testing.T) p3Fixture {
 	t.Cleanup(func() { must(t, repo.Close()) })
 	key := filepath.Join(t.TempDir(), "kek.json")
 	must(t, artifact.GenerateKey(key))
-	db := openP3DB(t, filepath.Join(t.TempDir(), "intern.db"))
+	db := pgtest.Open(t)
+	must(t, store.Migrate(t.Context(), db))
 	cfg := driver.NewConfig()
 	cfg.Net, cfg.Addr, cfg.User, cfg.Passwd = "unix", opts.Connection.Socket, opts.Connection.Username, opts.Connection.Password
 	connector, err := driver.NewConnector(cfg)
@@ -127,7 +111,7 @@ func preflightP3Job(t *testing.T, job chain.Job, repoRoot string) chain.Job {
 func assertP3ChainIdentity(t *testing.T, fixture p3Fixture, chainID string) {
 	t.Helper()
 	var source, uuid, serverVersion, toolVersion string
-	must(t, fixture.db.QueryRowContext(t.Context(), "SELECT source_id,server_uuid,server_version,tool_version FROM chains WHERE id=?", chainID).Scan(&source, &uuid, &serverVersion, &toolVersion))
+	must(t, fixture.db.QueryRowContext(t.Context(), "SELECT source_id,server_uuid,server_version,tool_version FROM chains WHERE id=$1", chainID).Scan(&source, &uuid, &serverVersion, &toolVersion))
 	want := [4]string{fixture.job.SourceID, fixture.job.Identity.UUID, fixture.job.Identity.Version, fixture.job.ToolVersion}
 	if [4]string{source, uuid, serverVersion, toolVersion} != want {
 		t.Fatal("stored chain identity differs from real preflight")
@@ -267,7 +251,7 @@ func assertP3Secrets(t *testing.T, job chain.Job, values ...[]byte) {
 func assertP3Ledger(t *testing.T, db *sql.DB, backupID string, want int) {
 	t.Helper()
 	var count int
-	must(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cleanup_ledger WHERE backup_id=?", backupID).Scan(&count))
+	must(t, db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM cleanup_ledger WHERE backup_id=$1", backupID).Scan(&count))
 	if count != want {
 		t.Fatalf("cleanup ledger count=%d want=%d", count, want)
 	}
@@ -296,18 +280,18 @@ func p3Admission(t *testing.T, fixture p3Fixture, latest chain.Result) {
 	}
 	backup, err := fixture.job.Store.Backup(t.Context(), latest.BackupID)
 	must(t, err)
-	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET status='running' WHERE id=?", backup.ID)
+	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET status='running' WHERE id=$1", backup.ID)
 	must(t, err)
 	_, err = fixture.job.Store.Plan(t.Context(), base)
 	assertP3Admission(t, err, "parent_not_completed")
-	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET status='completed' WHERE id=?", backup.ID)
+	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET status='completed' WHERE id=$1", backup.ID)
 	must(t, err)
 	t.Log("P3-A3 rejected=parent_not_completed requires_full=true")
-	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET parent_id=NULL WHERE id=?", backup.ID)
+	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET parent_id=NULL WHERE id=$1", backup.ID)
 	must(t, err)
 	_, err = fixture.job.Store.Plan(t.Context(), base)
 	assertP3Admission(t, err, "chain_broken")
-	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET parent_id=? WHERE id=?", backup.ParentID, backup.ID)
+	_, err = fixture.db.ExecContext(t.Context(), "UPDATE backups SET parent_id=$1 WHERE id=$2", backup.ParentID, backup.ID)
 	must(t, err)
 	t.Log("P3-A3 rejected=chain_broken requires_full=true")
 }
@@ -342,7 +326,7 @@ func p3Fault(t *testing.T, fixture p3Fixture, fault string) {
 	}
 	result, err := chain.RunWithFault(ctx, job, injection.observe)
 	if fault == "completion" {
-		_, dropErr := fixture.db.ExecContext(t.Context(), "DROP TRIGGER p3_reject_complete")
+		_, dropErr := fixture.db.ExecContext(t.Context(), "DROP TRIGGER p3_reject_complete ON backups")
 		must(t, dropErr)
 	}
 	if fault == "nonzero" {
@@ -406,7 +390,9 @@ func (f *p3FaultInjection) observe(point string) error {
 		return syscall.EIO
 	case "completion/before_complete":
 		f.reached = true
-		_, err := f.db.ExecContext(f.t.Context(), "CREATE TEMP TRIGGER p3_reject_complete BEFORE UPDATE OF status ON backups WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'injected completion failure'); END")
+		_, err := f.db.ExecContext(f.t.Context(), `CREATE OR REPLACE FUNCTION p3_reject_complete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected completion failure'; END $$`)
+		must(f.t, err)
+		_, err = f.db.ExecContext(f.t.Context(), `CREATE TRIGGER p3_reject_complete BEFORE UPDATE OF status ON backups FOR EACH ROW WHEN (NEW.status='completed') EXECUTE FUNCTION p3_reject_complete()`)
 		must(f.t, err)
 	case "late_cancel/published":
 		f.reached = true

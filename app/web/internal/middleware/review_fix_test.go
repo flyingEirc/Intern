@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -16,6 +15,7 @@ import (
 
 	"github.com/flyingEirc/Intern/app/web/internal/render"
 	"github.com/flyingEirc/Intern/app/web/internal/store"
+	"github.com/flyingEirc/Intern/internal/pgtest"
 )
 
 func TestWriteAfterFlushAndStreamingAreRejected(t *testing.T) {
@@ -97,11 +97,7 @@ func TestAuditMiddlewarePanicBecomesOneLoggedError(t *testing.T) {
 
 func openAuditPanicDatabase(t *testing.T) *store.Store {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	database, err := store.Open(t.Context(), dir)
+	database, err := store.Open(t.Context(), pgtest.New(t))
 	if err != nil {
 		t.Fatal(err)
 	}

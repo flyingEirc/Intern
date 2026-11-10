@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { HistoryIcon, RotateCwIcon } from "lucide-react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { Diagnostics } from "@/components/resources/diagnostics";
 import { ReplicaStatusBadge } from "@/components/resources/replica-status";
 import {
   DetailSkeleton,
@@ -94,7 +95,7 @@ export function BackupDetail() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title={`${backupKindText(data.kind)}备份`}
-        description="LSN、大小、校验和、本地是否仍在，以及每个仓库的副本状态。"
+        description="完成状态、数据量、本地是否仍在，以及每个仓库的副本状态。"
       >
         {hasPermission(session.data?.permissions, "restores:plan") &&
         data.status === "completed" ? (
@@ -123,32 +124,57 @@ export function BackupDetail() {
             </Badge>
           </CardTitle>
           <CardDescription>
-            链 {data.chain_id} · 序号 {data.seq}
+            链序号 {data.seq} · 完成时间 {formatDateTime(data.completed_at)}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-            <dt className="text-muted-foreground">起始 LSN</dt>
-            <dd className="font-mono text-xs">{formatLsn(data.from_lsn)}</dd>
-            <dt className="text-muted-foreground">结束 LSN</dt>
-            <dd className="font-mono text-xs">{formatLsn(data.to_lsn)}</dd>
-            <dt className="text-muted-foreground">最后 LSN</dt>
-            <dd className="font-mono text-xs">{formatLsn(data.last_lsn)}</dd>
             <dt className="text-muted-foreground">大小</dt>
             <dd>{formatBytes(data.payload_size)}</dd>
-            <dt className="text-muted-foreground">SHA-256</dt>
-            <dd className="font-mono text-xs break-all">
-              {data.payload_sha256 === "" ? "—" : data.payload_sha256}
-            </dd>
-            <dt className="text-muted-foreground">对象路径</dt>
-            <dd className="font-mono text-xs break-all">
-              {data.object_path === "" ? "—" : data.object_path}
-            </dd>
             <dt className="text-muted-foreground">完成时间</dt>
             <dd>{formatDateTime(data.completed_at)}</dd>
             <dt className="text-muted-foreground">父备份</dt>
-            <dd className="font-mono text-xs">{data.parent_id ?? "—"}</dd>
+            <dd>
+              {data.parent_id ? (
+                <Link
+                  className="underline-offset-4 hover:underline"
+                  href={`/backups/detail?id=${data.parent_id}`}
+                >
+                  查看父备份
+                </Link>
+              ) : (
+                "无"
+              )}
+            </dd>
           </dl>
+          <div className="mt-4">
+            <Diagnostics>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+                <dt className="text-muted-foreground">备份标识</dt>
+                <dd className="font-mono text-xs break-all">{data.id}</dd>
+                <dt className="text-muted-foreground">链标识</dt>
+                <dd className="font-mono text-xs break-all">{data.chain_id}</dd>
+                <dt className="text-muted-foreground">起始 LSN</dt>
+                <dd className="font-mono text-xs">
+                  {formatLsn(data.from_lsn)}
+                </dd>
+                <dt className="text-muted-foreground">结束 LSN</dt>
+                <dd className="font-mono text-xs">{formatLsn(data.to_lsn)}</dd>
+                <dt className="text-muted-foreground">最后 LSN</dt>
+                <dd className="font-mono text-xs">
+                  {formatLsn(data.last_lsn)}
+                </dd>
+                <dt className="text-muted-foreground">SHA-256</dt>
+                <dd className="font-mono text-xs break-all">
+                  {data.payload_sha256 === "" ? "—" : data.payload_sha256}
+                </dd>
+                <dt className="text-muted-foreground">对象路径</dt>
+                <dd className="font-mono text-xs break-all">
+                  {data.object_path === "" ? "—" : data.object_path}
+                </dd>
+              </dl>
+            </Diagnostics>
+          </div>
         </CardContent>
       </Card>
 

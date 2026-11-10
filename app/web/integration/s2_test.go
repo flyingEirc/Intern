@@ -419,11 +419,13 @@ func startS2ChainWorker(t *testing.T, ctx context.Context, root string, nw *tc.D
 ) tc.Container {
 	t.Helper()
 	mounts = append(mounts, tc.VolumeMount(exportVolume, "/export"))
+	pgEnv := workerPostgres(t, ctx, nw, nil)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		FromDockerfile: restoreImage.build(t, root, "amd64", map[string]string{"MYSQL_IMAGE": mysqlImage, "PXB_IMAGE": pxbImage}),
 		ImagePlatform:  "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name}, Mounts: mounts,
 		Env: map[string]string{
+			"INTERN_TEST_POSTGRES_DSN":    pgEnv["INTERN_TEST_POSTGRES_DSN"],
 			"INTERN_W4_PASSWORD":          backupPassword,
 			"INTERN_W4_FTP_PASSWORD":      ftpPassword,
 			"INTERN_W4_ADMIN_PASSWORD":    adminPassword,
@@ -459,12 +461,14 @@ func startS2APIWorker(t *testing.T, ctx context.Context, nw *tc.DockerNetwork, i
 	uid, gid int, adminPassword, operatorPassword, ftpPassword, deniedPassword, ftpLockedPassword, backupPassword string,
 ) tc.Container {
 	t.Helper()
+	pgEnv := workerPostgres(t, ctx, nw, nil)
 	worker, err := tc.GenericContainer(ctx, tc.GenericContainerRequest{ContainerRequest: tc.ContainerRequest{
 		Image: image, ImagePlatform: "linux/amd64", Entrypoint: []string{"/bin/sleep"}, Cmd: []string{"infinity"},
 		Networks: []string{nw.Name},
 		Mounts:   []tc.ContainerMount{tc.VolumeMount(auditVolume, "/fixture-audit")},
 		Env: map[string]string{
-			"INTERN_W3_ROOT": s2APIRoot, "INTERN_W3_FTP_HOST": s2NetworkAlias,
+			"INTERN_TEST_POSTGRES_DSN": pgEnv["INTERN_TEST_POSTGRES_DSN"],
+			"INTERN_W3_ROOT":           s2APIRoot, "INTERN_W3_FTP_HOST": s2NetworkAlias,
 			"INTERN_W3_PASSWORD": backupPassword, "INTERN_W3_DENIED_PASSWORD": deniedPassword,
 			"INTERN_W3_FTP_PASSWORD": ftpPassword, "INTERN_W3_FTP_LOCKED_PASSWORD": ftpLockedPassword,
 			"INTERN_W3_ADMIN_PASSWORD": adminPassword, "INTERN_W3_OPERATOR_PASSWORD": operatorPassword,
