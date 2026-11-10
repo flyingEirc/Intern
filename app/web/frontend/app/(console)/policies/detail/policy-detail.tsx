@@ -6,7 +6,6 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { DeleteResourceDialog } from "@/components/resources/delete-resource-dialog";
-import { Diagnostics } from "@/components/resources/diagnostics";
 import { PreflightResultView } from "@/components/resources/preflight-result";
 import {
   DetailSkeleton,
@@ -275,32 +274,6 @@ export function PolicyDetail() {
           </dl>
         </CardContent>
       </Card>
-
-      <Diagnostics
-        title="系统管理的备份参数"
-        description="这些参数由系统统一设置，普通编辑不会改变它们。"
-      >
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-          <dt className="text-muted-foreground">策略标识</dt>
-          <dd className="font-mono text-xs">{data.id}</dd>
-          <dt className="text-muted-foreground">最大链长</dt>
-          <dd>{data.max_chain_length}</dd>
-          <dt className="text-muted-foreground">工具并行</dt>
-          <dd>{data.parallel}</dd>
-          <dt className="text-muted-foreground">限速</dt>
-          <dd>
-            {data.throttle === 0 ? "不额外限速" : `每秒 ${data.throttle} 块`}
-          </dd>
-          <dt className="text-muted-foreground">压缩级别</dt>
-          <dd>{data.zstd_level}</dd>
-          <dt className="text-muted-foreground">页跟踪</dt>
-          <dd>{data.page_tracking ? "启用" : "关闭"}</dd>
-          <dt className="text-muted-foreground">全量表达式</dt>
-          <dd className="font-mono text-xs">{data.full_cron}</dd>
-          <dt className="text-muted-foreground">增量表达式</dt>
-          <dd className="font-mono text-xs">{data.incremental_cron}</dd>
-        </dl>
-      </Diagnostics>
 
       {data.last_preflight ? (
         <PreflightResultView

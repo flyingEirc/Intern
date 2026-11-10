@@ -10,6 +10,7 @@
 // On an arm64 Mac the stack runs under amd64 emulation: development evidence
 // only; binding acceptance is native linux/amd64.
 
+import path from "node:path";
 import { z } from "zod";
 import {
   zErrorResponse,
@@ -417,41 +418,215 @@ async function main(): Promise<void> {
       screenshot: b.shot("07-update-refused"),
     });
 
-    // B2: a name-only edit through the form must not touch the five tuning columns.
-    const beforePolicyRename = zGetPolicyResponse.parse(
-      (await api("GET", `/api/v1/policies/${goodPolicyId}`, adminCookie)).json,
-    );
-    b.open(`${stack.origin}/policies/new?id=${goodPolicyId}`);
-    b.ab("wait", "--text", "\u4fdd\u5b58\u4fee\u6539");
-    b.fill("\u540d\u79f0", "f2-policy-renamed");
-    b.click("\u4fdd\u5b58\u4fee\u6539");
-    b.ab("wait", "--text", "\u7b56\u7565\u5df2\u66f4\u65b0");
-    const afterPolicyRename = zGetPolicyResponse.parse(
-      (await api("GET", `/api/v1/policies/${goodPolicyId}`, adminCookie)).json,
-    );
-    expect(
-      afterPolicyRename.name === "f2-policy-renamed" &&
-        afterPolicyRename.max_chain_length ===
-          beforePolicyRename.max_chain_length &&
-        afterPolicyRename.parallel === beforePolicyRename.parallel &&
-        afterPolicyRename.throttle === beforePolicyRename.throttle &&
-        afterPolicyRename.zstd_level === beforePolicyRename.zstd_level &&
-        afterPolicyRename.page_tracking === beforePolicyRename.page_tracking &&
-        afterPolicyRename.full_cron === beforePolicyRename.full_cron &&
-        afterPolicyRename.incremental_cron ===
-          beforePolicyRename.incremental_cron &&
-        afterPolicyRename.source_id === beforePolicyRename.source_id &&
-        afterPolicyRename.local_repository_id ===
-          beforePolicyRename.local_repository_id &&
-        afterPolicyRename.enabled === beforePolicyRename.enabled,
-      `a name-only edit changed tuning: ${JSON.stringify(afterPolicyRename)}`,
+    const tuningFields = [
+      "max_chain_length",
+      "parallel",
+      "throttle",
+      "zstd_level",
+      "page_tracking",
+    ] as const;
+    const readPolicy = async (id: string) => {
+      const response = await api("GET", `/api/v1/policies/${id}`, adminCookie);
+      expect(response.status === 200, `read policy ${id} = ${response.status}`);
+      return zGetPolicyResponse.parse(response.json);
+    };
+    const readStoredPolicy = (id: string) => {
+      expect(/^[0-9a-f-]+$/.test(id), `unexpected policy id ${id}`);
+      return zGetPolicyResponse.parse(
+        JSON.parse(
+          stack.postgresFixtureQuery(
+            `SELECT row_to_json(p)::jsonb || jsonb_build_object('page_tracking', p.page_tracking <> 0, 'enabled', p.enabled <> 0, 'last_preflight', p.last_preflight_json::jsonb) FROM policies AS p WHERE id = '${id}'`,
+          ),
+        ),
+      );
+    };
+
+    // B1: compare browser creation with the server's direct API creation;
+    // the frontend submits business fields and owns no tuning defaults.
+    const apiCreated = zGetPolicyResponse.parse(goodPolicy.json);
+    b.open(`${stack.origin}/policies/new`);
+    b.ab("wait", "--text", "创建策略");
+    b.fill("名称", "f2-policy-browser-defaults");
+    for (const [label, option] of [
+      ["数据源", "f2-source-renamed"],
+      ["本地仓库", "f2-local"],
+    ] as const) {
+      b.ab("find", "role", "combobox", "click", "--name", label);
+      b.ab("find", "role", "option", "click", "--name", option);
+    }
+    b.click("自定义全量");
+    b.fill("全量安排", policyBody.full_cron);
+    b.click("自定义增量");
+    b.fill("增量安排", policyBody.incremental_cron);
+    b.fill("时区", policyBody.timezone);
+    b.record({
+      id: "U2-policy-create-filled",
+      acceptance: "U2",
+      description: "populated policy creation at 375, 768 and 1440 pixels",
+      screenshots: b.responsive("U2-policy-create-filled"),
+    });
+    b.click("创建策略");
+    b.ab("wait", "--url", "**/policies/detail?id=*");
+    b.ab("wait", "--text", "未启用");
+    const browserPolicyId = new URL(b.url()).searchParams.get("id");
+    expect(browserPolicyId !== null, "browser creation did not open a policy");
+    const browserCreated = await readPolicy(browserPolicyId as string);
+    const creationEvidence = {
+      api: apiCreated,
+      apiPostgres: readStoredPolicy(goodPolicyId),
+      browser: browserCreated,
+      browserPostgres: readStoredPolicy(browserCreated.id),
+    };
+    for (const field of tuningFields) {
+      for (const [origin, stored] of Object.entries(creationEvidence)) {
+        expect(
+          stored[field] === apiCreated[field],
+          `B1 ${origin}.${field} = ${stored[field]}, server returned ${apiCreated[field]}`,
+        );
+      }
+    }
+    await Bun.write(
+      path.join(run.evidence, "B1-server-defaults.json"),
+      `${JSON.stringify(creationEvidence, null, 2)}\n`,
     );
     b.record({
-      id: "07b-name-only-keeps-tuning",
+      id: "07a-browser-api-defaults",
+      acceptance: "B1",
+      description:
+        "business-only browser/API creates agree in all five columns, independently read from PostgreSQL and API; values in B1-server-defaults.json",
+      screenshot: b.shot("07a-browser-api-defaults"),
+    });
+
+    // B2: SQL is a test fixture for an existing historical row, never a product
+    // API. Keep this policy disabled: page tracking needs a MySQL component
+    // absent from this fixture and must not affect the real backup policies.
+    const historyCreated = await api("POST", "/api/v1/policies", adminCookie, {
+      ...policyBody,
+      name: "f2-policy-history",
+      source_id: source.id,
+      full_cron: "7,37 1-5 * * 1-5",
+      incremental_cron: "11,41 6-20/2 * * 1-5",
+      timezone: "Asia/Kathmandu",
+    });
+    expect(
+      historyCreated.status === 201,
+      `create history = ${historyCreated.status}`,
+    );
+    const historical = zGetPolicyResponse.parse(historyCreated.json);
+    const fixtureTuning = {
+      max_chain_length: 11,
+      parallel: 2,
+      throttle: 256,
+      zstd_level: 5,
+      page_tracking: true,
+    };
+    stack.postgresFixtureQuery(
+      `UPDATE policies SET max_chain_length = 11, parallel = 2, throttle = 256, zstd_level = 5, page_tracking = 1 WHERE id = '${historical.id}' AND enabled = 0`,
+    );
+    const before = readStoredPolicy(historical.id);
+    for (const field of tuningFields) {
+      expect(
+        before[field] === fixtureTuning[field],
+        `fixture PG ${field} = ${before[field]}`,
+      );
+      expect(
+        before[field] !== apiCreated[field],
+        `fixture ${field} is still the server default`,
+      );
+    }
+    const historyEvidence: Array<{
+      stage: string;
+      postgres: typeof before;
+      api: typeof before;
+    }> = [];
+    const verifyHistory = async (stage: string, expected: typeof before) => {
+      const postgres = readStoredPolicy(historical.id);
+      const response = await readPolicy(historical.id);
+      for (const [origin, observed] of [
+        ["PG", postgres],
+        ["API", response],
+      ] as const) {
+        for (const field of tuningFields) {
+          expect(
+            observed[field] === before[field],
+            `${stage} ${origin}.${field}: ${before[field]} -> ${observed[field]}`,
+          );
+          console.log(
+            `B2 ${stage} ${origin}.${field}: ${before[field]} -> ${observed[field]}`,
+          );
+        }
+        for (const field of [
+          "name",
+          "full_cron",
+          "incremental_cron",
+          "timezone",
+          "source_id",
+          "local_repository_id",
+          "replica_repository_id",
+          "enabled",
+        ] as const) {
+          expect(
+            observed[field] === expected[field],
+            `${stage} ${origin}.${field}: expected ${expected[field]}, received ${observed[field]}`,
+          );
+        }
+      }
+      historyEvidence.push({ stage, postgres, api: response });
+      await Bun.write(
+        path.join(run.evidence, "B2-historical-values.json"),
+        `${JSON.stringify({ fixtureTuning, stages: historyEvidence }, null, 2)}\n`,
+      );
+    };
+    await verifyHistory("fixture-before", before);
+    const expectedHistory = { ...before, name: "f2-policy-history-renamed" };
+    for (const stage of ["name", "time", "repository"] as const) {
+      b.open(`${stack.origin}/policies/new?id=${historical.id}`);
+      b.ab("wait", "--text", "保存修改");
+      expect(
+        b.ab("get", "value", "#policy-timezone") === expectedHistory.timezone,
+        "the edit form did not preserve the IANA timezone",
+      );
+      expect(
+        b.ab("get", "value", "#full-cron") === expectedHistory.full_cron,
+        "the edit form rewrote custom full cron",
+      );
+      expect(
+        b.ab("get", "value", "#incremental-cron") ===
+          expectedHistory.incremental_cron,
+        "the edit form rewrote custom incremental cron",
+      );
+      if (stage === "name") {
+        b.fill("名称", expectedHistory.name);
+      } else if (stage === "time") {
+        expectedHistory.full_cron = "13,43 2-6 * * 1-5";
+        b.fill("全量安排", expectedHistory.full_cron);
+      } else {
+        expectedHistory.replica_repository_id = plainRepository.id;
+        b.ab("find", "role", "combobox", "click", "--name", "副本仓库（可选）");
+        b.ab("find", "role", "option", "click", "--name", "f2-plain-ftp");
+        b.record({
+          id: "U2-policy-edit-filled",
+          acceptance: "U2",
+          description:
+            "populated historical policy edit at 375, 768 and 1440 pixels",
+          screenshots: b.responsive("U2-policy-edit-filled"),
+        });
+      }
+      b.click("保存修改");
+      b.ab("wait", "--url", "**/policies/detail?id=*");
+      b.ab("wait", "--text", "未启用");
+      await verifyHistory(stage, expectedHistory);
+    }
+    expect(
+      !b.text().includes("系统管理的备份参数"),
+      "policy detail exposes engine tuning",
+    );
+    b.record({
+      id: "07b-history-keeps-tuning",
       acceptance: "B2",
       description:
-        "renaming an enabled policy through the form keeps the five server-owned tuning values, both schedules and the source",
-      screenshot: b.shot("07b-name-only-keeps-tuning"),
+        "disabled historical policy keeps five nondefault SQL fixture values after separate name/time/repository browser edits; PG/API evidence in B2-historical-values.json, including IANA timezone and custom cron",
+      screenshot: b.shot("07b-history-keeps-tuning"),
     });
 
     // --- F2-A5: role-based visibility ---

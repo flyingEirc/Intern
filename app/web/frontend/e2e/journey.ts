@@ -235,6 +235,13 @@ async function main(): Promise<void> {
     b.fill("时区", "UTC");
     b.ab("focus", '[role="switch"][aria-label="创建后立即启用"]');
     b.ab("press", "Space");
+    b.record({
+      id: "U2-policy-create-filled",
+      acceptance: "U2",
+      description:
+        "the populated policy creation form with source, local/FTP repositories, custom schedules and enabled state at 375, 768 and 1440 pixels",
+      screenshots: b.responsive("U2-policy-create-filled"),
+    });
     b.ab("focus", 'button[type="submit"]');
     b.ab("press", "Enter");
     b.ab("wait", "--url", "**/policies/detail?id=*");
@@ -251,12 +258,7 @@ async function main(): Promise<void> {
         policy.replica_repository_id === ftpId &&
         policy.full_cron === "0 3 1 1 *" &&
         policy.incremental_cron === "30 4 1 1 *" &&
-        policy.timezone === "UTC" &&
-        policy.max_chain_length === 7 &&
-        policy.parallel === 1 &&
-        policy.throttle === 0 &&
-        policy.zstd_level === 3 &&
-        policy.page_tracking === false,
+        policy.timezone === "UTC",
       `policy read back as ${JSON.stringify(policy)}`,
     );
     const policies = zListPoliciesResponse.parse(
@@ -462,6 +464,7 @@ async function main(): Promise<void> {
       ["policies", "/policies", "保护策略"],
       ["policy-new", "/policies/new", "新建策略"],
       ["policy-detail", `/policies/detail?id=${policyId}`, "调度预览"],
+      ["policy-edit", `/policies/new?id=${policyId}`, "保存修改"],
       ["runs", "/runs", "运行记录"],
       ["run-detail", `/runs/detail?id=${full.runId}`, "日志"],
       ["replicas", "/replicas", "异地副本"],

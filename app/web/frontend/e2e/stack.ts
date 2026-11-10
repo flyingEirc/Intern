@@ -211,6 +211,8 @@ export type Stack = {
    * beyond what the server printed.
    */
   mysqlQuery(sql: string): Promise<string>;
+  /** Test-only SQL on this stack's PostgreSQL database; never a product API. */
+  postgresFixtureQuery(sql: string): string;
   /**
    * Starts a new pinned mysql:8.4.11 server on one published export.
    * `exportPath` is the container path the restore API returned (`export_path`);
@@ -1330,6 +1332,24 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       exportsHostDir: exportDir,
       exportVolume,
       mysqlQuery: async (sqlText) => queryMysql(sqlText),
+      postgresFixtureQuery: (sqlText) =>
+        composeMust("query PostgreSQL test fixture", [
+          "exec",
+          "-T",
+          "postgres",
+          "psql",
+          "-X",
+          "-U",
+          "intern",
+          "-d",
+          "intern",
+          "--no-align",
+          "--tuples-only",
+          "--set",
+          "ON_ERROR_STOP=1",
+          "--command",
+          sqlText,
+        ]).stdout.trim(),
       exportEntries: () =>
         docker(
           "list the export root",
